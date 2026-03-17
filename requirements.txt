@@ -1,0 +1,4 @@
+pyTelegramBotAPI
+markovify
+GigaChat
+aiohttp

@@ -542,14 +542,17 @@ async def handle_logic(message):
         
         # Проверяем длину
         if len(answer) > 500:
-            answer = answer[:500] + " ну короче длинно получилось"
+            answer = answer[:500] + " ну короче а дальше я заебался"
         
         user_context[chat_id].append({"role": "assistant", "content": answer})
         
         print(f"✅ Ответ от {source}: {answer[:50]}...")
         
         await asyncio.sleep(0.5 + random.random() * 0.5)
-        await bot.reply_to(message, answer, parse_mode='Markdown')
+        try:
+            await bot.reply_to(message, answer, parse_mode='Markdown')
+        except:
+            await bot.reply_to(message, answer)
             
     except Exception as e:
         print(f"❌ Ошибка в handle_logic: {e}")

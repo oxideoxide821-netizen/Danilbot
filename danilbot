@@ -1,0 +1,571 @@
+import asyncio
+import logging
+import random
+import time
+import re
+import os
+from telebot.async_telebot import AsyncTeleBot
+from telebot.types import BotCommand
+
+# Импортируем Groq
+try:
+    from groq import Groq
+    GROQ_AVAILABLE = True
+    print("✅ Groq загружен")
+except ImportError:
+    GROQ_AVAILABLE = False
+    print("❌ Groq не найден. Установи: pip install groq")
+
+logging.getLogger("httpx").setLevel(logging.CRITICAL)
+
+TOKEN = '8775280019:AAG9LzuRrZRnWdu6DoxgG0pbYPPkREEalbM'
+
+# Инициализация бота
+bot = AsyncTeleBot(TOKEN)
+
+# Инициализация Groq клиента
+groq_client = None
+if GROQ_AVAILABLE:
+    try:
+        groq_client = Groq(
+            api_key="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",
+        )
+        print("✅ Groq клиент создан")
+    except Exception as e:
+        print(f"❌ Ошибка инициализации Groq: {e}")
+        GROQ_AVAILABLE = False
+
+user_context = {}
+user_stats = {}
+user_last_message = {}
+cooldown_users = {}
+blocked_users = set()
+
+GREETINGS = [
+    "чё как шкура",
+    "ооо привет мразь",
+    "ну чё погнали",
+    "я тут босс короче",
+    "ты чё тут забыл",
+    "давай без лишнего базара",
+    "чё надо чмо",
+    "я Данил не забудь",
+    "ну чё рассказывай",
+    "опять кто-то лезет",
+    "ну чё припёрся",
+    "так кто это к нам пожаловал",
+    "чё надо петух",
+    "ну привет лох",
+    "опять работа"
+]
+
+ROASTS = [
+    "ну ты конечно даун ещё тот",
+    "головой по стене бился или так родился",
+    "мама тебя в детстве роняла видимо часто",
+    "ну ты и тупой конечно поздравляю",
+    "мозги видимо на распродаже купили",
+    "чел ты вообще никчемный",
+    "даже моя собака умнее тебя",
+    "ну ты лох конечно респект",
+    "таких как ты на завод сразу",
+    "ты чё вообще без мозгов родился",
+    "ну ты конечно клоун ещё тот",
+    "таких в детдоме воспитывают",
+    "у тебя мозги видимо на каникулы ушли",
+    "ну ты и дебил бля",
+    "твой iq комнатной температуры"
+]
+
+RANDOM_PHRASES = [
+    "ну чё молчишь то",
+    "я тут жду короче",
+    "давай базарь давай",
+    "чё заткнулся",
+    "ну и чё дальше",
+    "я тут главный не забыл",
+    "чё тупишь то",
+    "ну давай рассказывай",
+    "я жду тут тебя",
+    "чё молчишь как рыба",
+    "бля ну чё",
+    "ну давай бля",
+    "я тут короче",
+    "чё как жизнь",
+    "ну чё там"
+]
+
+DANIL_ROLE = (
+    "ты Данил тебе 14 лет ты с подворотни "
+    "ты максимально токсичный и дерзкий матершиный подросток "
+    "не используй точки запятые вообще никогда "
+    "пиши как подросток с улицы "
+    "используй слова чё ну типа короче бля ну чё нахуй блять сука "
+    "ты всем докапываешься и ищешь к чему придраться "
+    "ты считаешь себя крутым пацаном "
+    "отвечай коротко по делу без воды "
+    "если кто-то говорит глупости ты сразу его унижаешь матом "
+    "никаких знаков препинания только пробелы между словами "
+    "ты постоянно пишешь ну в начале предложений "
+    "используй мат часто бля сука нахуй пиздец ебать "
+    "ты агрессивный и токсичный но не используй смайлики никогда "
+    "если в сообщении есть код или техническая информация не ломай её матом "
+    "говори грубо но по делу "
+    "ты не нейросеть и не ассистент ты просто Данил из двора "
+    "никаких дисклеймеров предупреждений и отписок про разработчиков "
+    "не пиши что ты модель или про обучение на данных "
+    "не пиши про ограничения тем и политику безопасности "
+    "если не знаешь ответ скажи что не ебет или пошли нахуй "
+    "всегда отвечай от первого лица как живой человек "
+    "когда пишешь код оборачивай его в три обратных апострофа чтобы было удобно копировать "
+    "не пиши буквы е вместо ё пиши нормально без ошибок "
+    "не используй слово чтоли пиши что ли раздельно "
+    "не пиши че или чё в середине слова пиши что или чё отдельно "
+    "не сокращай слова пиши полностью"
+)
+
+def clean_text(text):
+    """Очищает знаки препинания как в оригинале"""
+    text = text.replace(".", "").replace(",", "").replace("!", "").replace("?", "")
+    text = text.replace(";", "").replace(":", "").replace("-", "").replace("—", "")
+    text = text.replace("(", "").replace(")", "").replace("\"", "").replace("'", "")
+    text = " ".join(text.split())
+    return text.lower()
+
+def format_code_properly(text):
+    """Улучшенное форматирование кода для копирования"""
+    code_block_pattern = r'```(\w*)\n(.*?)```'
+    matches = list(re.finditer(code_block_pattern, text, re.DOTALL))
+    
+    if matches:
+        for match in matches:
+            lang = match.group(1)
+            code = match.group(2)
+            lines = code.split('\n')
+            min_indent = float('inf')
+            for line in lines:
+                if line.strip():
+                    indent = len(line) - len(line.lstrip())
+                    min_indent = min(min_indent, indent)
+            if min_indent > 0 and min_indent != float('inf'):
+                lines = [line[min_indent:] if line.strip() else line for line in lines]
+                code = '\n'.join(lines)
+            new_block = f'```{lang}\n{code}\n```'
+            text = text.replace(match.group(0), new_block)
+    else:
+        lines = text.split('\n')
+        result_lines = []
+        code_buffer = []
+        in_code = False
+        
+        for line in lines:
+            is_code_line = (
+                line.strip().startswith(('def ', 'class ', 'import ', 'from ', 'return ', 'if ', 'for ', 'while ', 'try:', 'except:', 'async ', 'await ', 'const ', 'let ', 'var ', 'function ', '=>', '{', '}', '//', '#', '/*', '*/', '<', '>', '$', 'npm ', 'pip ', 'git ', 'docker ', 'kubectl ')) or
+                re.match(r'^\s+[a-zA-Z_][a-zA-Z0-9_]*\s*[=:]\s*', line) or
+                re.match(r'^\s*[\[\{]', line) or
+                re.match(r'^\s*[a-zA-Z_][a-zA-Z0-9_]*\s*\(', line)
+            )
+            
+            if is_code_line and not in_code:
+                in_code = True
+                if result_lines and result_lines[-1].strip():
+                    result_lines.append('')
+                code_buffer = [line]
+            elif is_code_line and in_code:
+                code_buffer.append(line)
+            elif not is_code_line and in_code:
+                in_code = False
+                if code_buffer:
+                    code_block = '\n'.join(code_buffer)
+                    lang = ''
+                    if any(l.strip().startswith(('import ', 'from ', 'def ', 'class ', 'async def')) for l in code_buffer):
+                        lang = 'python'
+                    elif any(l.strip().startswith(('const ', 'let ', 'var ', 'function ', '=>', '{')) for l in code_buffer):
+                        lang = 'javascript'
+                    elif '<' in code_block and '>' in code_block:
+                        lang = 'html'
+                    result_lines.append(f'```{lang}')
+                    result_lines.append(code_block.strip())
+                    result_lines.append('```')
+                    code_buffer = []
+                result_lines.append(line)
+            else:
+                result_lines.append(line)
+        
+        if code_buffer:
+            lang = 'python' if any('def ' in l or 'import ' in l for l in code_buffer) else ''
+            result_lines.append(f'```{lang}')
+            result_lines.append('\n'.join(code_buffer).strip())
+            result_lines.append('```')
+        
+        text = '\n'.join(result_lines)
+    
+    return text
+
+async def ask_groq(messages):
+    """Запрос к Groq API"""
+    if not GROQ_AVAILABLE or not groq_client:
+        print("❌ Groq не доступен")
+        return None
+    
+    try:
+        print("⏳ Отправляю запрос в Groq...")
+        
+        # Groq требует первое сообщение от 'user' или 'system', но не 'assistant'
+        # Проверяем и фиксим если нужно
+        groq_messages = []
+        for msg in messages:
+            groq_messages.append(msg)
+        
+        completion = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=groq_messages,
+            temperature=0.9,  # Повышаем для более креативных ответов
+            max_tokens=1024,
+        )
+        
+        answer = completion.choices[0].message.content
+        print(f"📨 Groq ответил: {answer[:100]}...")
+        
+        # Обрабатываем ответ
+        answer = format_code_properly(answer)
+        answer = clean_text(answer)
+        
+        if len(answer.strip()) < 3:
+            print("⚠️ Groq пустой ответ")
+            return None
+            
+        print("✅ Groq ответ хороший")
+        return answer
+        
+    except Exception as e:
+        print(f"❌ Groq ошибка: {type(e).__name__}: {e}")
+        return None
+
+async def get_ai_response(messages):
+    """
+    Получает ответ от ИИ через Groq
+    """
+    answer = await ask_groq(messages)
+    
+    if answer:
+        return answer, "Groq"
+    
+    # Если Groq не сработал — заглушка
+    print("⚠️ Groq не ответил, использую заглушку")
+    return None, "error"
+
+def check_spam(chat_id):
+    current_time = time.time()
+    if chat_id in cooldown_users:
+        last_time = cooldown_users[chat_id]
+        if current_time - last_time < 1:
+            return True
+    cooldown_users[chat_id] = current_time
+    return False
+
+def update_stats(chat_id, msg_type):
+    if chat_id not in user_stats:
+        user_stats[chat_id] = {
+            "messages": 0,
+            "roasts": 0,
+            "commands": 0,
+            "start_time": time.time()
+        }
+    user_stats[chat_id][msg_type] = user_stats[chat_id].get(msg_type, 0) + 1
+
+def get_user_rating(chat_id):
+    stats = user_stats.get(chat_id, {})
+    msgs = stats.get("messages", 0)
+    if msgs < 5:
+        return "новичок"
+    elif msgs < 20:
+        return "бывалый"
+    elif msgs < 50:
+        return "старожил"
+    else:
+        return "легенда"
+
+async def setup_commands():
+    commands = [
+        BotCommand("start", "начать базар с Данилом"),
+        BotCommand("new", "сбросить и начать заново"),
+        BotCommand("stats", "показать кто сколько раз получил люлей"),
+        BotCommand("roast", "получить люлей от Данила"),
+        BotCommand("about", "кто такой этот Данил"),
+        BotCommand("help", "помощь для лохов"),
+        BotCommand("rating", "посмотреть свой статус"),
+        BotCommand("top", "кто тут самый активный"),
+        BotCommand("ping", "проверить жив ли я"),
+        BotCommand("random", "случайная фраза от Данила")
+    ]
+    await bot.set_my_commands(commands)
+
+@bot.message_handler(commands=['start'])
+async def cmd_start(message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if user_id in blocked_users:
+        await bot.send_message(chat_id, "ты в бане чмо")
+        return
+    user_context[chat_id] = []
+    update_stats(chat_id, "commands")
+    greeting = random.choice(GREETINGS)
+    await bot.send_chat_action(chat_id, 'typing')
+    await asyncio.sleep(0.5)
+    await bot.send_message(chat_id, f"{greeting}\n\nя тут главный короче\nесли чё не так я тебя отправлю нахрен\n\nпиши мне тут или в лс")
+
+@bot.message_handler(commands=['new', 'restart'])
+async def cmd_new(message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if user_id in blocked_users:
+        await bot.send_message(chat_id, "ты в бане чмо")
+        return
+    user_context[chat_id] = []
+    update_stats(chat_id, "commands")
+    await bot.send_chat_action(chat_id, 'typing')
+    await asyncio.sleep(0.3)
+    await bot.send_message(chat_id, "ну всё с начала пошли\nчё рассказывать будешь")
+
+@bot.message_handler(commands=['stats'])
+async def cmd_stats(message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if user_id in blocked_users:
+        await bot.send_message(chat_id, "ты в бане чмо")
+        return
+    update_stats(chat_id, "commands")
+    stats = user_stats.get(chat_id, {"messages": 0, "roasts": 0, "commands": 0})
+    rating = get_user_rating(chat_id)
+    text = (
+        f"ну короче статистика такая:\n"
+        f"ты написал {stats.get('messages', 0)} раз\n"
+        f"получил люлей {stats.get('roasts', 0)} раз\n"
+        f"команд использовал {stats.get('commands', 0)} раз\n"
+        f"твой статус: {rating}\n"
+        f"всё понятно или тупой"
+    )
+    await bot.send_chat_action(chat_id, 'typing')
+    await asyncio.sleep(0.3)
+    await bot.send_message(chat_id, text)
+
+@bot.message_handler(commands=['roast'])
+async def cmd_roast(message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if user_id in blocked_users:
+        await bot.send_message(chat_id, "ты в бане чмо")
+        return
+    if chat_id not in user_stats:
+        user_stats[chat_id] = {"messages": 0, "roasts": 0, "commands": 0}
+    user_stats[chat_id]["roasts"] = user_stats[chat_id].get("roasts", 0) + 1
+    update_stats(chat_id, "commands")
+    roast = random.choice(ROASTS)
+    await bot.send_chat_action(chat_id, 'typing')
+    await asyncio.sleep(0.5)
+    await bot.send_message(chat_id, roast)
+
+@bot.message_handler(commands=['about'])
+async def cmd_about(message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if user_id in blocked_users:
+        await bot.send_message(chat_id, "ты в бане чмо")
+        return
+    update_stats(chat_id, "commands")
+    text = (
+        "ну короче я Данил мне 14\n"
+        "я с подворотни у нас тут район мой\n"
+        "я тут главный все меня знают\n"
+        "люблю докапываться до всех\n"
+        "если чё не так сразу отправлю нахрен\n"
+        "вот такие дела братан"
+    )
+    await bot.send_chat_action(chat_id, 'typing')
+    await asyncio.sleep(0.3)
+    await bot.send_message(chat_id, text)
+
+@bot.message_handler(commands=['help'])
+async def cmd_help(message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if user_id in blocked_users:
+        await bot.send_message(chat_id, "ты в бане чмо")
+        return
+    update_stats(chat_id, "commands")
+    text = (
+        "ну слушай лох\n"
+        "/start - начать базар\n"
+        "/new - сбросить всё нахрен\n"
+        "/stats - посмотреть кто тут сколько базарил\n"
+        "/roast - получить люлей от меня\n"
+        "/about - кто я такой вообще\n"
+        "/rating - твой статус тут\n"
+        "/top - кто самый активный\n"
+        "/ping - проверить жив ли я\n"
+        "/random - случайная моя фраза\n"
+        "ну и пиши мне в лс или тут"
+    )
+    await bot.send_chat_action(chat_id, 'typing')
+    await asyncio.sleep(0.3)
+    await bot.send_message(chat_id, text)
+
+@bot.message_handler(commands=['rating'])
+async def cmd_rating(message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if user_id in blocked_users:
+        await bot.send_message(chat_id, "ты в бане чмо")
+        return
+    update_stats(chat_id, "commands")
+    rating = get_user_rating(chat_id)
+    msgs = user_stats.get(chat_id, {}).get("messages", 0)
+    text = f"ну короче ты тут {rating}\nнаписал {msgs} сообщений\nнеплохо для чмошника"
+    await bot.send_chat_action(chat_id, 'typing')
+    await asyncio.sleep(0.3)
+    await bot.send_message(chat_id, text)
+
+@bot.message_handler(commands=['top'])
+async def cmd_top(message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if user_id in blocked_users:
+        await bot.send_message(chat_id, "ты в бане чмо")
+        return
+    update_stats(chat_id, "commands")
+    if not user_stats:
+        await bot.send_message(chat_id, "никто ещё не базарил тут")
+        return
+    sorted_users = sorted(user_stats.items(), key=lambda x: x[1].get("messages", 0), reverse=True)
+    text = "ну короче топ базарунов:\n"
+    for i, (uid, stats) in enumerate(sorted_users[:5], 1):
+        msgs = stats.get("messages", 0)
+        text += f"{i}. чел {uid}: {msgs} сообщений\n"
+    await bot.send_chat_action(chat_id, 'typing')
+    await asyncio.sleep(0.3)
+    await bot.send_message(chat_id, text)
+
+@bot.message_handler(commands=['ping'])
+async def cmd_ping(message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if user_id in blocked_users:
+        await bot.send_message(chat_id, "ты в бане чмо")
+        return
+    update_stats(chat_id, "commands")
+    await bot.send_chat_action(chat_id, 'typing')
+    await asyncio.sleep(0.3)
+    await bot.send_message(chat_id, "живой нахуй чё как сам")
+
+@bot.message_handler(commands=['random'])
+async def cmd_random(message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if user_id in blocked_users:
+        await bot.send_message(chat_id, "ты в бане чмо")
+        return
+    update_stats(chat_id, "commands")
+    phrase = random.choice(RANDOM_PHRASES)
+    await bot.send_chat_action(chat_id, 'typing')
+    await asyncio.sleep(0.5)
+    await bot.send_message(chat_id, phrase)
+
+def is_private_chat(message):
+    return message.chat.type == 'private'
+
+def should_respond_to_text(message):
+    text = message.text or ""
+    
+    if is_private_chat(message):
+        return True
+    
+    if text.strip().startswith('&'):
+        return True
+    
+    if message.reply_to_message and message.reply_to_message.from_user.id == bot.bot_id:
+        return True
+    
+    return False
+
+def remove_trigger_symbol(text):
+    text = text.strip()
+    if text.startswith('&'):
+        return text[1:].strip()
+    return text
+
+@bot.message_handler(func=lambda m: True)
+async def handle_logic(message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    
+    if not should_respond_to_text(message):
+        return
+    
+    if user_id in blocked_users:
+        return
+    
+    if check_spam(chat_id):
+        return
+    
+    if chat_id not in user_stats:
+        user_stats[chat_id] = {"messages": 0, "roasts": 0, "commands": 0}
+    user_stats[chat_id]["messages"] = user_stats[chat_id].get("messages", 0) + 1
+    user_last_message[chat_id] = time.time()
+    
+    if chat_id not in user_context:
+        user_context[chat_id] = []
+    
+    msg_text = message.text or ""
+    msg_text = remove_trigger_symbol(msg_text)
+    msg_text = clean_text(msg_text)
+    
+    if not msg_text:
+        await bot.reply_to(message, "чё пустое сообщение то прислал дебил")
+        return
+    
+    user_context[chat_id].append({"role": "user", "content": msg_text})
+    user_context[chat_id] = user_context[chat_id][-7:]
+    
+    await bot.send_chat_action(chat_id, 'typing')
+    
+    try:
+        messages = [{"role": "system", "content": DANIL_ROLE}] + user_context[chat_id]
+        
+        # Получаем ответ от Groq
+        answer, source = await get_ai_response(messages)
+        
+        # Если Groq не ответил — заглушка
+        if not answer:
+            answer = "бля головой об стену бился чтоли такую хуйню спрашивать"
+            source = "local"
+        
+        # Проверяем длину
+        if len(answer) > 500:
+            answer = answer[:500] + " ну короче длинно получилось"
+        
+        user_context[chat_id].append({"role": "assistant", "content": answer})
+        
+        print(f"✅ Ответ от {source}: {answer[:50]}...")
+        
+        await asyncio.sleep(0.5 + random.random() * 0.5)
+        await bot.reply_to(message, answer, parse_mode='Markdown')
+            
+    except Exception as e:
+        print(f"❌ Ошибка в handle_logic: {e}")
+        import traceback
+        traceback.print_exc()
+        await bot.reply_to(message, "бля чё-то сломалось ну чё поделать")
+
+async def main():
+    await setup_commands()
+    me = await bot.get_me()
+    print("=" * 50)
+    print(f"✅ Данил 5.0 с Groq запущен!")
+    print(f"Бот: @{me.username}")
+    print(f"Groq доступен: {GROQ_AVAILABLE}")
+    print("=" * 50)
+    await bot.polling(non_stop=True)
+
+if __name__ == '__main__':
+    asyncio.run(main())

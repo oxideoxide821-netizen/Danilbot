@@ -557,11 +557,7 @@ async def handle_logic(message):
         # Если Groq не ответил — заглушка
         if not answer:
             answer = "бля головой об стену бился чтоли такую хуйню спрашивать"
-            source = "local"
-        
-        # Проверяем длину
-        if len(answer) > 500:
-            answer = answer[:500] + " ну короче а дальше я заебался"
+            source = "local" 
         
         user_context[chat_id].append({"role": "assistant", "content": answer})
         

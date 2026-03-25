@@ -249,7 +249,6 @@ async def ask_groq(messages):
         
         # Обрабатываем ответ
         answer = format_code_properly(answer)
-        answer = clean_text(answer)
         
         if len(answer.strip()) < 3:
             print("⚠️ Groq пустой ответ")

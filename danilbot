@@ -28,7 +28,7 @@ groq_client = None
 if GROQ_AVAILABLE:
     try:
         groq_client = Groq(
-            api_key="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",
+            api_key="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",
         )
         print("✅ Groq клиент создан")
     except Exception as e:

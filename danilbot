@@ -474,6 +474,9 @@ def should_respond_to_text(message):
     if text.strip().startswith('&'):
         return True
     
+    if message.reply_to_message and '&' in text:
+        return True
+    
     if message.reply_to_message and message.reply_to_message.from_user.id == bot.bot_id:
         return True
     
@@ -483,6 +486,8 @@ def remove_trigger_symbol(text):
     text = text.strip()
     if text.startswith('&'):
         return text[1:].strip()
+    if '&' in text:
+        return text.replace('&', '').strip()
     return text
 
 @bot.message_handler(func=lambda m: True)
@@ -508,7 +513,16 @@ async def handle_logic(message):
         user_context[chat_id] = []
     
     msg_text = message.text or ""
-    msg_text = remove_trigger_symbol(msg_text)
+    is_reply_with_trigger = message.reply_to_message and '&' in msg_text
+    
+    if is_reply_with_trigger:
+        original_text = message.reply_to_message.text or message.reply_to_message.caption or "хуйня какая-то"
+        original_text = clean_text(original_text)
+        user_comment = remove_trigger_symbol(msg_text)
+        msg_text = f"чел пишет: \"{original_text}\" - ну чё скажешь, {user_comment}" if user_comment else f"чел пишет: \"{original_text}\""
+    else:
+        msg_text = remove_trigger_symbol(msg_text)
+    
     msg_text = clean_text(msg_text)
     
     if not msg_text:
@@ -522,11 +536,8 @@ async def handle_logic(message):
     
     try:
         messages = [{"role": "system", "content": DANIL_ROLE}] + user_context[chat_id]
-        
-        # Получаем ответ от Groq
         answer, source = await get_ai_response(messages)
         
-        # Если Groq не ответил — заглушка
         if not answer:
             answer = "бля головой об стену бился чтоли такую хуйню спрашивать"
             source = "local" 

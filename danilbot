@@ -575,12 +575,10 @@ async def handle_photo(message):
         return
     
     try:
-        # Берем фото максимального размера
         photo = message.photo[-1]
         file_info = await bot.get_file(photo.file_id)
         downloaded_file = await bot.download_file(file_info.file_path)
         
-        # Конвертируем в base64
         image_base64 = base64.b64encode(downloaded_file).decode('utf-8')
         
         if chat_id not in user_context:
@@ -592,7 +590,12 @@ async def handle_photo(message):
         
         await bot.send_chat_action(chat_id, 'typing')
         
-        # Отправляем в Groq Vision
+        user_context[chat_id].append({
+            "role": "user", 
+            "content": "чел скинул фото, смотри и комментируй"
+        })
+        user_context[chat_id] = user_context[chat_id][-7:]
+        
         try:
             completion = groq_client.chat.completions.create(
                 model="llama-3.2-11b-vision-preview",
@@ -615,9 +618,14 @@ async def handle_photo(message):
         except Exception as e:
             print(f"❌ Groq Vision ошибка: {e}")
             answer = "бля глаза сломались на этой хуйне, не разгляжу"
+            source = "error"
+        else:
+            source = "Groq Vision"
         
         user_context[chat_id].append({"role": "assistant", "content": answer})
         user_context[chat_id] = user_context[chat_id][-7:]
+        
+        print(f"✅ Ответ от {source}: {answer[:50]}...")
         
         await asyncio.sleep(0.5)
         try:
@@ -627,6 +635,8 @@ async def handle_photo(message):
             
     except Exception as e:
         print(f"❌ Ошибка обработки фото: {e}")
+        import traceback
+        traceback.print_exc()
         await bot.reply_to(message, "бля фото не грузится, чё за хуйня")
 
 async def main():

@@ -1,3 +1,4 @@
+import base64
 import asyncio
 import logging
 import random
@@ -557,6 +558,76 @@ async def handle_logic(message):
         import traceback
         traceback.print_exc()
         await bot.reply_to(message, "бля чё-то сломалось ну чё поделать")
+
+@bot.message_handler(content_types=['photo'])
+async def handle_photo(message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    
+    if user_id in blocked_users:
+        return
+    
+    if check_spam(chat_id):
+        return
+    
+    if not GROQ_AVAILABLE or not groq_client:
+        await bot.reply_to(message, "бля глаза мои сломались, не вижу нихуя")
+        return
+    
+    try:
+        # Берем фото максимального размера
+        photo = message.photo[-1]
+        file_info = await bot.get_file(photo.file_id)
+        downloaded_file = await bot.download_file(file_info.file_path)
+        
+        # Конвертируем в base64
+        image_base64 = base64.b64encode(downloaded_file).decode('utf-8')
+        
+        if chat_id not in user_context:
+            user_context[chat_id] = []
+        
+        if chat_id not in user_stats:
+            user_stats[chat_id] = {"messages": 0, "roasts": 0, "commands": 0}
+        user_stats[chat_id]["messages"] = user_stats[chat_id].get("messages", 0) + 1
+        
+        await bot.send_chat_action(chat_id, 'typing')
+        
+        # Отправляем в Groq Vision
+        try:
+            completion = groq_client.chat.completions.create(
+                model="llama-3.2-11b-vision-preview",
+                messages=[
+                    {"role": "system", "content": DANIL_ROLE},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "чел скинул фото, опиши что там и скажи чё думаешь по этому поводу"},
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}}
+                        ]
+                    }
+                ],
+                temperature=0.9,
+                max_tokens=1024,
+            )
+            
+            answer = completion.choices[0].message.content
+            
+        except Exception as e:
+            print(f"❌ Groq Vision ошибка: {e}")
+            answer = "бля глаза сломались на этой хуйне, не разгляжу"
+        
+        user_context[chat_id].append({"role": "assistant", "content": answer})
+        user_context[chat_id] = user_context[chat_id][-7:]
+        
+        await asyncio.sleep(0.5)
+        try:
+            await bot.reply_to(message, answer, parse_mode='Markdown')
+        except:
+            await bot.reply_to(message, answer)
+            
+    except Exception as e:
+        print(f"❌ Ошибка обработки фото: {e}")
+        await bot.reply_to(message, "бля фото не грузится, чё за хуйня")
 
 async def main():
     await setup_commands()

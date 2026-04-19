@@ -21,15 +21,6 @@ except ImportError:
 
 logging.getLogger("httpx").setLevel(logging.CRITICAL)
 
-# Импортируем Pillow
-try:
-    from PIL import Image
-    PIL_AVAILABLE = True
-    print("✅ Pillow загружен")
-except ImportError:
-    PIL_AVAILABLE = False
-    print("❌ Pillow не найден. Установи: pip install Pillow")
-
 TOKEN = '8775280019:AAG9LzuRrZRnWdu6DoxgG0pbYPPkREEalbM'
 
 # Инициализация бота
@@ -586,82 +577,55 @@ async def handle_photo(message):
         await bot.reply_to(message, "бля глаза мои сломались, не вижу нихуя")
         return
     
-    if not PIL_AVAILABLE:
-        await bot.reply_to(message, "бля система кривая, не могу фото обработать")
-        return
-    
     try:
+        # Получаем фото
         photo = message.photo[-1]
-        file_info = await bot.get_file(photo.file_id)
-        downloaded_file = await bot.download_file(file_info.file_path)
+        file_id = photo.file_id
         
-        # Конвертируем в JPEG если нужно и уменьшаем размер
-        img = Image.open(io.BytesIO(downloaded_file))
+        # Получаем путь для URL
+        file_info = await bot.get_file(file_id)
         
-        # Конвертируем в RGB если нужно (для WebP, PNG с прозрачностью и т.д.)
-        if img.mode in ('RGBA', 'LA', 'P'):
-            background = Image.new('RGB', img.size, (255, 255, 255))
-            if img.mode == 'P':
-                img = img.convert('RGBA')
-            if img.mode in ('RGBA', 'LA'):
-                background.paste(img, mask=img.split()[-1] if img.mode in ('RGBA', 'LA') else None)
-                img = background
-            else:
-                img = img.convert('RGB')
-        elif img.mode != 'RGB':
-            img = img.convert('RGB')
+        if not file_info or not file_info.file_path:
+            await bot.reply_to(message, "бля файл не найден")
+            return
         
-        # Уменьшаем если слишком большое (Groq лимит ~20MB)
-        max_size = (1024, 1024)
-        img.thumbnail(max_size, Image.Resampling.LANCZOS)
+        # Формируем прямую ссылку на фото в Telegram
+        file_url = f"https://api.telegram.org/file/bot{TOKEN}/{file_info.file_path}"
         
-        # Сохраняем в буфер
-        buffer = io.BytesIO()
-        img.save(buffer, format='JPEG', quality=85)
-        image_data = buffer.getvalue()
-        image_base64 = base64.b64encode(image_data).decode('utf-8')
-        
-        if chat_id not in user_context:
-            user_context[chat_id] = []
-        
+        # Обновляем статистику
         if chat_id not in user_stats:
             user_stats[chat_id] = {"messages": 0, "roasts": 0, "commands": 0}
         user_stats[chat_id]["messages"] = user_stats[chat_id].get("messages", 0) + 1
         
         await bot.send_chat_action(chat_id, 'typing')
         
-        try:
-            completion = groq_client.chat.completions.create(
-                model="llama-3.2-11b-vision-instant",
-                messages=[
-                    {"role": "system", "content": DANIL_ROLE},
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": "чел скинул фото, опиши что там и скажи чё думаешь по этому поводу"},
-                            {
-                                "type": "image_url", 
-                                "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}
-                            }
-                        ]
-                    }
-                ],
-                temperature=0.9,
-                max_tokens=1024,
-            )
-            
-            answer = completion.choices[0].message.content
-            source = "Groq Vision"
-            print(f"✅ Groq Vision ответил: {answer[:100]}...")
-
-        except Exception as e:
-            error_msg = f"❌ Groq Vision ошибка: {type(e).__name__}: {str(e)[:200]}"
-            print(error_msg)
-            import traceback
-            traceback.print_exc()
-            answer = f"бля глаза сломались: {type(e).__name__}"
-            source = "error"
+        # Отправляем в Groq Vision по URL — без скачивания и Pillow!
+        completion = groq_client.chat.completions.create(
+            model="llama-3.2-11b-vision-instant",
+            messages=[
+                {"role": "system", "content": DANIL_ROLE},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "чел скинул фото, опиши что там и скажи чё думаешь по этому поводу"},
+                        {
+                            "type": "image_url", 
+                            "image_url": {"url": file_url}
+                        }
+                    ]
+                }
+            ],
+            temperature=0.9,
+            max_tokens=1024,
+        )
         
+        answer = completion.choices[0].message.content
+        source = "Groq Vision"
+        print(f"✅ Groq Vision ответил: {answer[:100]}...")
+        
+        # Сохраняем контекст
+        if chat_id not in user_context:
+            user_context[chat_id] = []
         user_context[chat_id].append({"role": "user", "content": "[фото]"})
         user_context[chat_id].append({"role": "assistant", "content": answer})
         user_context[chat_id] = user_context[chat_id][-7:]

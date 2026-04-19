@@ -28,6 +28,7 @@ try:
 except ImportError:
     PIL_AVAILABLE = False
     print("❌ Pillow не найден. Установи: pip install Pillow")
+
 TOKEN = '8775280019:AAG9LzuRrZRnWdu6DoxgG0pbYPPkREEalbM'
 
 # Инициализация бота

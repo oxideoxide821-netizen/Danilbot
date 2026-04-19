@@ -653,11 +653,14 @@ async def handle_photo(message):
             answer = completion.choices[0].message.content
             source = "Groq Vision"
             print(f"✅ Groq Vision ответил: {answer[:100]}...")
-            
-   except Exception as e:
-        error_msg = f"❌ Groq Vision ошибка: {type(e).__name__}: {str(e)[:200]}"
-        print(error_msg)
-        answer = f"бля глаза сломались: {type(e).__name__}"
+
+        except Exception as e:
+            error_msg = f"❌ Groq Vision ошибка: {type(e).__name__}: {str(e)[:200]}"
+            print(error_msg)
+            import traceback
+            traceback.print_exc()
+            answer = f"бля глаза сломались: {type(e).__name__}"
+            source = "error"
         
         user_context[chat_id].append({"role": "user", "content": "[фото]"})
         user_context[chat_id].append({"role": "assistant", "content": answer})

@@ -601,7 +601,7 @@ async def handle_photo(message):
         
         # Отправляем в Groq Vision по URL — без скачивания и Pillow!
         completion = groq_client.chat.completions.create(
-            model="llama-3.2-11b-vision-instant",
+            model="llama-3.2-11b-vision-preview",
             messages=[
                 {"role": "system", "content": DANIL_ROLE},
                 {

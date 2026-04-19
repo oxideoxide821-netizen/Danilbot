@@ -2,3 +2,4 @@ pyTelegramBotAPI
 markovify
 GigaChat
 aiohttp
+Pillow

@@ -20,7 +20,7 @@ jobs:
           
       - name: Install dependencies
         run: |
-          pip install groq pyTelegramBotAPI aiohttp
+          pip install groq pyTelegramBotAPI aiohttp Pillow
           
       - name: Run bot
         env:

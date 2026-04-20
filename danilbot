@@ -21,7 +21,7 @@ except ImportError:
 
 logging.getLogger("httpx").setLevel(logging.CRITICAL)
 
-TOKEN = '8775280019:AAG9LzuRrZRnWdu6DoxgG0pbYPPkREEalbM'
+TOKEN = os.getenv('TOKEN')
 
 # Инициализация бота
 bot = AsyncTeleBot(TOKEN)

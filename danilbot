@@ -207,7 +207,7 @@ async def ask_groq(messages):
             groq_messages.append(msg)
         
         completion = groq_client.chat.completions.create(
-            model="openai/gpt-oss-120b",
+            model="meta-llama/llama-4-scout-17b-16e-instruct",
             messages=groq_messages,
             temperature=0.9,  # Повышаем для более креативных ответов
             max_tokens=1024,

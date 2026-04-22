@@ -601,7 +601,7 @@ async def handle_photo(message):
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "Опиши что думаешь по этому поводу ТОКСИЧНО"},
+                        {"type": "text", "text": "Опиши что думаешь по этому поводу."},
                         {
                             "type": "image_url", 
                             "image_url": {"url": file_url}

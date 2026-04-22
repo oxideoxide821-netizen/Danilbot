@@ -220,7 +220,8 @@ async def ask_groq(messages):
             messages=groq_messages,
             temperature=0.9,  # Повышаем для более креативных ответов
             max_tokens=1024,
-        )
+            reasoning_format: hidden
+)
         
         answer = completion.choices[0].message.content
         print(f"📨 Groq ответил: {answer[:100]}...")

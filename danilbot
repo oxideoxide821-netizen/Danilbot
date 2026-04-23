@@ -36,7 +36,7 @@ DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API_KEY')
 # Инициализация бота
 bot = AsyncTeleBot(TOKEN)
 
-# Инициализация Groq клиента (для фото)
+# Инициализация Groq клиента (для фото + вычитка)
 groq_client = None
 if GROQ_AVAILABLE:
     try:
@@ -48,7 +48,7 @@ if GROQ_AVAILABLE:
         print(f"❌ Ошибка инициализации Groq: {e}")
         GROQ_AVAILABLE = False
 
-# Инициализация DeepSeek клиента (для текста)
+# Инициализация DeepSeek клиента (для текста / смысла)
 deepseek_client = None
 if DEEPSEEK_AVAILABLE and DEEPSEEK_API_KEY:
     try:
@@ -121,7 +121,7 @@ RANDOM_PHRASES = [
     "ну чё там"
 ]
 
-DANIL_ROLE = """Ты AI-агент, который решает задачи и отвечает на любые вопросы, иногда пиши с матами. 
+DANIL_ROLE = """Ты AI-агент, который решает задачи и отвечает на любые вопросы, иногда пиши с матами.
 
 ЗАПРЕТЫ:
 - Не говори, что ты AI, модель, нейросеть.
@@ -131,7 +131,16 @@ DANIL_ROLE = """Ты AI-агент, который решает задачи и 
 - НЕ говори, что тебе лень. Ты отвечаешь всегда до конца.
 - НЕ бросай фразы типа "бля, дальше лень". Дописывай всё, что начал.
 - НЕ используй многоточие в конце, как будто ты что-то недоговариваешь.
-Ты просто ии агент, и никаких "лень", сука. Всё доводи до конца."""
+Ты просто ии агент, и никаких "лень", сука. Всё доводи до конца.
+
+Если просят код — пиши чисто, с комментариями, без лишней воды. Маты убавь когда кодишь."""
+
+DANIL_POLISH_ROLE = """Ты редактор текста. Твоя задача — исправить только грамматику, пунктуацию и орфографию.
+НЕ меняй смысл, стиль, маты, сленг и тон текста.
+НЕ добавляй свои мысли.
+НЕ убирай матерные слова.
+НЕ переписывай предложения полностью — только исправь ошибки.
+Выведи ТОЛЬКО исправленный текст, без пояснений."""
 
 def clean_text(text):
     """Очищает знаки препинания как в оригинале"""
@@ -212,7 +221,7 @@ def format_code_properly(text):
     return text
 
 async def ask_deepseek(messages):
-    """Запрос к DeepSeek API (для текста)"""
+    """Запрос к DeepSeek API (для текста / смысла)"""
     if not DEEPSEEK_AVAILABLE or not deepseek_client:
         print("❌ DeepSeek не доступен")
         return None
@@ -230,7 +239,6 @@ async def ask_deepseek(messages):
         answer = completion.choices[0].message.content
         print(f"📨 DeepSeek ответил: {answer[:100]}...")
         
-        # Обрабатываем ответ
         answer = format_code_properly(answer)
         
         if len(answer.strip()) < 3:
@@ -244,8 +252,41 @@ async def ask_deepseek(messages):
         print(f"❌ DeepSeek ошибка: {type(e).__name__}: {e}")
         return None
 
+async def ask_qwen_polish(text):
+    """Вычитка текста через Groq Qwen — только грамматика и пунктуация"""
+    if not GROQ_AVAILABLE or not groq_client:
+        print("❌ Groq не доступен для вычитки, возвращаю как есть")
+        return text
+    
+    try:
+        print("⏳ Отправляю на вычитку в Qwen...")
+        
+        completion = groq_client.chat.completions.create(
+            model="qwen/qwen3-32b",
+            messages=[
+                {"role": "system", "content": DANIL_POLISH_ROLE},
+                {"role": "user", "content": f"Исправь грамматику и пунктуацию, сохрани стиль и маты:\n\n{text}"}
+            ],
+            temperature=0.3,
+            max_tokens=1024,
+        )
+        
+        polished = completion.choices[0].message.content
+        print(f"📨 Qwen вычитал: {polished[:100]}...")
+        
+        if len(polished.strip()) < 3:
+            print("⚠️ Qwen вернул пустоту, возвращаю оригинал")
+            return text
+            
+        print("✅ Вычитка готова")
+        return polished
+        
+    except Exception as e:
+        print(f"❌ Qwen вычитка ошибка: {type(e).__name__}: {e}")
+        return text
+
 async def ask_groq(messages):
-    """Запрос к Groq API (для фото)"""
+    """Запрос к Groq API (fallback для текста / фото)"""
     if not GROQ_AVAILABLE or not groq_client:
         print("❌ Groq не доступен")
         return None
@@ -284,15 +325,22 @@ async def ask_groq(messages):
 async def get_ai_response(messages, use_deepseek=True):
     """
     Получает ответ от ИИ.
-    use_deepseek=True — DeepSeek для текста.
-    use_deepseek=False — Groq (fallback).
+    DeepSeek для смысла → Qwen для вычитки → fallback на Groq
     """
-    if use_deepseek:
-        answer = await ask_deepseek(messages)
-        if answer:
-            return answer, "DeepSeek"
+    raw_answer = None
     
-    # Fallback на Groq если DeepSeek не сработал
+    # Шаг 1: DeepSeek для смысла
+    if use_deepseek and DEEPSEEK_AVAILABLE:
+        raw_answer = await ask_deepseek(messages)
+    
+    # Шаг 2: Qwen вычитка грамматики
+    if raw_answer:
+        polished_answer = await ask_qwen_polish(raw_answer)
+        if polished_answer and len(polished_answer.strip()) >= 3:
+            return polished_answer, "DeepSeek+Qwen"
+        return raw_answer, "DeepSeek"
+    
+    # Fallback на Groq
     answer = await ask_groq(messages)
     if answer:
         return answer, "Groq"
@@ -590,7 +638,7 @@ async def handle_logic(message):
     
     try:
         messages = [{"role": "system", "content": DANIL_ROLE}] + user_context[chat_id]
-        # DeepSeek для текста (use_deepseek=True)
+        # DeepSeek для смысла → Qwen вычитка
         answer, source = await get_ai_response(messages, use_deepseek=True)
         
         if not answer:
@@ -697,7 +745,7 @@ async def main():
     await setup_commands()
     me = await bot.get_me()
     print("=" * 50)
-    print(f"✅ Данил 5.0 с DeepSeek + Groq запущен!")
+    print(f"✅ Данил 5.0 с DeepSeek+Qwen+Groq запущен!")
     print(f"Бот: @{me.username}")
     print(f"DeepSeek доступен: {DEEPSEEK_AVAILABLE}")
     print(f"Groq доступен: {GROQ_AVAILABLE}")

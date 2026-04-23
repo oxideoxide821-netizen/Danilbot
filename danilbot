@@ -53,7 +53,7 @@ deepseek_client = None
 if DEEPSEEK_AVAILABLE and DEEPSEEK_API_KEY:
     try:
         deepseek_client = openai.AsyncOpenAI(
-            api_key=sk-5826413e0ef34f149d037295f3c6b8a7,
+            api_key="sk-5826413e0ef34f149d037295f3c6b8a7",
             base_url="https://api.deepseek.com/v1"
         )
         print("✅ DeepSeek клиент создан")

@@ -208,7 +208,7 @@ async def ask_groq(messages):
             groq_messages.append(msg)
         
         completion = groq_client.chat.completions.create(
-            model="groq/compound",
+            model="groq/compound-mini",
             messages=groq_messages,
             temperature=0.9,  # Повышаем для более креативных ответов
             max_tokens=1024,
@@ -538,7 +538,7 @@ async def handle_logic(message):
         answer, source = await get_ai_response(messages)
         
         if not answer:
-            answer = "бля головой об стену бился чтоли такую хуйню спрашивать"
+            answer = "блять, запрос ушёл. Попробуй позже.."
             source = "local" 
         
         user_context[chat_id].append({"role": "assistant", "content": answer})

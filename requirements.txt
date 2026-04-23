@@ -3,3 +3,4 @@ markovify
 GigaChat
 aiohttp
 Pillow
+openai

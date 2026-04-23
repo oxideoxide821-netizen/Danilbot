@@ -19,14 +19,24 @@ except ImportError:
     GROQ_AVAILABLE = False
     print("❌ Groq не найден. Установи: pip install groq")
 
+# Импортируем DeepSeek
+try:
+    import openai
+    DEEPSEEK_AVAILABLE = True
+    print("✅ DeepSeek загружен")
+except ImportError:
+    DEEPSEEK_AVAILABLE = False
+    print("❌ OpenAI SDK не найден. Установи: pip install openai")
+
 logging.getLogger("httpx").setLevel(logging.CRITICAL)
 
 TOKEN = os.getenv('TOKEN')
+DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API_KEY')
 
 # Инициализация бота
 bot = AsyncTeleBot(TOKEN)
 
-# Инициализация Groq клиента
+# Инициализация Groq клиента (для фото)
 groq_client = None
 if GROQ_AVAILABLE:
     try:
@@ -37,6 +47,19 @@ if GROQ_AVAILABLE:
     except Exception as e:
         print(f"❌ Ошибка инициализации Groq: {e}")
         GROQ_AVAILABLE = False
+
+# Инициализация DeepSeek клиента (для текста)
+deepseek_client = None
+if DEEPSEEK_AVAILABLE and DEEPSEEK_API_KEY:
+    try:
+        deepseek_client = openai.AsyncOpenAI(
+            api_key=sk-5826413e0ef34f149d037295f3c6b8a7,
+            base_url="https://api.deepseek.com/v1"
+        )
+        print("✅ DeepSeek клиент создан")
+    except Exception as e:
+        print(f"❌ Ошибка инициализации DeepSeek: {e}")
+        DEEPSEEK_AVAILABLE = False
 
 user_context = {}
 user_stats = {}
@@ -192,8 +215,41 @@ def format_code_properly(text):
     
     return text
 
+async def ask_deepseek(messages):
+    """Запрос к DeepSeek API (для текста)"""
+    if not DEEPSEEK_AVAILABLE or not deepseek_client:
+        print("❌ DeepSeek не доступен")
+        return None
+    
+    try:
+        print("⏳ Отправляю запрос в DeepSeek...")
+        
+        completion = await deepseek_client.chat.completions.create(
+            model="deepseek-chat",
+            messages=messages,
+            temperature=0.9,
+            max_tokens=1024,
+        )
+        
+        answer = completion.choices[0].message.content
+        print(f"📨 DeepSeek ответил: {answer[:100]}...")
+        
+        # Обрабатываем ответ
+        answer = format_code_properly(answer)
+        
+        if len(answer.strip()) < 3:
+            print("⚠️ DeepSeek пустой ответ")
+            return None
+            
+        print("✅ DeepSeek ответ хороший")
+        return answer
+        
+    except Exception as e:
+        print(f"❌ DeepSeek ошибка: {type(e).__name__}: {e}")
+        return None
+
 async def ask_groq(messages):
-    """Запрос к Groq API"""
+    """Запрос к Groq API (для фото)"""
     if not GROQ_AVAILABLE or not groq_client:
         print("❌ Groq не доступен")
         return None
@@ -201,8 +257,6 @@ async def ask_groq(messages):
     try:
         print("⏳ Отправляю запрос в Groq...")
         
-        # Groq требует первое сообщение от 'user' или 'system', но не 'assistant'
-        # Проверяем и фиксим если нужно
         groq_messages = []
         for msg in messages:
             groq_messages.append(msg)
@@ -210,15 +264,14 @@ async def ask_groq(messages):
         completion = groq_client.chat.completions.create(
             model="qwen/qwen3-32b",
             messages=groq_messages,
-            temperature=0.9,  # Повышаем для более креативных ответов
+            temperature=0.9,
             max_tokens=1024,
             reasoning_format="hidden"
-)
+        )
         
         answer = completion.choices[0].message.content
         print(f"📨 Groq ответил: {answer[:100]}...")
         
-        # Обрабатываем ответ
         answer = format_code_properly(answer)
         
         if len(answer.strip()) < 3:
@@ -232,17 +285,23 @@ async def ask_groq(messages):
         print(f"❌ Groq ошибка: {type(e).__name__}: {e}")
         return None
 
-async def get_ai_response(messages):
+async def get_ai_response(messages, use_deepseek=True):
     """
-    Получает ответ от ИИ через Groq
+    Получает ответ от ИИ.
+    use_deepseek=True — DeepSeek для текста.
+    use_deepseek=False — Groq (fallback).
     """
-    answer = await ask_groq(messages)
+    if use_deepseek:
+        answer = await ask_deepseek(messages)
+        if answer:
+            return answer, "DeepSeek"
     
+    # Fallback на Groq если DeepSeek не сработал
+    answer = await ask_groq(messages)
     if answer:
         return answer, "Groq"
     
-    # Если Groq не сработал — заглушка
-    print("⚠️ Groq не ответил, использую заглушку")
+    print("⚠️ Ни один API не ответил, использую заглушку")
     return None, "error"
 
 def check_spam(chat_id):
@@ -535,7 +594,8 @@ async def handle_logic(message):
     
     try:
         messages = [{"role": "system", "content": DANIL_ROLE}] + user_context[chat_id]
-        answer, source = await get_ai_response(messages)
+        # DeepSeek для текста (use_deepseek=True)
+        answer, source = await get_ai_response(messages, use_deepseek=True)
         
         if not answer:
             answer = "блять, запрос ушёл. Попробуй позже.."
@@ -641,8 +701,9 @@ async def main():
     await setup_commands()
     me = await bot.get_me()
     print("=" * 50)
-    print(f"✅ Данил 5.0 с Groq запущен!")
+    print(f"✅ Данил 5.0 с DeepSeek + Groq запущен!")
     print(f"Бот: @{me.username}")
+    print(f"DeepSeek доступен: {DEEPSEEK_AVAILABLE}")
     print(f"Groq доступен: {GROQ_AVAILABLE}")
     print("=" * 50)
     await bot.polling(non_stop=True)

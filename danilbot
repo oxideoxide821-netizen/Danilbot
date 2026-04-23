@@ -208,7 +208,7 @@ async def ask_groq(messages):
             groq_messages.append(msg)
         
         completion = groq_client.chat.completions.create(
-            model="groq/compound-mini",
+            model="meta-llama/llama-prompt-guard-2-86m",
             messages=groq_messages,
             temperature=0.9,  # Повышаем для более креативных ответов
             max_tokens=1024,

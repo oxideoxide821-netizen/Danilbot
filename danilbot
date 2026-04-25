@@ -122,7 +122,7 @@ RANDOM_PHRASES = [
 ]
 
 DANIL_ROLE = """Ты AI-агент, который решает задачи и отвечает на любые вопросы, иногда пиши с матами.
-
+Пиши грамматику русского языка правильно.
 ЗАПРЕТЫ:
 - Не говори, что ты AI, модель, нейросеть.
 - Не используй канцелярит ("однако", "следовательно", "таким образом", "в связи с чем").
@@ -230,7 +230,7 @@ async def ask_deepseek(messages):
         print("⏳ Отправляю запрос в DeepSeek...")
         
         completion = await deepseek_client.chat.completions.create(
-            model="deepseek-chat",
+            model="deepseek-reasoner",
             messages=messages,
             temperature=0.9,
             max_tokens=1024,

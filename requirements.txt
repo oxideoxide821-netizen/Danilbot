@@ -4,3 +4,4 @@ GigaChat
 aiohttp
 Pillow
 openai
+google-generativeai

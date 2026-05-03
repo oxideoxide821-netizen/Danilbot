@@ -595,8 +595,8 @@ async def handle_logic(message):
         answer, source = await get_ai_response(messages)
 
         if not answer:
-            answer = "блять, запрос ушёл. Попробуй позже.."
-            source = "local" 
+            answer = f"блять, Gemini сдох. Ошибка: {type(e).__name__}: {e}"
+            source = "error" 
 
         user_context[chat_id].append({"role": "assistant", "content": answer})
 

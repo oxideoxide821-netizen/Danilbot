@@ -213,6 +213,8 @@ async def ask_gemini_text(messages):
                 contents.append(msg["content"])
 
         prompt = contents[-1] if contents else "привет"
+        print(f"📝 Prompt: {prompt[:100]}...")
+        print(f"📊 Contents len: {len(contents)}")
 
         # Конфигурация с system instruction
         config = types.GenerateContentConfig(

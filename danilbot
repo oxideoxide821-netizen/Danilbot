@@ -590,29 +590,7 @@ async def handle_logic(message):
 
     await bot.send_chat_action(chat_id, 'typing')
 
-    try:
-        messages = [{"role": "system", "content": DANIL_ROLE}] + user_context[chat_id]
-        answer, source = await get_ai_response(messages)
-
-        if not answer:
-            answer = f"блять, Gemini сдох. Ошибка: {type(e).__name__}: {e}"
-            source = "error" 
-
-        user_context[chat_id].append({"role": "assistant", "content": answer})
-
-        print(f"✅ Ответ от {source}: {answer[:50]}...")
-
-        await asyncio.sleep(0.5 + random.random() * 0.5)
-        try:
-            await bot.reply_to(message, answer, parse_mode='Markdown')
-        except:
-            await bot.reply_to(message, answer)
-
-    except Exception as e:
-        print(f"❌ Ошибка в handle_logic: {e}")
-        import traceback
-        traceback.print_exc()
-        await bot.reply_to(message, "бля чё-то сломалось ну чё поделать")
+    
 
 @bot.message_handler(content_types=['photo'])
 async def handle_photo(message):
@@ -631,7 +609,29 @@ async def handle_photo(message):
 
     try:
         # Получаем фото
-        photo = message.photo[-1]
+        phottry:
+        messages = [{"role": "system", "content": DANIL_ROLE}] + user_context[chat_id]
+        answer, source = await get_ai_response(messages)
+        
+        if not answer:
+            answer = "блять, запрос ушёл. Попробуй позже.."
+            source = "local" 
+        
+        user_context[chat_id].append({"role": "assistant", "content": answer})
+        
+        print(f"✅ Ответ от {source}: {answer[:50]}...")
+        
+        await asyncio.sleep(0.5 + random.random() * 0.5)
+        try:
+            await bot.reply_to(message, answer, parse_mode='Markdown')
+        except:
+            await bot.reply_to(message, answer)
+            
+    except Exception as e:
+        error_msg = f"❌ Ошибка в handle_logic: {type(e).__name__}: {e}"
+        print(error_msg)
+        traceback.print_exc()
+        await bot.reply_to(message, f"бля чё-то сломалось: {type(e).__name__}: {e}")o = message.photo[-1]
         file_id = photo.file_id
 
         # Скачиваем файл

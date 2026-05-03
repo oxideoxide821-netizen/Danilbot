@@ -30,7 +30,12 @@ bot = AsyncTeleBot(TOKEN)
 
 # Инициализация Gemini клиента (новый SDK)
 gemini_client = None
-if GEMINI_AVAILABLE and GEMINI_API_KEY:
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+
+if not GEMINI_API_KEY:
+    print("❌ GEMINI_API_KEY не найден! Установи: export GEMINI_API_KEY='твой_ключ'")
+    GEMINI_AVAILABLE = False
+elif GEMINI_AVAILABLE:
     try:
         gemini_client = genai.Client(api_key=GEMINI_API_KEY)
         print("✅ Gemini клиент создан")

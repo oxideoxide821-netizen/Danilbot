@@ -23,7 +23,7 @@ except ImportError:
 logging.getLogger("httpx").setLevel(logging.CRITICAL)
 
 TOKEN = os.getenv('TOKEN')
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', 'AIzaSyCWGaMSSFkRROoIMk06Z77vZRCl8ZI43B4')
 
 # Инициализация бота
 bot = AsyncTeleBot(TOKEN)
@@ -32,7 +32,7 @@ bot = AsyncTeleBot(TOKEN)
 gemini_client = None
 if GEMINI_AVAILABLE and GEMINI_API_KEY:
     try:
-        gemini_client = genai.Client(api_key="AIzaSyCWGaMSSFkRROoIMk06Z77vZRCl8ZI43B4")
+        gemini_client = genai.Client(api_key=GEMINI_API_KEY)
         print("✅ Gemini клиент создан")
     except Exception as e:
         print(f"❌ Ошибка инициализации Gemini: {e}")
@@ -199,8 +199,7 @@ async def ask_gemini_text(messages):
     try:
         print("⏳ Отправляю запрос в Gemini...")
 
-        # Формируем contents — список строк для простоты
-        # System instruction передаём через config
+        # Формируем contents — последнее сообщение пользователя
         contents = []
         for msg in messages:
             if msg["role"] == "user":
@@ -208,7 +207,6 @@ async def ask_gemini_text(messages):
             elif msg["role"] == "assistant":
                 contents.append(msg["content"])
 
-        # Последнее сообщение — то, на что отвечаем
         prompt = contents[-1] if contents else "привет"
 
         # Конфигурация с system instruction
@@ -238,8 +236,10 @@ async def ask_gemini_text(messages):
         return answer
 
     except Exception as e:
-        print(f"❌ Gemini ошибка: {type(e).__name__}: {e}")
-        return None
+        error_msg = f"❌ Gemini ошибка: {type(e).__name__}: {e}"
+        print(error_msg)
+        traceback.print_exc()
+        return f"[ERROR: {type(e).__name__}: {e}]"
 
 async def ask_gemini_image(image_data, prompt="Опиши что думаешь по этому поводу. пиши с матами не агрессивно."):
     """Запрос к Google Gemini API для изображения (новый SDK, async)"""
@@ -250,7 +250,7 @@ async def ask_gemini_image(image_data, prompt="Опиши что думаешь 
     try:
         print("⏳ Отправляю фото в Gemini...")
 
-        # Создаём Part из bytes через from_bytes
+        # Создаём Part из bytes
         image_part = types.Part.from_bytes(data=image_data, mime_type="image/jpeg")
 
         # Contents: текст + изображение
@@ -264,7 +264,7 @@ async def ask_gemini_image(image_data, prompt="Опиши что думаешь 
 
         # Async запрос
         response = await gemini_client.aio.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-2.5-flash",
             contents=contents,
             config=config,
         )
@@ -280,8 +280,10 @@ async def ask_gemini_image(image_data, prompt="Опиши что думаешь 
         return answer
 
     except Exception as e:
-        print(f"❌ Gemini Vision ошибка: {type(e).__name__}: {e}")
-        return None
+        error_msg = f"❌ Gemini Vision ошибка: {type(e).__name__}: {e}"
+        print(error_msg)
+        traceback.print_exc()
+        return f"[ERROR: {type(e).__name__}: {e}]"
 
 async def get_ai_response(messages, image_data=None):
     """
@@ -299,7 +301,7 @@ async def get_ai_response(messages, image_data=None):
         if answer:
             return answer, "Gemini"
 
-    print("⚠️ Gemini не ответил, использую заглушку")
+    print("⚠️ Gemini не ответил")
     return None, "error"
 
 def check_spam(chat_id):
@@ -590,7 +592,29 @@ async def handle_logic(message):
 
     await bot.send_chat_action(chat_id, 'typing')
 
-    
+    try:
+        messages = [{"role": "system", "content": DANIL_ROLE}] + user_context[chat_id]
+        answer, source = await get_ai_response(messages)
+
+        if not answer:
+            answer = "блять, Gemini молчит. Попробуй позже.."
+            source = "local" 
+
+        user_context[chat_id].append({"role": "assistant", "content": answer})
+
+        print(f"✅ Ответ от {source}: {answer[:50]}...")
+
+        await asyncio.sleep(0.5 + random.random() * 0.5)
+        try:
+            await bot.reply_to(message, answer, parse_mode='Markdown')
+        except:
+            await bot.reply_to(message, answer)
+
+    except Exception as e:
+        error_msg = f"❌ Ошибка в handle_logic: {type(e).__name__}: {e}"
+        print(error_msg)
+        traceback.print_exc()
+        await bot.reply_to(message, f"бля чё-то сломалось: {type(e).__name__}: {e}")
 
 @bot.message_handler(content_types=['photo'])
 async def handle_photo(message):
@@ -609,29 +633,7 @@ async def handle_photo(message):
 
     try:
         # Получаем фото
-        phottry:
-        messages = [{"role": "system", "content": DANIL_ROLE}] + user_context[chat_id]
-        answer, source = await get_ai_response(messages)
-        
-        if not answer:
-            answer = "блять, запрос ушёл. Попробуй позже.."
-            source = "local" 
-        
-        user_context[chat_id].append({"role": "assistant", "content": answer})
-        
-        print(f"✅ Ответ от {source}: {answer[:50]}...")
-        
-        await asyncio.sleep(0.5 + random.random() * 0.5)
-        try:
-            await bot.reply_to(message, answer, parse_mode='Markdown')
-        except:
-            await bot.reply_to(message, answer)
-            
-    except Exception as e:
-        error_msg = f"❌ Ошибка в handle_logic: {type(e).__name__}: {e}"
-        print(error_msg)
-        traceback.print_exc()
-        await bot.reply_to(message, f"бля чё-то сломалось: {type(e).__name__}: {e}")o = message.photo[-1]
+        photo = message.photo[-1]
         file_id = photo.file_id
 
         # Скачиваем файл
@@ -666,16 +668,16 @@ async def handle_photo(message):
             await bot.reply_to(message, answer)
 
     except Exception as e:
-        print(f"❌ Ошибка обработки фото: {e}")
-        import traceback
+        error_msg = f"❌ Ошибка обработки фото: {type(e).__name__}: {e}"
+        print(error_msg)
         traceback.print_exc()
-        await bot.reply_to(message, "бля фото не грузится, чё за хуйня")
+        await bot.reply_to(message, f"бля фото не грузится: {type(e).__name__}: {e}")
 
 async def main():
     await setup_commands()
     me = await bot.get_me()
     print("=" * 50)
-    print(f"✅ Данил 6.0 с Google GenAI запущен!")
+    print(f"✅ Данил 6.0 с Gemini 2.5 Flash запущен!")
     print(f"Бот: @{me.username}")
     print(f"Gemini доступен: {GEMINI_AVAILABLE}")
     print("=" * 50)

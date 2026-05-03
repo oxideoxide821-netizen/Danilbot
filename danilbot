@@ -32,7 +32,7 @@ bot = AsyncTeleBot(TOKEN)
 gemini_client = None
 if GEMINI_AVAILABLE and GEMINI_API_KEY:
     try:
-        gemini_client = genai.Client(api_key="AlzaSyCWGaMSSFkRROoIMk06Z77vZRCI8ZI43B4")
+        gemini_client = genai.Client(api_key="AIzaSyCWGaMSSFkRROoIMk06Z77vZRCl8ZI43B4")
         print("✅ Gemini клиент создан")
     except Exception as e:
         print(f"❌ Ошибка инициализации Gemini: {e}")

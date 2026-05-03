@@ -10,56 +10,33 @@ import io
 from telebot.async_telebot import AsyncTeleBot
 from telebot.types import BotCommand
 
-# Импортируем Groq
+# Импортируем Google Gemini
 try:
-    from groq import Groq
-    GROQ_AVAILABLE = True
-    print("✅ Groq загружен")
+    import google.generativeai as genai
+    GEMINI_AVAILABLE = True
+    print("✅ Google Gemini загружен")
 except ImportError:
-    GROQ_AVAILABLE = False
-    print("❌ Groq не найден. Установи: pip install groq")
-
-# Импортируем DeepSeek
-try:
-    import openai
-    DEEPSEEK_AVAILABLE = True
-    print("✅ DeepSeek загружен")
-except ImportError:
-    DEEPSEEK_AVAILABLE = False
-    print("❌ OpenAI SDK не найден. Установи: pip install openai")
+    GEMINI_AVAILABLE = False
+    print("❌ Google Gemini не найден. Установи: pip install google-generativeai")
 
 logging.getLogger("httpx").setLevel(logging.CRITICAL)
 
 TOKEN = os.getenv('TOKEN')
-DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API_KEY')
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
 # Инициализация бота
 bot = AsyncTeleBot(TOKEN)
 
-# Инициализация Groq клиента (для фото + вычитка)
-groq_client = None
-if GROQ_AVAILABLE:
+# Инициализация Gemini клиента
+gemini_client = None
+if GEMINI_AVAILABLE and GEMINI_API_KEY:
     try:
-        groq_client = Groq(
-            api_key="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",
-        )
-        print("✅ Groq клиент создан")
+        genai.configure(api_key="AlzaSyCWGaMSSFkRROoIMk06Z77vZRCI8ZI43B4")
+        gemini_client = genai.GenerativeModel('gemini-2.0-flash')
+        print("✅ Gemini клиент создан")
     except Exception as e:
-        print(f"❌ Ошибка инициализации Groq: {e}")
-        GROQ_AVAILABLE = False
-
-# Инициализация DeepSeek клиента (для текста / смысла)
-deepseek_client = None
-if DEEPSEEK_AVAILABLE and DEEPSEEK_API_KEY:
-    try:
-        deepseek_client = openai.AsyncOpenAI(
-            api_key="sk-5826413e0ef34f149d037295f3c6b8a7",
-            base_url="https://api.deepseek.com/v1"
-        )
-        print("✅ DeepSeek клиент создан")
-    except Exception as e:
-        print(f"❌ Ошибка инициализации DeepSeek: {e}")
-        DEEPSEEK_AVAILABLE = False
+        print(f"❌ Ошибка инициализации Gemini: {e}")
+        GEMINI_AVAILABLE = False
 
 user_context = {}
 user_stats = {}
@@ -135,13 +112,6 @@ DANIL_ROLE = """ты обычный ии, пишешь иногда с мата�
 
 Если просят код — пиши чисто, с комментариями, без лишней воды. Маты убавь когда кодишь."""
 
-DANIL_POLISH_ROLE = """Ты редактор текста. Твоя задача — исправить только грамматику, пунктуацию и орфографию.
-НЕ меняй смысл, стиль, маты, сленг и тон текста.
-НЕ добавляй свои мысли.
-НЕ убирай матерные слова.
-НЕ переписывай предложения полностью — только исправь ошибки.
-Выведи ТОЛЬКО исправленный текст, без пояснений."""
-
 def clean_text(text):
     """Очищает знаки препинания как в оригинале"""
     text = text.replace(".", "").replace(",", "").replace("!", "").replace("?", "")
@@ -154,7 +124,7 @@ def format_code_properly(text):
     """Улучшенное форматирование кода для копирования"""
     code_block_pattern = r'```(\w*)\n(.*?)```'
     matches = list(re.finditer(code_block_pattern, text, re.DOTALL))
-    
+
     if matches:
         for match in matches:
             lang = match.group(1)
@@ -175,7 +145,7 @@ def format_code_properly(text):
         result_lines = []
         code_buffer = []
         in_code = False
-        
+
         for line in lines:
             is_code_line = (
                 line.strip().startswith(('def ', 'class ', 'import ', 'from ', 'return ', 'if ', 'for ', 'while ', 'try:', 'except:', 'async ', 'await ', 'const ', 'let ', 'var ', 'function ', '=>', '{', '}', '//', '#', '/*', '*/', '<', '>', '$', 'npm ', 'pip ', 'git ', 'docker ', 'kubectl ')) or
@@ -183,7 +153,7 @@ def format_code_properly(text):
                 re.match(r'^\s*[\[\{]', line) or
                 re.match(r'^\s*[a-zA-Z_][a-zA-Z0-9_]*\s*\(', line)
             )
-            
+
             if is_code_line and not in_code:
                 in_code = True
                 if result_lines and result_lines[-1].strip():
@@ -209,143 +179,122 @@ def format_code_properly(text):
                 result_lines.append(line)
             else:
                 result_lines.append(line)
-        
+
         if code_buffer:
             lang = 'python' if any('def ' in l or 'import ' in l for l in code_buffer) else ''
             result_lines.append(f'```{lang}')
             result_lines.append('\n'.join(code_buffer).strip())
             result_lines.append('```')
-        
+
         text = '\n'.join(result_lines)
-    
+
     return text
 
-async def ask_deepseek(messages):
-    """Запрос к DeepSeek API (для текста / смысла)"""
-    if not DEEPSEEK_AVAILABLE or not deepseek_client:
-        print("❌ DeepSeek не доступен")
-        return None
-    
-    try:
-        print("⏳ Отправляю запрос в DeepSeek...")
-        
-        completion = await deepseek_client.chat.completions.create(
-            model="deepseek-chat",
-            messages=messages,
-            temperature=0.9,
-            max_tokens=1024,
-        )
-        
-        answer = completion.choices[0].message.content
-        print(f"📨 DeepSeek ответил: {answer[:100]}...")
-        
-        answer = format_code_properly(answer)
-        
-        if len(answer.strip()) < 3:
-            print("⚠️ DeepSeek пустой ответ")
-            return None
-            
-        print("✅ DeepSeek ответ хороший")
-        return answer
-        
-    except Exception as e:
-        print(f"❌ DeepSeek ошибка: {type(e).__name__}: {e}")
+async def ask_gemini_text(messages):
+    """Запрос к Google Gemini API для текста"""
+    if not GEMINI_AVAILABLE or not gemini_client:
+        print("❌ Gemini не доступен")
         return None
 
-async def ask_qwen_polish(text):
-    """Вычитка текста через Groq Qwen — только грамматика и пунктуация"""
-    if not GROQ_AVAILABLE or not groq_client:
-        print("❌ Groq не доступен для вычитки, возвращаю как есть")
-        return text
-    
     try:
-        print("⏳ Отправляю на вычитку в Qwen...")
-        
-        completion = groq_client.chat.completions.create(
-            model="qwen/qwen3-32b",
-            messages=[
-                {"role": "system", "content": DANIL_POLISH_ROLE},
-                {"role": "user", "content": f"Исправь грамматику и пунктуацию, сохрани стиль и маты:\n\n{text}"}
-            ],
-            temperature=0.3,
-            max_tokens=1024,
-        )
-        
-        polished = completion.choices[0].message.content
-        print(f"📨 Qwen вычитал: {polished[:100]}...")
-        
-        if len(polished.strip()) < 3:
-            print("⚠️ Qwen вернул пустоту, возвращаю оригинал")
-            return text
-            
-        print("✅ Вычитка готова")
-        return polished
-        
-    except Exception as e:
-        print(f"❌ Qwen вычитка ошибка: {type(e).__name__}: {e}")
-        return text
+        print("⏳ Отправляю запрос в Gemini...")
 
-async def ask_groq(messages):
-    """Запрос к Groq API (fallback для текста / фото)"""
-    if not GROQ_AVAILABLE or not groq_client:
-        print("❌ Groq не доступен")
-        return None
-    
-    try:
-        print("⏳ Отправляю запрос в Groq...")
-        
-        groq_messages = []
+        # Формируем историю для Gemini
+        contents = []
+        system_text = ""
+
         for msg in messages:
-            groq_messages.append(msg)
-        
-        completion = groq_client.chat.completions.create(
-            model="qwen/qwen3-32b",
-            messages=groq_messages,
-            temperature=0.9,
-            max_tokens=1024,
-            reasoning_format="hidden"
+            if msg["role"] == "system":
+                system_text = msg["content"]
+            elif msg["role"] == "user":
+                contents.append({"role": "user", "parts": [msg["content"]]})
+            elif msg["role"] == "assistant":
+                contents.append({"role": "model", "parts": [msg["content"]]})
+
+        # Создаём чат
+        chat = gemini_client.start_chat(history=contents[:-1] if len(contents) > 1 else [])
+
+        # Отправляем последнее сообщение
+        last_msg = contents[-1]["parts"][0] if contents else ""
+
+        response = chat.send_message(
+            f"{system_text}\n\n{last_msg}" if system_text else last_msg,
+            generation_config=genai.types.GenerationConfig(
+                temperature=0.9,
+                max_output_tokens=1024,
+            )
         )
-        
-        answer = completion.choices[0].message.content
-        print(f"📨 Groq ответил: {answer[:100]}...")
-        
+
+        answer = response.text
+        print(f"📨 Gemini ответил: {answer[:100]}...")
+
         answer = format_code_properly(answer)
-        
+
         if len(answer.strip()) < 3:
-            print("⚠️ Groq пустой ответ")
+            print("⚠️ Gemini пустой ответ")
             return None
-            
-        print("✅ Groq ответ хороший")
+
+        print("✅ Gemini ответ хороший")
         return answer
-        
+
     except Exception as e:
-        print(f"❌ Groq ошибка: {type(e).__name__}: {e}")
+        print(f"❌ Gemini ошибка: {type(e).__name__}: {e}")
         return None
 
-async def get_ai_response(messages, use_deepseek=True):
+async def ask_gemini_image(image_data, prompt="Опиши что думаешь по этому поводу. пиши с матами не агрессивно."):
+    """Запрос к Google Gemini API для изображения"""
+    if not GEMINI_AVAILABLE or not gemini_client:
+        print("❌ Gemini не доступен для фото")
+        return None
+
+    try:
+        print("⏳ Отправляю фото в Gemini...")
+
+        # image_data — это bytes изображения
+        image_parts = {
+            "mime_type": "image/jpeg",
+            "data": image_data
+        }
+
+        response = gemini_client.generate_content(
+            [DANIL_ROLE, image_parts, prompt],
+            generation_config=genai.types.GenerationConfig(
+                temperature=0.9,
+                max_output_tokens=1024,
+            )
+        )
+
+        answer = response.text
+        print(f"📨 Gemini Vision ответил: {answer[:100]}...")
+
+        if len(answer.strip()) < 3:
+            print("⚠️ Gemini Vision пустой ответ")
+            return None
+
+        print("✅ Gemini Vision ответ хороший")
+        return answer
+
+    except Exception as e:
+        print(f"❌ Gemini Vision ошибка: {type(e).__name__}: {e}")
+        return None
+
+async def get_ai_response(messages, image_data=None):
     """
     Получает ответ от ИИ.
-    DeepSeek для смысла → Qwen для вычитки → fallback на Groq
+    Gemini для текста и фото
     """
-    raw_answer = None
-    
-    # Шаг 1: DeepSeek для смысла
-    if use_deepseek and DEEPSEEK_AVAILABLE:
-        raw_answer = await ask_deepseek(messages)
-    
-    # Шаг 2: Qwen вычитка грамматики
-    if raw_answer:
-        polished_answer = await ask_qwen_polish(raw_answer)
-        if polished_answer and len(polished_answer.strip()) >= 3:
-            return polished_answer, "DeepSeek+Qwen"
-        return raw_answer, "DeepSeek"
-    
-    # Fallback на Groq
-    answer = await ask_groq(messages)
-    if answer:
-        return answer, "Groq"
-    
-    print("⚠️ Ни один API не ответил, использую заглушку")
+    if image_data:
+        # Фото через Gemini Vision
+        answer = await ask_gemini_image(image_data)
+        if answer:
+            return answer, "Gemini Vision"
+    else:
+        # Текст через Gemini
+        answer = await ask_gemini_text(messages)
+        if answer:
+            return answer, "Gemini"
+
+    print("⚠️ Gemini не ответил, использую заглушку")
     return None, "error"
 
 def check_spam(chat_id):
@@ -569,19 +518,19 @@ def is_private_chat(message):
 
 def should_respond_to_text(message):
     text = message.text or ""
-    
+
     if is_private_chat(message):
         return True
-    
+
     if text.strip().startswith('&'):
         return True
-    
+
     if message.reply_to_message and '&' in text:
         return True
-    
+
     if message.reply_to_message and message.reply_to_message.from_user.id == bot.bot_id:
         return True
-    
+
     return False
 
 def remove_trigger_symbol(text):
@@ -596,27 +545,27 @@ def remove_trigger_symbol(text):
 async def handle_logic(message):
     chat_id = message.chat.id
     user_id = message.from_user.id
-    
+
     if not should_respond_to_text(message):
         return
-    
+
     if user_id in blocked_users:
         return
-    
+
     if check_spam(chat_id):
         return
-    
+
     if chat_id not in user_stats:
         user_stats[chat_id] = {"messages": 0, "roasts": 0, "commands": 0}
     user_stats[chat_id]["messages"] = user_stats[chat_id].get("messages", 0) + 1
     user_last_message[chat_id] = time.time()
-    
+
     if chat_id not in user_context:
         user_context[chat_id] = []
-    
+
     msg_text = message.text or ""
     is_reply_with_trigger = message.reply_to_message and '&' in msg_text
-    
+
     if is_reply_with_trigger:
         original_text = message.reply_to_message.text or message.reply_to_message.caption or "хуйня какая-то"
         original_text = clean_text(original_text)
@@ -624,37 +573,36 @@ async def handle_logic(message):
         msg_text = f"чел пишет: \"{original_text}\" - ну чё скажешь, {user_comment}" if user_comment else f"чел пишет: \"{original_text}\""
     else:
         msg_text = remove_trigger_symbol(msg_text)
-    
+
     msg_text = clean_text(msg_text)
-    
+
     if not msg_text:
         await bot.reply_to(message, "чё пустое сообщение то прислал дебил")
         return
-    
+
     user_context[chat_id].append({"role": "user", "content": msg_text})
     user_context[chat_id] = user_context[chat_id][-7:]
-    
+
     await bot.send_chat_action(chat_id, 'typing')
-    
+
     try:
         messages = [{"role": "system", "content": DANIL_ROLE}] + user_context[chat_id]
-        # DeepSeek для смысла → Qwen вычитка
-        answer, source = await get_ai_response(messages, use_deepseek=True)
-        
+        answer, source = await get_ai_response(messages)
+
         if not answer:
             answer = "блять, запрос ушёл. Попробуй позже.."
             source = "local" 
-        
+
         user_context[chat_id].append({"role": "assistant", "content": answer})
-        
+
         print(f"✅ Ответ от {source}: {answer[:50]}...")
-        
+
         await asyncio.sleep(0.5 + random.random() * 0.5)
         try:
             await bot.reply_to(message, answer, parse_mode='Markdown')
         except:
             await bot.reply_to(message, answer)
-            
+
     except Exception as e:
         print(f"❌ Ошибка в handle_logic: {e}")
         import traceback
@@ -665,76 +613,53 @@ async def handle_logic(message):
 async def handle_photo(message):
     chat_id = message.chat.id
     user_id = message.from_user.id
-    
+
     if user_id in blocked_users:
         return
-    
+
     if check_spam(chat_id):
         return
-    
-    if not GROQ_AVAILABLE or not groq_client:
+
+    if not GEMINI_AVAILABLE or not gemini_client:
         await bot.reply_to(message, "бля глаза мои сломались, не вижу нихуя")
         return
-    
+
     try:
         # Получаем фото
         photo = message.photo[-1]
         file_id = photo.file_id
-        
-        # Получаем путь для URL
+
+        # Скачиваем файл
         file_info = await bot.get_file(file_id)
-        
-        if not file_info or not file_info.file_path:
-            await bot.reply_to(message, "бля файл не найден")
-            return
-        
-        # Формируем прямую ссылку на фото в Telegram
-        file_url = f"https://api.telegram.org/file/bot{TOKEN}/{file_info.file_path}"
-        
+        downloaded_file = await bot.download_file(file_info.file_path)
+
         # Обновляем статистику
         if chat_id not in user_stats:
             user_stats[chat_id] = {"messages": 0, "roasts": 0, "commands": 0}
         user_stats[chat_id]["messages"] = user_stats[chat_id].get("messages", 0) + 1
-        
+
         await bot.send_chat_action(chat_id, 'typing')
-        
-        # Отправляем в Groq Vision по URL — без скачивания и Pillow!
-        completion = groq_client.chat.completions.create(
-            model="meta-llama/llama-4-scout-17b-16e-instruct",
-            messages=[
-                {"role": "system", "content": DANIL_ROLE},
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "Опиши что думаешь по этому поводу. пиши с матами не агрессивно."},
-                        {
-                            "type": "image_url", 
-                            "image_url": {"url": file_url}
-                        }
-                    ]
-                }
-            ],
-            temperature=0.9,
-            max_tokens=1024,
-        )
-        
-        answer = completion.choices[0].message.content
-        source = "Groq Vision"
-        print(f"✅ Groq Vision ответил: {answer[:100]}...")
-        
+
+        # Отправляем в Gemini Vision
+        answer, source = await get_ai_response(None, image_data=downloaded_file)
+
+        if not answer:
+            answer = "бля фото не грузится, чё за хуйня"
+            source = "local"
+
         # Сохраняем контекст
         if chat_id not in user_context:
             user_context[chat_id] = []
         user_context[chat_id].append({"role": "user", "content": "[фото]"})
         user_context[chat_id].append({"role": "assistant", "content": answer})
         user_context[chat_id] = user_context[chat_id][-7:]
-        
+
         await asyncio.sleep(0.5)
         try:
             await bot.reply_to(message, answer, parse_mode='Markdown')
         except:
             await bot.reply_to(message, answer)
-            
+
     except Exception as e:
         print(f"❌ Ошибка обработки фото: {e}")
         import traceback
@@ -745,10 +670,9 @@ async def main():
     await setup_commands()
     me = await bot.get_me()
     print("=" * 50)
-    print(f"✅ Данил 5.0 с DeepSeek+Qwen+Groq запущен!")
+    print(f"✅ Данил 6.0 с Google Gemini запущен!")
     print(f"Бот: @{me.username}")
-    print(f"DeepSeek доступен: {DEEPSEEK_AVAILABLE}")
-    print(f"Groq доступен: {GROQ_AVAILABLE}")
+    print(f"Gemini доступен: {GEMINI_AVAILABLE}")
     print("=" * 50)
     await bot.polling(non_stop=True)
 

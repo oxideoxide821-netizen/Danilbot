@@ -10,38 +10,32 @@ import io
 from telebot.async_telebot import AsyncTeleBot
 from telebot.types import BotCommand
 
-# Импортируем Google GenAI (новый SDK)
+# Импортируем Groq
 try:
-    from google import genai
-    from google.genai import types
-    GEMINI_AVAILABLE = True
-    print("✅ Google GenAI загружен")
+    from groq import Groq
+    GROQ_AVAILABLE = True
+    print("✅ Groq загружен")
 except ImportError:
-    GEMINI_AVAILABLE = False
-    print("❌ Google GenAI не найден. Установи: pip install google-genai")
+    GROQ_AVAILABLE = False
+    print("❌ Groq не найден. Установи: pip install groq")
 
 logging.getLogger("httpx").setLevel(logging.CRITICAL)
 
 TOKEN = os.getenv('TOKEN')
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', 'AIzaSyCWGaMSSFkRROoIMk06Z77vZRCl8ZI43B4')
+GROQ_API_KEY = os.getenv('GROQ_API_KEY')
 
 # Инициализация бота
 bot = AsyncTeleBot(TOKEN)
 
-# Инициализация Gemini клиента (новый SDK)
-gemini_client = None
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
-
-if not GEMINI_API_KEY:
-    print("❌ GEMINI_API_KEY не найден! Установи: export GEMINI_API_KEY='твой_ключ'")
-    GEMINI_AVAILABLE = False
-elif GEMINI_AVAILABLE:
+# Инициализация Groq клиента
+groq_client = None
+if GROQ_AVAILABLE and GROQ_API_KEY:
     try:
-        gemini_client = genai.Client(api_key=GEMINI_API_KEY)
-        print("✅ Gemini клиент создан")
+        groq_client = Groq(api_key=GROQ_API_KEY)
+        print("✅ Groq клиент создан")
     except Exception as e:
-        print(f"❌ Ошибка инициализации Gemini: {e}")
-        GEMINI_AVAILABLE = False
+        print(f"❌ Ошибка инициализации Groq: {e}")
+        GROQ_AVAILABLE = False
 
 user_context = {}
 user_stats = {}
@@ -195,120 +189,99 @@ def format_code_properly(text):
 
     return text
 
-async def ask_gemini_text(messages):
-    """Запрос к Google Gemini API для текста (новый SDK, async)"""
-    if not GEMINI_AVAILABLE or not gemini_client:
-        print("❌ Gemini не доступен")
+async def ask_groq(messages):
+    """Запрос к Groq API для текста"""
+    if not GROQ_AVAILABLE or not groq_client:
+        print("❌ Groq не доступен")
         return None
 
     try:
-        print("⏳ Отправляю запрос в Gemini...")
+        print("⏳ Отправляю запрос в Groq...")
 
-        # Формируем contents — последнее сообщение пользователя
-        contents = []
-        for msg in messages:
-            if msg["role"] == "user":
-                contents.append(msg["content"])
-            elif msg["role"] == "assistant":
-                contents.append(msg["content"])
-
-        prompt = contents[-1] if contents else "привет"
-        print(f"📝 Prompt: {prompt[:100]}...")
-        print(f"📊 Contents len: {len(contents)}")
-
-        # Конфигурация с system instruction
-        config = types.GenerateContentConfig(
+        completion = groq_client.chat.completions.create(
+            model="meta-llama/llama-4-scout-17b-16e-instruct",
+            messages=messages,
             temperature=0.9,
-            max_output_tokens=1024,
-            system_instruction=DANIL_ROLE,
+            max_tokens=1024,
         )
 
-        # Async запрос через aio
-        response = await gemini_client.aio.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt,
-            config=config,
-        )
-
-        answer = response.text
-        print(f"📨 Gemini ответил: {answer[:100]}...")
+        answer = completion.choices[0].message.content
+        print(f"📨 Groq ответил: {answer[:100]}...")
 
         answer = format_code_properly(answer)
 
         if len(answer.strip()) < 3:
-            print("⚠️ Gemini пустой ответ")
+            print("⚠️ Groq пустой ответ")
             return None
 
-        print("✅ Gemini ответ хороший")
+        print("✅ Groq ответ хороший")
         return answer
 
     except Exception as e:
-        error_msg = f"❌ Gemini ошибка: {type(e).__name__}: {e}"
+        error_msg = f"❌ Groq ошибка: {type(e).__name__}: {e}"
         print(error_msg)
         traceback.print_exc()
         return f"[ERROR: {type(e).__name__}: {e}]"
 
-async def ask_gemini_image(image_data, prompt="Опиши что думаешь по этому поводу. пиши с матами не агрессивно."):
-    """Запрос к Google Gemini API для изображения (новый SDK, async)"""
-    if not GEMINI_AVAILABLE or not gemini_client:
-        print("❌ Gemini не доступен для фото")
+async def ask_groq_vision(image_data, prompt="Опиши что думаешь по этому поводу. пиши с матами не агрессивно."):
+    """Запрос к Groq API для изображения"""
+    if not GROQ_AVAILABLE or not groq_client:
+        print("❌ Groq не доступен для фото")
         return None
 
     try:
-        print("⏳ Отправляю фото в Gemini...")
+        print("⏳ Отправляю фото в Groq Vision...")
 
-        # Создаём Part из bytes
-        image_part = types.Part.from_bytes(data=image_data, mime_type="image/jpeg")
+        # Кодируем изображение в base64
+        image_b64 = base64.b64encode(image_data).decode("utf-8")
 
-        # Contents: текст + изображение
-        contents = [prompt, image_part]
-
-        config = types.GenerateContentConfig(
+        completion = groq_client.chat.completions.create(
+            model="meta-llama/llama-4-scout-17b-16e-instruct",
+            messages=[
+                {"role": "system", "content": DANIL_ROLE},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}
+                        }
+                    ]
+                }
+            ],
             temperature=0.9,
-            max_output_tokens=1024,
-            system_instruction=DANIL_ROLE,
+            max_tokens=1024,
         )
 
-        # Async запрос
-        response = await gemini_client.aio.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=contents,
-            config=config,
-        )
-
-        answer = response.text
-        print(f"📨 Gemini Vision ответил: {answer[:100]}...")
+        answer = completion.choices[0].message.content
+        print(f"📨 Groq Vision ответил: {answer[:100]}...")
 
         if len(answer.strip()) < 3:
-            print("⚠️ Gemini Vision пустой ответ")
+            print("⚠️ Groq Vision пустой ответ")
             return None
 
-        print("✅ Gemini Vision ответ хороший")
+        print("✅ Groq Vision ответ хороший")
         return answer
 
     except Exception as e:
-        error_msg = f"❌ Gemini Vision ошибка: {type(e).__name__}: {e}"
+        error_msg = f"❌ Groq Vision ошибка: {type(e).__name__}: {e}"
         print(error_msg)
         traceback.print_exc()
         return f"[ERROR: {type(e).__name__}: {e}]"
 
 async def get_ai_response(messages, image_data=None):
-    """
-    Получает ответ от ИИ.
-    Gemini для текста и фото
-    """
+    """Получает ответ от ИИ. Groq для текста и фото."""
     if image_data:
-        # Фото через Gemini Vision
-        answer = await ask_gemini_image(image_data)
+        answer = await ask_groq_vision(image_data)
         if answer:
-            return answer, "Gemini Vision"
+            return answer, "Groq Vision"
     else:
-        # Текст через Gemini
-        answer = await ask_gemini_text(messages)
+        answer = await ask_groq(messages)
         if answer:
-            return answer, "Gemini"
+            return answer, "Groq"
 
-    print("⚠️ Gemini не ответил")
+    print("⚠️ Groq не ответил")
     return None, "error"
 
 def check_spam(chat_id):
@@ -604,7 +577,7 @@ async def handle_logic(message):
         answer, source = await get_ai_response(messages)
 
         if not answer:
-            answer = "блять, Gemini молчит. Попробуй позже.."
+            answer = "блять, Groq молчит. Попробуй позже.."
             source = "local" 
 
         user_context[chat_id].append({"role": "assistant", "content": answer})
@@ -634,34 +607,29 @@ async def handle_photo(message):
     if check_spam(chat_id):
         return
 
-    if not GEMINI_AVAILABLE or not gemini_client:
+    if not GROQ_AVAILABLE or not groq_client:
         await bot.reply_to(message, "бля глаза мои сломались, не вижу нихуя")
         return
 
     try:
-        # Получаем фото
         photo = message.photo[-1]
         file_id = photo.file_id
 
-        # Скачиваем файл
         file_info = await bot.get_file(file_id)
         downloaded_file = await bot.download_file(file_info.file_path)
 
-        # Обновляем статистику
         if chat_id not in user_stats:
             user_stats[chat_id] = {"messages": 0, "roasts": 0, "commands": 0}
         user_stats[chat_id]["messages"] = user_stats[chat_id].get("messages", 0) + 1
 
         await bot.send_chat_action(chat_id, 'typing')
 
-        # Отправляем в Gemini Vision
         answer, source = await get_ai_response(None, image_data=downloaded_file)
 
         if not answer:
             answer = "бля фото не грузится, чё за хуйня"
             source = "local"
 
-        # Сохраняем контекст
         if chat_id not in user_context:
             user_context[chat_id] = []
         user_context[chat_id].append({"role": "user", "content": "[фото]"})
@@ -684,9 +652,9 @@ async def main():
     await setup_commands()
     me = await bot.get_me()
     print("=" * 50)
-    print(f"✅ Данил 6.0 с Gemini 2.5 Flash запущен!")
+    print(f"✅ Данил 6.0 с Groq Llama-4-Scout запущен!")
     print(f"Бот: @{me.username}")
-    print(f"Gemini доступен: {GEMINI_AVAILABLE}")
+    print(f"Groq доступен: {GROQ_AVAILABLE}")
     print("=" * 50)
     await bot.polling(non_stop=True)
 

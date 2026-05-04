@@ -199,7 +199,7 @@ async def ask_groq(messages):
         print("⏳ Отправляю запрос в Groq...")
 
         completion = groq_client.chat.completions.create(
-            model="meta-llama/llama-4-scout-17b-16e-instruct",
+            model="openai/gpt-oss-120b",
             messages=messages,
             temperature=0.9,
             max_tokens=1024,

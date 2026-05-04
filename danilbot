@@ -198,9 +198,17 @@ async def ask_groq(messages):
     try:
         print("⏳ Отправляю запрос в Groq...")
 
+        # Убираем system роль — Llama 4 Scout не поддерживает её
+        groq_messages = []
+        for msg in messages:
+            if msg["role"] == "system":
+                groq_messages.append({"role": "user", "content": msg["content"]})
+            else:
+                groq_messages.append(msg)
+
         completion = groq_client.chat.completions.create(
-            model="openai/gpt-oss-120b",
-            messages=messages,
+            model="meta-llama/llama-4-scout-17b-16e-instruct",
+            messages=groq_messages,
             temperature=0.9,
             max_tokens=1024,
         )
@@ -238,7 +246,7 @@ async def ask_groq_vision(image_data, prompt="Опиши что думаешь �
         completion = groq_client.chat.completions.create(
             model="meta-llama/llama-4-scout-17b-16e-instruct",
             messages=[
-                {"role": "system", "content": DANIL_ROLE},
+                {"role": "user", "content": DANIL_ROLE},
                 {
                     "role": "user",
                     "content": [

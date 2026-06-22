@@ -5,3 +5,4 @@ aiohttp
 Pillow
 openai
 groq
+python-telegram-bot

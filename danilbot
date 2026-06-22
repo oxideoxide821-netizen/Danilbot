@@ -140,6 +140,126 @@ def parse_number(text):
     if match: return int(match.group(1))
     return None
 
+
+OWNER_ID = 5804145780  # <-- ЗАМЕНИ НА СВОЙ TELEGRAM ID!
+
+async def is_owner(user_id):
+    return user_id == OWNER_ID
+
+async def admin_give(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not await check_group(u): return
+    if not await is_owner(u.effective_user.id):
+        await u.message.reply_text("❌ Только владелец бота может использовать эту команду!")
+        return
+
+    text = u.message.text.lower().strip()
+    parts = text.split()
+
+    # Формат: выдать траву 100 @username или выдать траву 100 (ответом на сообщение)
+    if len(parts) < 3:
+        await u.message.reply_text("❌ Формат: выдать [предмет] [количество]\nПример: 'выдать траву 100' или 'выдать монеты 500'")
+        return
+
+    item = parts[1]
+    num = parse_number(text)
+    if not num or num < 1:
+        await u.message.reply_text("❌ Укажи количество! Пример: 'выдать траву 100'")
+        return
+
+    # Определяем цель
+    target = None
+    if u.message.reply_to_message:
+        target = u.message.reply_to_message.from_user
+    else:
+        # Ищем @username в тексте
+        for part in parts:
+            if part.startswith("@"):
+                # Нужно найти пользователя по username — в чате это сложно без ID
+                await u.message.reply_text("❌ Ответь на сообщение пользователя, которому хочешь выдать!")
+                return
+
+    if not target:
+        # Выдаём себе
+        target = u.effective_user
+
+    d = load()
+    ud = get_user(d, target.id, u.effective_chat.id)
+
+    item_map = {
+        "трав": "grass", "траву": "grass", "grass": "grass",
+        "табак": "tobacco", "tobacco": "tobacco",
+        "монет": "coins", "монеты": "coins", "coins": "coins",
+        "час": "clocks", "часы": "clocks", "clocks": "clocks",
+        "сигарет": "cigarettes", "сигареты": "cigarettes", "cigarettes": "cigarettes",
+        "сигар": "cigars", "сигары": "cigars", "cigars": "cigars",
+        "опыт": "xp", "xp": "xp",
+        "уровень": "lvl", "level": "lvl", "lvl": "lvl",
+    }
+
+    item_key = None
+    for k, v in item_map.items():
+        if k in item:
+            item_key = v
+            break
+
+    if not item_key:
+        await u.message.reply_text("❌ Неизвестный предмет! Доступные: траву, табак, монеты, часы, сигареты, сигары, опыт, уровень")
+        return
+
+    if item_key == "lvl":
+        ud["lvl"] = num
+        ud["xp"] = 0
+        msg = "📊 Уровень установлен!\n\n👤 " + target.first_name + "\n📊 Новый уровень: " + str(num)
+    else:
+        ud[item_key] += num
+        item_names = {"grass": "🌿 Травы", "tobacco": "📦 Табака", "coins": "💰 Монет", 
+                       "clocks": "⏱️ Часов", "cigarettes": "🚬 Сигарет", "cigars": "🚬 Сигар", "xp": "⭐ Опыта"}
+        msg = "✅ Выдано!\n\n" + item_names.get(item_key, item_key) + ": +" + str(num) + "\n👤 Получатель: " + target.first_name + "\n📦 Теперь: " + str(ud[item_key])
+
+    ud["name"] = target.username or target.first_name
+    save(d)
+    await u.message.reply_text(msg)
+
+async def admin_reset(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not await check_group(u): return
+    if not await is_owner(u.effective_user.id):
+        await u.message.reply_text("❌ Только владелец бота может использовать эту команду!")
+        return
+
+    target = None
+    if u.message.reply_to_message:
+        target = u.message.reply_to_message.from_user
+    else:
+        await u.message.reply_text("❌ Ответь на сообщение пользователя, которого хочешь сбросить!")
+        return
+
+    d = load()
+    ud = get_user(d, target.id, u.effective_chat.id)
+    ud["grass"] = 0; ud["tobacco"] = 0; ud["smoked"] = 0; ud["xp"] = 0
+    ud["lvl"] = 1; ud["coins"] = 0; ud["cigarettes"] = 0; ud["cigars"] = 0; ud["clocks"] = 0
+    ud["name"] = target.username or target.first_name
+    save(d)
+    await u.message.reply_text("🗑️ Сброс!\n\n👤 " + target.first_name + " обнулён!\n⚠️ Весь прогресс удалён!")
+
+async def admin_give_all(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not await check_group(u): return
+    if not await is_owner(u.effective_user.id):
+        await u.message.reply_text("❌ Только владелец бота может использовать эту команду!")
+        return
+
+    target = u.effective_user
+    if u.message.reply_to_message:
+        target = u.message.reply_to_message.from_user
+
+    d = load()
+    ud = get_user(d, target.id, u.effective_chat.id)
+    ud["grass"] = 9999; ud["tobacco"] = 9999; ud["coins"] = 99999
+    ud["cigarettes"] = 99; ud["cigars"] = 99; ud["clocks"] = 99
+    ud["xp"] = 0; ud["lvl"] = 10; ud["smoked"] = 9999
+    ud["name"] = target.username or target.first_name
+    save(d)
+    await u.message.reply_text("👑 ВСЁ ВЫДАНО!\n\n👤 " + target.first_name + " получил максимум всего!\n🌿 Трава: 9999\n📦 Табак: 9999\n💰 Монеты: 99999\n🚬 Сигареты: 99\n🚬 Сигары: 99\n⏱️ Часы: 99\n📊 Уровень: 10")
+
 async def check_group(u: Update):
     if u.effective_chat.type == "private":
         await u.message.reply_text("🌿 Привет! Я Травка Бот — бот для чатов!\n\nДобавь меня в группу и пиши команды там 🌿")
@@ -148,7 +268,7 @@ async def check_group(u: Update):
 
 async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u): return
-    await u.message.reply_text("🌿 Привет, " + u.effective_user.first_name + "!\n\nЯ Травка Бот! Вот команды:\n\n🌱 собрать — собрать траву\n🔨 крафт — сделать табак из травы\n🚬 курить / закурить — покурить табак\n🚬 закурить сигарету — курить сигарету (лютый эффект!)\n🚬 закурить сигару — курить сигару (мега эффект!)\n📊 профиль — статистика\n🏆 топ — рейтинг\n📦 инвентарь — твоя трава, табак, монеты, сигареты\n🎁 бонус — ежедневный бонус\n🃏 ставка — казино (ставка N травы/табака, крутится кубик!)\n💰 продать — продать траву за монеты (редкая дороже!)\n💰 продать табак — продать табак за монеты\n🛒 купить табак N — купить табак\n🛒 купить сигареты — купить сигареты\n🛒 купить сигары — купить сигары\n🎁 дать траву N — передать траву\n🎁 дать табак N — передать табак\n🏡 ферма — автосбор травы\n⏱️ часы — проверить кулдаун\n⏱️ использовать часы — сбросить кулдаун\n🤝 трейд — обменять часы\n\n👮 бан / анбан / мут / анмут — модерация")
+    await u.message.reply_text("🌿 Привет, " + u.effective_user.first_name + "!\n\nЯ Травка Бот! Вот команды:\n\n🌱 собрать — собрать траву\n🔨 крафт — сделать табак из травы\n🚬 курить / закурить — покурить табак\n🚬 закурить сигарету — курить сигарету (лютый эффект!)\n🚬 закурить сигару — курить сигару (мега эффект!)\n📊 профиль — статистика\n🏆 топ — рейтинг\n📦 инвентарь — твоя трава, табак, монеты, сигареты\n🎁 бонус — ежедневный бонус\n🃏 ставка — казино (ставка N травы/табака, крутится кубик!)\n💰 продать — продать траву за монеты (редкая дороже!)\n💰 продать табак — продать табак за монеты\n🛒 купить табак N — купить табак\n🛒 купить сигареты — купить сигареты\n🛒 купить сигары — купить сигары\n🎁 дать траву N — передать траву\n🎁 дать табак N — передать табак\n🎁 дать монеты N — передать монеты\n🏡 ферма — автосбор травы\n⏱️ часы — проверить кулдаун\n⏱️ использовать часы — сбросить кулдаун\n🤝 трейд — обменять часы\n\n👮 бан / анбан / мут / анмут — модерация")
 
 async def collect(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u): return
@@ -365,7 +485,7 @@ async def give(u: Update, c: ContextTypes.DEFAULT_TYPE):
     text = u.message.text.lower().strip()
     num = parse_number(text)
     if not num or num < 1:
-        await u.message.reply_text("❌ Укажи количество! Например: 'дать траву 5' или 'дать табак 10'")
+        await u.message.reply_text("❌ Укажи количество! Например: 'дать траву 5', 'дать табак 10', 'дать монеты 100'")
         return save(d)
     if "трав" in text or "grass" in text:
         item = "grass"; item_name = "травы"; item_emoji = "🌿"
@@ -379,15 +499,21 @@ async def give(u: Update, c: ContextTypes.DEFAULT_TYPE):
             await u.message.reply_text("😢 У тебя недостаточно табака!\n📦 У тебя: " + str(ud["tobacco"]) + " гр\n📦 Хочешь передать: " + str(num) + " гр")
             return save(d)
         ud["tobacco"] -= num
+    elif "монет" in text or "coins" in text or "money" in text:
+        item = "coins"; item_name = "монет"; item_emoji = "💰"
+        if ud["coins"] < num:
+            await u.message.reply_text("😢 У тебя недостаточно монет!\n💰 У тебя: " + str(ud["coins"]) + " монет\n💰 Хочешь передать: " + str(num) + " монет")
+            return save(d)
+        ud["coins"] -= num
     else:
-        await u.message.reply_text("❌ Что передать? Напиши 'дать траву 5' или 'дать табак 10'")
+        await u.message.reply_text("❌ Что передать? Напиши 'дать траву 5', 'дать табак 10' или 'дать монеты 100'")
         return save(d)
     target_ud = get_user(d, target.id, u.effective_chat.id)
     target_ud[item] += num
     ud["name"] = u.effective_user.username or u.effective_user.first_name
     target_ud["name"] = target.username or target.first_name
     save(d)
-    await u.message.reply_text("🎁 Передача!\n\n" + item_emoji + " " + u.effective_user.first_name + " передал " + str(num) + " гр " + item_name + " пользователю " + target.first_name + "!")
+    await u.message.reply_text("🎁 Передача!\n\n" + item_emoji + " " + u.effective_user.first_name + " передал " + str(num) + " " + item_name + " пользователю " + target.first_name + "!")
 
 async def farm(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u): return
@@ -722,6 +848,10 @@ async def text(u: Update, c: ContextTypes.DEFAULT_TYPE):
         "продам": sell, "продаю": sell, "торговать": sell, "торгую": sell,
         "продать табак": sell_tobacco, "продажа табака": sell_tobacco, "сбыть табак": sell_tobacco,
         "продам табак": sell_tobacco, "продаю табак": sell_tobacco,
+        # Админ-команды
+        "выдать": admin_give, "give": admin_give, "выдача": admin_give,
+        "сбросить": admin_reset, "reset": admin_reset, "обнулить": admin_reset, "удалить": admin_reset,
+        "выдать все": admin_give_all, "giveall": admin_give_all, "макс": admin_give_all,
 
         # Часы
         "часы": check_clock, "кулдаун": check_clock, "время": check_clock,

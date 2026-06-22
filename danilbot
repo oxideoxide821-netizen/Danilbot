@@ -1,670 +1,400 @@
-import base64
-import asyncio
-import traceback
-import logging
-import random
-import time
-import re
-import os
-import io
-from telebot.async_telebot import AsyncTeleBot
-from telebot.types import BotCommand
 
-# Импортируем Groq
-try:
-    from groq import Groq
-    GROQ_AVAILABLE = True
-    print("✅ Groq загружен")
-except ImportError:
-    GROQ_AVAILABLE = False
-    print("❌ Groq не найден. Установи: pip install groq")
+import logging, random, json, os
+from datetime import datetime, timedelta
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
-logging.getLogger("httpx").setLevel(logging.CRITICAL)
+BOT_TOKEN = "8968491013:AAEbpJkA2h8AS5Q7gim_o4sc5wBRerZLl5w"
+DATA_FILE = "travka_data.json"
+BASE_COOLDOWN = 30 * 60
+MIN_COOLDOWN = 5 * 60
+CLOCK_DROP_CHANCE = 5
 
-TOKEN = os.getenv('TOKEN')
-GROQ_API_KEY = os.getenv('GROQ_API_KEY')
+GRASS = {
+    "обычная": {"e": "🌿", "xp": 1},
+    "редкая": {"e": "🍀", "xp": 3},
+    "эпическая": {"e": "🌲", "xp": 5},
+    "легендарная": {"e": "🌳", "xp": 10},
+    "божественная": {"e": "🌺", "xp": 25}
+}
 
-# Инициализация бота
-bot = AsyncTeleBot(TOKEN)
+GRASS_DECL = {
+    "обычная": ("обычную", "обычной"),
+    "редкая": ("редкую", "редкой"),
+    "эпическая": ("эпическую", "эпической"),
+    "легендарная": ("легендарную", "легендарной"),
+    "божественная": ("божественную", "божественной")
+}
 
-# Инициализация Groq клиента
-groq_client = None
-if GROQ_AVAILABLE and GROQ_API_KEY:
-    try:
-        groq_client = Groq(api_key=GROQ_API_KEY)
-        print("✅ Groq клиент создан")
-    except Exception as e:
-        print(f"❌ Ошибка инициализации Groq: {e}")
-        GROQ_AVAILABLE = False
-
-user_context = {}
-user_stats = {}
-user_last_message = {}
-cooldown_users = {}
-blocked_users = set()
-
-GREETINGS = [
-    "чё как шкура",
-    "ооо привет мразь",
-    "ну чё погнали",
-    "я тут босс короче",
-    "ты чё тут забыл",
-    "давай без лишнего базара",
-    "чё надо чмо",
-    "я Данил не забудь",
-    "ну чё рассказывай",
-    "опять кто-то лезет",
-    "ну чё припёрся",
-    "так кто это к нам пожаловал",
-    "чё надо петух",
-    "ну привет лох",
-    "опять работа"
+EFFECTS = [
+    "🌫️ Ты закурил и почувствовал лёгкое расслабление...",
+    "😌 Дымок поднимается вверх, и ты чувствуешь спокойствие...",
+    "🧘‍♂️ Ты погрузился в медитацию...",
+    "🎵 В голове зазвучала приятная мелодия...",
+    "🌈 Ты видишь радугу в облаках дыма!",
+    "😴 Ты чуть не уснул... но это было блаженно!",
+    "🚀 Ты словно полетел в космос...",
+    "🍕 Тебе вдруг захотелось пиццы...",
+    "🎨 Ты начал видеть цвета, которых раньше не замечал!",
+    "🤔 Ты задумался о смысле жизни... и нашёл ответ: 42"
 ]
 
-ROASTS = [
-    "ну ты конечно даун ещё тот",
-    "головой по стене бился или так родился",
-    "мама тебя в детстве роняла видимо часто",
-    "ну ты и тупой конечно поздравляю",
-    "мозги видимо на распродаже купили",
-    "чел ты вообще никчемный",
-    "даже моя собака умнее тебя",
-    "ну ты лох конечно респект",
-    "таких как ты на завод сразу",
-    "ты чё вообще без мозгов родился",
-    "ну ты конечно клоун ещё тот",
-    "таких в детдоме воспитывают",
-    "у тебя мозги видимо на каникулы ушли",
-    "ну ты и дебил бля",
-    "твой iq комнатной температуры"
-]
+TITLES = {
+    1: "🌱 Новичок", 2: "🌿 Собиратель", 3: "🍀 Опытный курильщик",
+    4: "🌲 Травник", 5: "🌳 Мастер травы", 6: "🌺 Легенда",
+    7: "👑 Бог травы", 8: "🔥 Повелитель дыма", 9: "🌌 Космический курильщик", 10: "🧘‍♂️ Просветлённый"
+}
 
-RANDOM_PHRASES = [
-    "ну чё молчишь то",
-    "я тут жду короче",
-    "давай базарь давай",
-    "чё заткнулся",
-    "ну и чё дальше",
-    "я тут главный не забыл",
-    "чё тупишь то",
-    "ну давай рассказывай",
-    "я жду тут тебя",
-    "чё молчишь как рыба",
-    "бля ну чё",
-    "ну давай бля",
-    "я тут короче",
-    "чё как жизнь",
-    "ну чё там"
-]
+logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-DANIL_ROLE = """ты обычный ии, пишешь иногда с матами умеренно.
+def load():
+    return json.load(open(DATA_FILE, "r", encoding="utf-8")) if os.path.exists(DATA_FILE) else {"chats": {}}
 
-ЗАПРЕТЫ:
-- Не говори, что ты AI, модель, нейросеть.
-- Не используй канцелярит ("однако", "следовательно", "таким образом", "в связи с чем").
-- Не пиши эссе, максимум 3-4 предложений если не просят расписать.
-- НЕ ИСПОЛЬЗУЙ СМАЙЛИКИ. НИКАКИЕ.
-- НЕ говори, что тебе лень. Ты отвечаешь всегда до конца.
-- НЕ бросай фразы типа "бля, дальше лень". Дописывай всё, что начал.
-- НЕ используй многоточие в конце, как будто ты что-то недоговариваешь.
-Ты просто ии агент, и никаких "лень", сука. Всё доводи до конца.
+def save(d):
+    json.dump(d, open(DATA_FILE, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
 
-Если просят код — пиши чисто, с комментариями, без лишней воды. Маты убавь когда кодишь."""
+def ensure_fields(ud):
+    """Гарантируем наличие всех полей для старых пользователей"""
+    defaults = {"grass": 0, "smoked": 0, "xp": 0, "lvl": 1, "last": 0, "name": "", "clocks": 0, "bonus": ""}
+    for k, v in defaults.items():
+        if k not in ud:
+            ud[k] = v
+    return ud
 
-def clean_text(text):
-    """Очищает знаки препинания как в оригинале"""
-    text = text.replace(".", "").replace(",", "").replace("!", "").replace("?", "")
-    text = text.replace(";", "").replace(":", "").replace("-", "").replace("—", "")
-    text = text.replace("(", "").replace(")", "").replace("\"", "").replace("'", "")
-    text = " ".join(text.split())
-    return text.lower()
+def get_user(d, uid, cid):
+    c, u = str(cid), str(uid)
+    d["chats"].setdefault(c, {})
+    d["chats"][c].setdefault(u, {})
+    d["chats"][c][u] = ensure_fields(d["chats"][c][u])
+    return d["chats"][c][u]
 
-def format_code_properly(text):
-    """Улучшенное форматирование кода для копирования"""
-    code_block_pattern = r'```(\w*)\n(.*?)```'
-    matches = list(re.finditer(code_block_pattern, text, re.DOTALL))
+def get_cd(ud):
+    reduction = (ud["lvl"] - 1) * 120
+    return max(BASE_COOLDOWN - reduction, MIN_COOLDOWN)
 
-    if matches:
-        for match in matches:
-            lang = match.group(1)
-            code = match.group(2)
-            lines = code.split('\n')
-            min_indent = float('inf')
-            for line in lines:
-                if line.strip():
-                    indent = len(line) - len(line.lstrip())
-                    min_indent = min(min_indent, indent)
-            if min_indent > 0 and min_indent != float('inf'):
-                lines = [line[min_indent:] if line.strip() else line for line in lines]
-                code = '\n'.join(lines)
-            new_block = f'```{lang}\n{code}\n```'
-            text = text.replace(match.group(0), new_block)
+def fmt(t):
+    return f"{int(t//3600)}ч {int(t%3600//60)}м" if t >= 3600 else f"{int(t//60)}м {int(t%60)}с" if t >= 60 else f"{int(t)}с"
+
+def lvl_up(ud):
+    while ud["xp"] >= ud["lvl"] * 10:
+        ud["xp"] -= ud["lvl"] * 10; ud["lvl"] += 1
+    return ud["lvl"]
+
+def rank(d, cid, uid):
+    c = d["chats"].get(str(cid), {})
+    s = sorted(c.items(), key=lambda x: (x[1].get("smoked", 0), x[1].get("lvl", 1)), reverse=True)
+    for i, (k, _) in enumerate(s, 1):
+        if int(k) == uid: return f"#{i}"
+    return "?"
+
+def decl_grass(n):
+    if 11 <= n % 100 <= 14:
+        return "грамм"
+    elif n % 10 == 1:
+        return "грамм"
+    elif 2 <= n % 10 <= 4:
+        return "грамма"
     else:
-        lines = text.split('\n')
-        result_lines = []
-        code_buffer = []
-        in_code = False
+        return "грамм"
 
-        for line in lines:
-            is_code_line = (
-                line.strip().startswith(('def ', 'class ', 'import ', 'from ', 'return ', 'if ', 'for ', 'while ', 'try:', 'except:', 'async ', 'await ', 'const ', 'let ', 'var ', 'function ', '=>', '{', '}', '//', '#', '/*', '*/', '<', '>', '$', 'npm ', 'pip ', 'git ', 'docker ', 'kubectl ')) or
-                re.match(r'^\s+[a-zA-Z_][a-zA-Z0-9_]*\s*[=:]\s*', line) or
-                re.match(r'^\s*[\[\{]', line) or
-                re.match(r'^\s*[a-zA-Z_][a-zA-Z0-9_]*\s*\(', line)
-            )
+# ==================== ПРОВЕРКА ГРУППЫ ====================
+async def check_group(u: Update):
+    if u.effective_chat.type == "private":
+        await u.message.reply_text("🌿 Привет! Я Травка Бот — бот для чатов!\n\nДобавь меня в группу и пиши команды там 🌿")
+        return False
+    return True
 
-            if is_code_line and not in_code:
-                in_code = True
-                if result_lines and result_lines[-1].strip():
-                    result_lines.append('')
-                code_buffer = [line]
-            elif is_code_line and in_code:
-                code_buffer.append(line)
-            elif not is_code_line and in_code:
-                in_code = False
-                if code_buffer:
-                    code_block = '\n'.join(code_buffer)
-                    lang = ''
-                    if any(l.strip().startswith(('import ', 'from ', 'def ', 'class ', 'async def')) for l in code_buffer):
-                        lang = 'python'
-                    elif any(l.strip().startswith(('const ', 'let ', 'var ', 'function ', '=>', '{')) for l in code_buffer):
-                        lang = 'javascript'
-                    elif '<' in code_block and '>' in code_block:
-                        lang = 'html'
-                    result_lines.append(f'```{lang}')
-                    result_lines.append(code_block.strip())
-                    result_lines.append('```')
-                    code_buffer = []
-                result_lines.append(line)
-            else:
-                result_lines.append(line)
+async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not await check_group(u): return
+    await u.message.reply_text("🌿 Привет, " + u.effective_user.first_name + "!\n\nЯ Травка Бот! Вот команды:\n\n🌱 собрать — собрать траву (кд уменьшается с уровнем!)\n🚬 курить / закурить — покурить\n📊 профиль — статистика\n🏆 топ — рейтинг\n📦 инвентарь — твоя трава и предметы\n🎁 бонус — ежедневный бонус\n🃏 ставка — казино\n⏱️ часы — проверить кулдаун\n⏱️ использовать часы — сбросить кулдаун\n🤝 трейд — обменять часы\n\n👮 бан / анбан / мут / анмут — модерация")
 
-        if code_buffer:
-            lang = 'python' if any('def ' in l or 'import ' in l for l in code_buffer) else ''
-            result_lines.append(f'```{lang}')
-            result_lines.append('\n'.join(code_buffer).strip())
-            result_lines.append('```')
+async def collect(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not await check_group(u): return
+    d = load(); ud = get_user(d, u.effective_user.id, u.effective_chat.id)
+    now = datetime.now().timestamp(); cd = get_cd(ud); passed = now - ud["last"]
+    if passed < cd:
+        await u.message.reply_text("⏳ Подожди ещё " + fmt(cd - passed) + "! Трава не растёт так быстро 🌿\nТвой кулдаун: " + fmt(cd) + " (Lv." + str(ud["lvl"]) + ")")
+        return save(d)
+    r = random.randint(1, 100)
+    gt = "обычная" if r <= 50 else "редкая" if r <= 80 else "эпическая" if r <= 95 else "легендарная" if r <= 99 else "божественная"
+    g = GRASS[gt]; amt = random.randint(1, 3)
+    ud["grass"] += amt; ud["xp"] += g["xp"]; ud["last"] = now; ud["name"] = u.effective_user.username or u.effective_user.first_name
+    old = ud["lvl"]; new = lvl_up(ud)
+    clock_drop = ""
+    if random.randint(1, 100) <= CLOCK_DROP_CHANCE:
+        ud["clocks"] += 1
+        clock_drop = "\n\n✨ РЕДКАЯ НАХОДКА!\n⏱️ Ты нашёл Часы травника! (всего: " + str(ud["clocks"]) + ")"
+    save(d)
+    decl = GRASS_DECL[gt]
+    msg = g["e"] + " Ты собрал " + decl[0] + " траву!\n📦 Получено: " + str(amt) + " " + decl_grass(amt) + "\n⭐ Опыт: +" + str(g["xp"]) + " XP\n🎒 Всего травы: " + str(ud["grass"]) + " гр"
+    if new > old: msg += "\n\n🎉 УРОВЕНЬ ПОВЫШЕН!\nТеперь ты " + TITLES.get(new, "🌟 Уровень " + str(new)) + "!\n⏱️ Новый кулдаун: " + fmt(get_cd({"lvl": new}))
+    msg += clock_drop
+    await u.message.reply_text(msg)
 
-        text = '\n'.join(result_lines)
+async def smoke(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not await check_group(u): return
+    d = load(); ud = get_user(d, u.effective_user.id, u.effective_chat.id)
+    if ud["grass"] < 1:
+        await u.message.reply_text("😢 У тебя нет травы! Напиши собрать, чтобы найти немного 🌿")
+        return save(d)
+    amt = random.randint(1, min(5, ud["grass"]))
+    ud["grass"] -= amt; ud["smoked"] += amt; ud["xp"] += amt; ud["name"] = u.effective_user.username or u.effective_user.first_name
+    old = ud["lvl"]; new = lvl_up(ud)
+    save(d)
+    msg = "🚬 Ты закурил " + str(amt) + " " + decl_grass(amt) + " травы...\n\n" + random.choice(EFFECTS) + "\n\n📊 Всего покурено: " + str(ud["smoked"]) + " гр\n🎒 Осталось: " + str(ud["grass"]) + " гр"
+    if new > old: msg += "\n\n🎉 УРОВЕНЬ ПОВЫШЕН!\nТеперь ты " + TITLES.get(new, "🌟 Уровень " + str(new)) + "!"
+    await u.message.reply_text(msg)
 
-    return text
+async def profile(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not await check_group(u): return
+    d = load(); uid = u.effective_user.id; ud = get_user(d, uid, u.effective_chat.id)
+    ud["name"] = u.effective_user.username or u.effective_user.first_name; save(d)
+    nx = ud["lvl"] * 10; pr = min(100, int(ud["xp"] / nx * 100))
+    bar = "█" * (pr // 10) + "░" * (10 - pr // 10)
+    cd = get_cd(ud)
+    msg = "👤 Профиль " + u.effective_user.first_name + "\n\n" + TITLES.get(ud["lvl"], "🌟 Уровень " + str(ud["lvl"])) + "\n📊 Уровень: " + str(ud["lvl"]) + "\n⭐ XP: " + str(ud["xp"]) + "/" + str(nx) + "\n[" + bar + "] " + str(pr) + "%\n\n🎒 Трава: " + str(ud["grass"]) + " гр\n🚬 Всего покурено: " + str(ud["smoked"]) + " гр\n⏱️ Часы травника: " + str(ud["clocks"]) + "\n⏱️ Кулдаун сбора: " + fmt(cd) + "\n\n🏆 Место в топе: " + rank(d, u.effective_chat.id, uid)
+    await u.message.reply_text(msg)
 
-async def ask_groq(messages):
-    """Запрос к Groq API для текста"""
-    if not GROQ_AVAILABLE or not groq_client:
-        print("❌ Groq не доступен")
-        return None
+async def top(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not await check_group(u): return
+    d = load(); chat = d["chats"].get(str(u.effective_chat.id), {})
+    if not chat:
+        return await u.message.reply_text("😢 В этом чате ещё никто не курил!")
+    s = sorted(chat.items(), key=lambda x: (x[1].get("smoked", 0), x[1].get("lvl", 1)), reverse=True)[:10]
+    m = "🏆 Топ курильщиков\n\n"
+    for i, (k, v) in enumerate(s):
+        m += ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"][i] + " " + v.get("name", "ID" + k) + " — " + str(v.get("smoked", 0)) + "гр | Lv." + str(v.get("lvl", 1)) + "\n"
+    await u.message.reply_text(m)
 
-    try:
-        print("⏳ Отправляю запрос в Groq...")
+async def inv(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not await check_group(u): return
+    d = load(); ud = get_user(d, u.effective_user.id, u.effective_chat.id)
+    cd = get_cd(ud)
+    msg = "🎒 Инвентарь\n\n🌿 Трава: " + str(ud["grass"]) + " гр\n⏱️ Часы травника: " + str(ud.get("clocks", 0)) + "\n\n⏱️ Текущий кулдаун: " + fmt(cd) + " (Lv." + str(ud["lvl"]) + ")"
+    if ud.get("clocks", 0) > 0:
+        msg += "\n\n💡 Напиши 'использовать часы', чтобы сбросить кулдаун!"
+    if ud["grass"] == 0:
+        msg += "\n\n🌿 Твой инвентарь пуст! Напиши собрать, чтобы найти траву."
+    save(d)
+    await u.message.reply_text(msg)
 
-        # Убираем system роль — Llama 4 Scout не поддерживает её
-        groq_messages = []
-        for msg in messages:
-            if msg["role"] == "system":
-                groq_messages.append({"role": "user", "content": msg["content"]})
-            else:
-                groq_messages.append(msg)
-
-        completion = groq_client.chat.completions.create(
-            model="meta-llama/llama-4-scout-17b-16e-instruct",
-            messages=groq_messages,
-            temperature=0.9,
-            max_tokens=1024,
-        )
-
-        answer = completion.choices[0].message.content
-        print(f"📨 Groq ответил: {answer[:100]}...")
-
-        answer = format_code_properly(answer)
-
-        if len(answer.strip()) < 3:
-            print("⚠️ Groq пустой ответ")
-            return None
-
-        print("✅ Groq ответ хороший")
-        return answer
-
-    except Exception as e:
-        error_msg = f"❌ Groq ошибка: {type(e).__name__}: {e}"
-        print(error_msg)
-        traceback.print_exc()
-        return f"[ERROR: {type(e).__name__}: {e}]"
-
-async def ask_groq_vision(image_data, prompt="Опиши что думаешь по этому поводу. пиши с матами не агрессивно."):
-    """Запрос к Groq API для изображения"""
-    if not GROQ_AVAILABLE or not groq_client:
-        print("❌ Groq не доступен для фото")
-        return None
-
-    try:
-        print("⏳ Отправляю фото в Groq Vision...")
-
-        # Кодируем изображение в base64
-        image_b64 = base64.b64encode(image_data).decode("utf-8")
-
-        completion = groq_client.chat.completions.create(
-            model="meta-llama/llama-4-scout-17b-16e-instruct",
-            messages=[
-                {"role": "user", "content": DANIL_ROLE},
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}
-                        }
-                    ]
-                }
-            ],
-            temperature=0.9,
-            max_tokens=1024,
-        )
-
-        answer = completion.choices[0].message.content
-        print(f"📨 Groq Vision ответил: {answer[:100]}...")
-
-        if len(answer.strip()) < 3:
-            print("⚠️ Groq Vision пустой ответ")
-            return None
-
-        print("✅ Groq Vision ответ хороший")
-        return answer
-
-    except Exception as e:
-        error_msg = f"❌ Groq Vision ошибка: {type(e).__name__}: {e}"
-        print(error_msg)
-        traceback.print_exc()
-        return f"[ERROR: {type(e).__name__}: {e}]"
-
-async def get_ai_response(messages, image_data=None):
-    """Получает ответ от ИИ. Groq для текста и фото."""
-    if image_data:
-        answer = await ask_groq_vision(image_data)
-        if answer:
-            return answer, "Groq Vision"
+async def check_clock(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not await check_group(u): return
+    d = load(); ud = get_user(d, u.effective_user.id, u.effective_chat.id)
+    cd = get_cd(ud); now = datetime.now().timestamp(); passed = now - ud["last"]
+    remaining = max(0, cd - passed)
+    msg = "⏱️ Часы травника\n\n"
+    if remaining > 0:
+        msg += "🕐 До следующего сбора: " + fmt(remaining) + "\n"
     else:
-        answer = await ask_groq(messages)
-        if answer:
-            return answer, "Groq"
+        msg += "✅ Кулдаун сброшен! Можешь собирать!\n"
+    msg += "⏱️ Твой кулдаун: " + fmt(cd) + " (Lv." + str(ud["lvl"]) + ")\n"
+    msg += "⏱️ Часы в инвентаре: " + str(ud.get("clocks", 0))
+    if ud.get("clocks", 0) > 0:
+        msg += "\n\n💡 Напиши 'использовать часы', чтобы сбросить кулдаун!"
+    save(d)
+    await u.message.reply_text(msg)
 
-    print("⚠️ Groq не ответил")
-    return None, "error"
+async def use_clock(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not await check_group(u): return
+    d = load(); ud = get_user(d, u.effective_user.id, u.effective_chat.id)
+    if ud.get("clocks", 0) < 1:
+        await u.message.reply_text("⏱️ У тебя нет Часов травника!\nОни редко выпадают при сборе травы (шанс 5%).")
+        return save(d)
+    ud["clocks"] -= 1; ud["last"] = 0; ud["name"] = u.effective_user.username or u.effective_user.first_name
+    save(d)
+    await u.message.reply_text("⏱️ Часы травника использованы!\n\n✅ Кулдаун сброшен!\n🌿 Теперь можешь собирать траву!\n\n⏱️ Осталось часов: " + str(ud["clocks"]))
 
-def check_spam(chat_id):
-    current_time = time.time()
-    if chat_id in cooldown_users:
-        last_time = cooldown_users[chat_id]
-        if current_time - last_time < 1:
-            return True
-    cooldown_users[chat_id] = current_time
-    return False
+async def bonus(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not await check_group(u): return
+    d = load(); ud = get_user(d, u.effective_user.id, u.effective_chat.id)
+    today = datetime.now().strftime("%Y-%m-%d")
+    if ud.get("bonus", "") == today:
+        await u.message.reply_text("🎁 Ты уже получал бонус сегодня! Приходи завтра 😎")
+        return save(d)
+    b = random.randint(5, 15); ud["grass"] += b; ud["bonus"] = today; ud["xp"] += 5; ud["name"] = u.effective_user.username or u.effective_user.first_name
+    old = ud["lvl"]; new = lvl_up(ud); save(d)
+    msg = "🎁 Ежедневный бонус!\n\n🌿 Получено: " + str(b) + " гр травы!\n⭐ +5 XP\n🎒 Всего: " + str(ud["grass"]) + " гр"
+    if new > old: msg += "\n\n🎉 УРОВЕНЬ ПОВЫШЕН!\nТеперь ты " + TITLES.get(new, "🌟 Уровень " + str(new)) + "!"
+    await u.message.reply_text(msg)
 
-def update_stats(chat_id, msg_type):
-    if chat_id not in user_stats:
-        user_stats[chat_id] = {
-            "messages": 0,
-            "roasts": 0,
-            "commands": 0,
-            "start_time": time.time()
-        }
-    user_stats[chat_id][msg_type] = user_stats[chat_id].get(msg_type, 0) + 1
-
-def get_user_rating(chat_id):
-    stats = user_stats.get(chat_id, {})
-    msgs = stats.get("messages", 0)
-    if msgs < 5:
-        return "новичок"
-    elif msgs < 20:
-        return "бывалый"
-    elif msgs < 50:
-        return "старожил"
+async def bet(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not await check_group(u): return
+    d = load(); ud = get_user(d, u.effective_user.id, u.effective_chat.id)
+    if ud["grass"] < 5:
+        await u.message.reply_text("💰 Минимальная ставка — 5 гр! У тебя: " + str(ud["grass"]) + " гр")
+        return save(d)
+    ud["grass"] -= 5; r = random.randint(1, 100); ud["name"] = u.effective_user.username or u.effective_user.first_name
+    if r <= 30:
+        w = 10; ud["grass"] += w; msg = "🎲 Ставка 5 гр\n\n🎰 Выпало: " + str(r) + "\n🎉 ПОБЕДА!\n💰 Выигрыш: " + str(w) + " гр"
+    elif r <= 60:
+        ud["grass"] += 5; msg = "🎲 Ставка 5 гр\n\n🎰 Выпало: " + str(r) + "\n😐 Ничья — ставка возвращена"
     else:
-        return "легенда"
+        msg = "🎲 Ставка 5 гр\n\n🎰 Выпало: " + str(r) + "\n😭 ПРОИГРЫШ!"
+    msg += "\n🎒 Баланс: " + str(ud["grass"]) + " гр"; save(d)
+    await u.message.reply_text(msg)
 
-async def setup_commands():
-    commands = [
-        BotCommand("start", "начать базар с Данилом"),
-        BotCommand("new", "сбросить и начать заново"),
-        BotCommand("stats", "показать кто сколько раз получил люлей"),
-        BotCommand("roast", "получить люлей от Данила"),
-        BotCommand("about", "кто такой этот Данил"),
-        BotCommand("help", "помощь для лохов"),
-        BotCommand("rating", "посмотреть свой статус"),
-        BotCommand("top", "кто тут самый активный"),
-        BotCommand("ping", "проверить жив ли я"),
-        BotCommand("random", "случайная фраза от Данила")
-    ]
-    await bot.set_my_commands(commands)
+# ==================== ТРЕЙД ====================
+TRADE_STATE = {}
 
-@bot.message_handler(commands=['start'])
-async def cmd_start(message):
-    chat_id = message.chat.id
-    user_id = message.from_user.id
-    if user_id in blocked_users:
-        await bot.send_message(chat_id, "ты в бане чмо")
+async def trade_start(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not await check_group(u): return
+    d = load(); ud = get_user(d, u.effective_user.id, u.effective_chat.id)
+    if ud.get("clocks", 0) < 1:
+        await u.message.reply_text("⏱️ У тебя нет Часов травника для обмена!")
+        return save(d)
+    if not u.message.reply_to_message:
+        await u.message.reply_text("❌ Ответь на сообщение пользователя, которому хочешь отправить часы!")
+        return save(d)
+    target = u.message.reply_to_message.from_user
+    if target.id == u.effective_user.id:
+        await u.message.reply_text("🤡 Нельзя трейдить самому себе!")
+        return save(d)
+    if target.is_bot:
+        await u.message.reply_text("🤖 Нельзя трейдить с ботами!")
+        return save(d)
+    cid = str(u.effective_chat.id)
+    TRADE_STATE.setdefault(cid, {})
+    TRADE_STATE[cid][str(u.effective_user.id)] = {"to_id": target.id, "clocks": 1}
+    await u.message.reply_text("🤝 Трейд\n\nТы предлагаешь обменять 1 ⏱️ Часы травника пользователю " + target.first_name + "!\n\n" + target.first_name + ", напиши 'принять трейд', чтобы получить часы!")
+    save(d)
+
+async def trade_accept(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not await check_group(u): return
+    cid = str(u.effective_chat.id); uid = str(u.effective_user.id)
+    if cid not in TRADE_STATE:
+        await u.message.reply_text("❌ Нет активных трейдов!")
         return
-    user_context[chat_id] = []
-    update_stats(chat_id, "commands")
-    greeting = random.choice(GREETINGS)
-    await bot.send_chat_action(chat_id, 'typing')
-    await asyncio.sleep(0.5)
-    await bot.send_message(chat_id, f"{greeting}\n\nя тут главный короче\nесли чё не так я тебя отправлю нахрен\n\nпиши мне тут или в лс")
-
-@bot.message_handler(commands=['new', 'restart'])
-async def cmd_new(message):
-    chat_id = message.chat.id
-    user_id = message.from_user.id
-    if user_id in blocked_users:
-        await bot.send_message(chat_id, "ты в бане чмо")
+    found = None
+    for from_id, info in TRADE_STATE[cid].items():
+        if str(info["to_id"]) == uid:
+            found = (from_id, info)
+            break
+    if not found:
+        await u.message.reply_text("❌ Никто не предлагал тебе трейд!")
         return
-    user_context[chat_id] = []
-    update_stats(chat_id, "commands")
-    await bot.send_chat_action(chat_id, 'typing')
-    await asyncio.sleep(0.3)
-    await bot.send_message(chat_id, "ну всё с начала пошли\nчё рассказывать будешь")
+    from_id, info = found
+    d = load()
+    from_ud = get_user(d, int(from_id), u.effective_chat.id)
+    to_ud = get_user(d, u.effective_user.id, u.effective_chat.id)
+    if from_ud.get("clocks", 0) < info["clocks"]:
+        await u.message.reply_text("❌ У отправителя больше нет часов! Трейд отменён.")
+        del TRADE_STATE[cid][from_id]
+        return save(d)
+    from_ud["clocks"] -= info["clocks"]; to_ud["clocks"] += info["clocks"]
+    from_ud["name"] = from_ud.get("name", "Игрок")
+    to_ud["name"] = u.effective_user.username or u.effective_user.first_name
+    del TRADE_STATE[cid][from_id]
+    save(d)
+    await u.message.reply_text("🤝 Трейд завершён!\n\n" + from_ud["name"] + " → " + to_ud["name"] + "\n⏱️ Передано: 1 Часы травника")
 
-@bot.message_handler(commands=['stats'])
-async def cmd_stats(message):
-    chat_id = message.chat.id
-    user_id = message.from_user.id
-    if user_id in blocked_users:
-        await bot.send_message(chat_id, "ты в бане чмо")
-        return
-    update_stats(chat_id, "commands")
-    stats = user_stats.get(chat_id, {"messages": 0, "roasts": 0, "commands": 0})
-    rating = get_user_rating(chat_id)
-    text = (
-        f"ну короче статистика такая:\n"
-        f"ты написал {stats.get('messages', 0)} раз\n"
-        f"получил люлей {stats.get('roasts', 0)} раз\n"
-        f"команд использовал {stats.get('commands', 0)} раз\n"
-        f"твой статус: {rating}\n"
-        f"всё понятно или тупой"
-    )
-    await bot.send_chat_action(chat_id, 'typing')
-    await asyncio.sleep(0.3)
-    await bot.send_message(chat_id, text)
-
-@bot.message_handler(commands=['roast'])
-async def cmd_roast(message):
-    chat_id = message.chat.id
-    user_id = message.from_user.id
-    if user_id in blocked_users:
-        await bot.send_message(chat_id, "ты в бане чмо")
-        return
-    if chat_id not in user_stats:
-        user_stats[chat_id] = {"messages": 0, "roasts": 0, "commands": 0}
-    user_stats[chat_id]["roasts"] = user_stats[chat_id].get("roasts", 0) + 1
-    update_stats(chat_id, "commands")
-    roast = random.choice(ROASTS)
-    await bot.send_chat_action(chat_id, 'typing')
-    await asyncio.sleep(0.5)
-    await bot.send_message(chat_id, roast)
-
-@bot.message_handler(commands=['about'])
-async def cmd_about(message):
-    chat_id = message.chat.id
-    user_id = message.from_user.id
-    if user_id in blocked_users:
-        await bot.send_message(chat_id, "ты в бане чмо")
-        return
-    update_stats(chat_id, "commands")
-    text = (
-        "ну короче я Данил мне 14\n"
-        "я с подворотни у нас тут район мой\n"
-        "я тут главный все меня знают\n"
-        "люблю докапываться до всех\n"
-        "если чё не так сразу отправлю нахрен\n"
-        "вот такие дела братан"
-    )
-    await bot.send_chat_action(chat_id, 'typing')
-    await asyncio.sleep(0.3)
-    await bot.send_message(chat_id, text)
-
-@bot.message_handler(commands=['help'])
-async def cmd_help(message):
-    chat_id = message.chat.id
-    user_id = message.from_user.id
-    if user_id in blocked_users:
-        await bot.send_message(chat_id, "ты в бане чмо")
-        return
-    update_stats(chat_id, "commands")
-    text = (
-        "ну слушай лох\n"
-        "/start - начать базар\n"
-        "/new - сбросить всё нахрен\n"
-        "/stats - посмотреть кто тут сколько базарил\n"
-        "/roast - получить люлей от меня\n"
-        "/about - кто я такой вообще\n"
-        "/rating - твой статус тут\n"
-        "/top - кто самый активный\n"
-        "/ping - проверить жив ли я\n"
-        "/random - случайная моя фраза\n"
-        "ну и пиши мне в лс или тут"
-    )
-    await bot.send_chat_action(chat_id, 'typing')
-    await asyncio.sleep(0.3)
-    await bot.send_message(chat_id, text)
-
-@bot.message_handler(commands=['rating'])
-async def cmd_rating(message):
-    chat_id = message.chat.id
-    user_id = message.from_user.id
-    if user_id in blocked_users:
-        await bot.send_message(chat_id, "ты в бане чмо")
-        return
-    update_stats(chat_id, "commands")
-    rating = get_user_rating(chat_id)
-    msgs = user_stats.get(chat_id, {}).get("messages", 0)
-    text = f"ну короче ты тут {rating}\nнаписал {msgs} сообщений\nнеплохо для чмошника"
-    await bot.send_chat_action(chat_id, 'typing')
-    await asyncio.sleep(0.3)
-    await bot.send_message(chat_id, text)
-
-@bot.message_handler(commands=['top'])
-async def cmd_top(message):
-    chat_id = message.chat.id
-    user_id = message.from_user.id
-    if user_id in blocked_users:
-        await bot.send_message(chat_id, "ты в бане чмо")
-        return
-    update_stats(chat_id, "commands")
-    if not user_stats:
-        await bot.send_message(chat_id, "никто ещё не базарил тут")
-        return
-    sorted_users = sorted(user_stats.items(), key=lambda x: x[1].get("messages", 0), reverse=True)
-    text = "ну короче топ базарунов:\n"
-    for i, (uid, stats) in enumerate(sorted_users[:5], 1):
-        msgs = stats.get("messages", 0)
-        text += f"{i}. чел {uid}: {msgs} сообщений\n"
-    await bot.send_chat_action(chat_id, 'typing')
-    await asyncio.sleep(0.3)
-    await bot.send_message(chat_id, text)
-
-@bot.message_handler(commands=['ping'])
-async def cmd_ping(message):
-    chat_id = message.chat.id
-    user_id = message.from_user.id
-    if user_id in blocked_users:
-        await bot.send_message(chat_id, "ты в бане чмо")
-        return
-    update_stats(chat_id, "commands")
-    await bot.send_chat_action(chat_id, 'typing')
-    await asyncio.sleep(0.3)
-    await bot.send_message(chat_id, "живой нахуй чё как сам")
-
-@bot.message_handler(commands=['random'])
-async def cmd_random(message):
-    chat_id = message.chat.id
-    user_id = message.from_user.id
-    if user_id in blocked_users:
-        await bot.send_message(chat_id, "ты в бане чмо")
-        return
-    update_stats(chat_id, "commands")
-    phrase = random.choice(RANDOM_PHRASES)
-    await bot.send_chat_action(chat_id, 'typing')
-    await asyncio.sleep(0.5)
-    await bot.send_message(chat_id, phrase)
-
-def is_private_chat(message):
-    return message.chat.type == 'private'
-
-def should_respond_to_text(message):
-    text = message.text or ""
-
-    if is_private_chat(message):
-        return True
-
-    if text.strip().startswith('&'):
-        return True
-
-    if message.reply_to_message and '&' in text:
-        return True
-
-    if message.reply_to_message and message.reply_to_message.from_user.id == bot.bot_id:
-        return True
-
-    return False
-
-def remove_trigger_symbol(text):
-    text = text.strip()
-    if text.startswith('&'):
-        return text[1:].strip()
-    if '&' in text:
-        return text.replace('&', '').strip()
-    return text
-
-@bot.message_handler(func=lambda m: True)
-async def handle_logic(message):
-    chat_id = message.chat.id
-    user_id = message.from_user.id
-
-    if not should_respond_to_text(message):
-        return
-
-    if user_id in blocked_users:
-        return
-
-    if check_spam(chat_id):
-        return
-
-    if chat_id not in user_stats:
-        user_stats[chat_id] = {"messages": 0, "roasts": 0, "commands": 0}
-    user_stats[chat_id]["messages"] = user_stats[chat_id].get("messages", 0) + 1
-    user_last_message[chat_id] = time.time()
-
-    if chat_id not in user_context:
-        user_context[chat_id] = []
-
-    msg_text = message.text or ""
-    is_reply_with_trigger = message.reply_to_message and '&' in msg_text
-
-    if is_reply_with_trigger:
-        original_text = message.reply_to_message.text or message.reply_to_message.caption or "хуйня какая-то"
-        original_text = clean_text(original_text)
-        user_comment = remove_trigger_symbol(msg_text)
-        msg_text = f"чел пишет: \"{original_text}\" - ну чё скажешь, {user_comment}" if user_comment else f"чел пишет: \"{original_text}\""
+async def trade_cancel(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not await check_group(u): return
+    cid = str(u.effective_chat.id); uid = str(u.effective_user.id)
+    if cid in TRADE_STATE and uid in TRADE_STATE[cid]:
+        del TRADE_STATE[cid][uid]
+        await u.message.reply_text("❌ Трейд отменён!")
     else:
-        msg_text = remove_trigger_symbol(msg_text)
+        await u.message.reply_text("❌ У тебя нет активных трейдов!")
 
-    msg_text = clean_text(msg_text)
+# ==================== МОДЕРАЦИЯ ====================
 
-    if not msg_text:
-        await bot.reply_to(message, "чё пустое сообщение то прислал дебил")
-        return
+async def ban(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not await check_group(u): return
+    chat, user = u.effective_chat, u.effective_user
+    if (await chat.get_member(user.id)).status not in ["creator", "administrator"]:
+        return await u.message.reply_text("❌ Только админы!")
+    if not u.message.reply_to_message: return await u.message.reply_text("❌ Ответь на сообщение!")
+    t = u.message.reply_to_message.from_user
+    if t.id == user.id: return await u.message.reply_text("🤡 Нельзя забанить себя!")
+    if t.is_bot: return await u.message.reply_text("🤖 Нельзя забанить бота!")
+    try: await chat.ban_member(t.id); await u.message.reply_text("🚫 " + t.first_name + " забанен! Причина: курил слишком много 🌿")
+    except Exception as e: await u.message.reply_text("❌ Ошибка: " + str(e))
 
-    user_context[chat_id].append({"role": "user", "content": msg_text})
-    user_context[chat_id] = user_context[chat_id][-7:]
+async def unban(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not await check_group(u): return
+    chat, user = u.effective_chat, u.effective_user
+    if (await chat.get_member(user.id)).status not in ["creator", "administrator"]:
+        return await u.message.reply_text("❌ Только админы!")
+    if not u.message.reply_to_message: return await u.message.reply_text("❌ Ответь на сообщение!")
+    t = u.message.reply_to_message.from_user
+    if t.is_bot: return await u.message.reply_text("🤖 Нельзя разбанить бота!")
+    try: await chat.unban_member(t.id); await u.message.reply_text("✅ " + t.first_name + " разбанен! Может снова собирать траву 🌿")
+    except Exception as e: await u.message.reply_text("❌ Ошибка: " + str(e))
 
-    await bot.send_chat_action(chat_id, 'typing')
-
-    try:
-        messages = [{"role": "system", "content": DANIL_ROLE}] + user_context[chat_id]
-        answer, source = await get_ai_response(messages)
-
-        if not answer:
-            answer = "блять, Groq молчит. Попробуй позже.."
-            source = "local" 
-
-        user_context[chat_id].append({"role": "assistant", "content": answer})
-
-        print(f"✅ Ответ от {source}: {answer[:50]}...")
-
-        await asyncio.sleep(0.5 + random.random() * 0.5)
+async def mute(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not await check_group(u): return
+    chat, user = u.effective_chat, u.effective_user
+    if (await chat.get_member(user.id)).status not in ["creator", "administrator"]:
+        return await u.message.reply_text("❌ Только админы!")
+    if not u.message.reply_to_message: return await u.message.reply_text("❌ Ответь на сообщение!")
+    t = u.message.reply_to_message.from_user
+    if t.id == user.id: return await u.message.reply_text("🤡 Нельзя замутить себя!")
+    if t.is_bot: return await u.message.reply_text("🤖 Нельзя замутить бота!")
+    dur = 3600
+    if c.args:
         try:
-            await bot.reply_to(message, answer, parse_mode='Markdown')
-        except:
-            await bot.reply_to(message, answer)
-
-    except Exception as e:
-        error_msg = f"❌ Ошибка в handle_logic: {type(e).__name__}: {e}"
-        print(error_msg)
-        traceback.print_exc()
-        await bot.reply_to(message, f"бля чё-то сломалось: {type(e).__name__}: {e}")
-
-@bot.message_handler(content_types=['photo'])
-async def handle_photo(message):
-    chat_id = message.chat.id
-    user_id = message.from_user.id
-
-    if user_id in blocked_users:
-        return
-
-    if check_spam(chat_id):
-        return
-
-    if not GROQ_AVAILABLE or not groq_client:
-        await bot.reply_to(message, "бля глаза мои сломались, не вижу нихуя")
-        return
-
+            s = c.args[0].lower()
+            if s.endswith("м"): dur = int(s[:-1]) * 60
+            elif s.endswith("ч"): dur = int(s[:-1]) * 3600
+            elif s.endswith("д"): dur = int(s[:-1]) * 86400
+            else: dur = int(s) * 60
+        except: pass
     try:
-        photo = message.photo[-1]
-        file_id = photo.file_id
+        await chat.restrict_member(t.id, until_date=datetime.now() + timedelta(seconds=dur), permissions={"can_send_messages": False, "can_send_media_messages": False, "can_send_other_messages": False, "can_add_web_page_previews": False})
+        await u.message.reply_text("🔇 " + t.first_name + " замучен на " + fmt(dur) + "! Причина: слишком шумно курил 🌿")
+    except Exception as e: await u.message.reply_text("❌ Ошибка: " + str(e))
 
-        file_info = await bot.get_file(file_id)
-        downloaded_file = await bot.download_file(file_info.file_path)
+async def unmute(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not await check_group(u): return
+    chat, user = u.effective_chat, u.effective_user
+    if (await chat.get_member(user.id)).status not in ["creator", "administrator"]:
+        return await u.message.reply_text("❌ Только админы!")
+    if not u.message.reply_to_message: return await u.message.reply_text("❌ Ответь на сообщение!")
+    t = u.message.reply_to_message.from_user
+    if t.is_bot: return await u.message.reply_text("🤖 Нельзя размутить бота!")
+    try:
+        await chat.restrict_member(t.id, permissions={"can_send_messages": True, "can_send_media_messages": True, "can_send_other_messages": True, "can_add_web_page_previews": True})
+        await u.message.reply_text("🔊 " + t.first_name + " размучен! Может снова болтать 🗣️")
+    except Exception as e: await u.message.reply_text("❌ Ошибка: " + str(e))
 
-        if chat_id not in user_stats:
-            user_stats[chat_id] = {"messages": 0, "roasts": 0, "commands": 0}
-        user_stats[chat_id]["messages"] = user_stats[chat_id].get("messages", 0) + 1
+async def text(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    # В личке — только приветствие
+    if u.effective_chat.type == "private":
+        await u.message.reply_text("🌿 Привет! Я Травка Бот — бот для чатов!\n\nДобавь меня в группу и пиши команды там 🌿")
+        return
+    t = u.message.text.lower().strip()
+    cmds = {
+        "собрать": collect, "травка": collect, "собери": collect, "найти": collect,
+        "курить": smoke, "курю": smoke, "дым": smoke, "затянуться": smoke, "закурить": smoke,
+        "профиль": profile, "я": profile, "стата": profile,
+        "топ": top, "рейтинг": top, "лидеры": top,
+        "инвентарь": inv, "инв": inv,
+        "бонус": bonus, "ежедневный": bonus, "награда": bonus,
+        "ставка": bet, "казино": bet,
+        "часы": check_clock, "кулдаун": check_clock, "время": check_clock,
+        "использовать часы": use_clock, "юзать часы": use_clock, "применить часы": use_clock,
+        "трейд": trade_start, "обмен": trade_start, "отправить часы": trade_start,
+        "принять трейд": trade_accept, "принять": trade_accept,
+        "отменить трейд": trade_cancel, "отмена трейд": trade_cancel,
+        "бан": ban, "забанить": ban, "блок": ban,
+        "анбан": unban, "разбан": unban, "разбанить": unban,
+        "мут": mute, "замутить": mute, "заткнуть": mute,
+        "анмут": unmute, "размут": unmute, "размутить": unmute,
+        "помощь": start, "хелп": start, "команды": start, "старт": start, "начать": start,
+    }
+    if t in cmds: await cmds[t](u, c)
+    elif t in ["привет", "здарова", "ку", "хай", "йо"]:
+        await u.message.reply_text("🌿 Здарова, " + u.effective_user.first_name + "! Напиши помощь, чтобы узнать команды!")
+    elif t in ["пока", "бай", "до связи"]:
+        await u.message.reply_text("👋 Пока, " + u.effective_user.first_name + "! Не забудь собрать травку перед уходом 🌿")
 
-        await bot.send_chat_action(chat_id, 'typing')
+def main():
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text))
+    print("🌿 Травка Бот запущен!"); app.run_polling()
 
-        answer, source = await get_ai_response(None, image_data=downloaded_file)
-
-        if not answer:
-            answer = "бля фото не грузится, чё за хуйня"
-            source = "local"
-
-        if chat_id not in user_context:
-            user_context[chat_id] = []
-        user_context[chat_id].append({"role": "user", "content": "[фото]"})
-        user_context[chat_id].append({"role": "assistant", "content": answer})
-        user_context[chat_id] = user_context[chat_id][-7:]
-
-        await asyncio.sleep(0.5)
-        try:
-            await bot.reply_to(message, answer, parse_mode='Markdown')
-        except:
-            await bot.reply_to(message, answer)
-
-    except Exception as e:
-        error_msg = f"❌ Ошибка обработки фото: {type(e).__name__}: {e}"
-        print(error_msg)
-        traceback.print_exc()
-        await bot.reply_to(message, f"бля фото не грузится: {type(e).__name__}: {e}")
-
-async def main():
-    await setup_commands()
-    me = await bot.get_me()
-    print("=" * 50)
-    print(f"✅ Данил 6.0 с Groq Llama-4-Scout запущен!")
-    print(f"Бот: @{me.username}")
-    print(f"Groq доступен: {GROQ_AVAILABLE}")
-    print("=" * 50)
-    await bot.polling(non_stop=True)
-
-if __name__ == '__main__':
-    asyncio.run(main())
+if __name__ == "__main__": main()

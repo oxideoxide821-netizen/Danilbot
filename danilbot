@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
-BOT_TOKEN = "ВАШ_ТОКЕН_ЗДЕСЬ"
+BOT_TOKEN = "8968491013:AAEbpJkA2h8AS5Q7gim_o4sc5wBRerZLl5w"
 DATA_FILE = "travka_data.json"
 BASE_COOLDOWN = 3 * 60
 MIN_COOLDOWN = 3 * 60

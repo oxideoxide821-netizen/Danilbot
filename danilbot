@@ -1,4 +1,3 @@
-
 import logging, random, json, os
 from datetime import datetime, timedelta
 from telegram import Update

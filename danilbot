@@ -148,7 +148,7 @@ async def check_group(u: Update):
 
 async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u): return
-    await u.message.reply_text("🌿 Привет, " + u.effective_user.first_name + "!\n\nЯ Травка Бот! Вот команды:\n\n🌱 собрать — собрать траву\n🔨 крафт — сделать табак из травы\n🚬 курить / закурить — покурить табак\n🚬 закурить сигарету — курить сигарету (лютый эффект!)\n🚬 закурить сигару — курить сигару (мега эффект!)\n📊 профиль — статистика\n🏆 топ — рейтинг\n📦 инвентарь — твоя трава, табак, монеты, сигареты\n🎁 бонус — ежедневный бонус\n🃏 ставка — казино (ставка N травы/табака)\n💰 продать — продать траву за монеты (редкая дороже!)\n🛒 купить табак N — купить табак\n🛒 купить сигареты — купить сигареты\n🛒 купить сигары — купить сигары\n🎁 дать траву N — передать траву\n🎁 дать табак N — передать табак\n🏡 ферма — автосбор травы\n⏱️ часы — проверить кулдаун\n⏱️ использовать часы — сбросить кулдаун\n🤝 трейд — обменять часы\n\n👮 бан / анбан / мут / анмут — модерация")
+    await u.message.reply_text("🌿 Привет, " + u.effective_user.first_name + "!\n\nЯ Травка Бот! Вот команды:\n\n🌱 собрать — собрать траву\n🔨 крафт — сделать табак из травы\n🚬 курить / закурить — покурить табак\n🚬 закурить сигарету — курить сигарету (лютый эффект!)\n🚬 закурить сигару — курить сигару (мега эффект!)\n📊 профиль — статистика\n🏆 топ — рейтинг\n📦 инвентарь — твоя трава, табак, монеты, сигареты\n🎁 бонус — ежедневный бонус\n🃏 ставка — казино (ставка N травы/табака, крутится кубик!)\n💰 продать — продать траву за монеты (редкая дороже!)\n💰 продать табак — продать табак за монеты\n🛒 купить табак N — купить табак\n🛒 купить сигареты — купить сигареты\n🛒 купить сигары — купить сигары\n🎁 дать траву N — передать траву\n🎁 дать табак N — передать табак\n🏡 ферма — автосбор травы\n⏱️ часы — проверить кулдаун\n⏱️ использовать часы — сбросить кулдаун\n🤝 трейд — обменять часы\n\n👮 бан / анбан / мут / анмут — модерация")
 
 async def collect(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u): return
@@ -300,6 +300,18 @@ async def sell(u: Update, c: ContextTypes.DEFAULT_TYPE):
     ud["coins"] += earned; ud["grass"] = 0; ud["name"] = u.effective_user.username or u.effective_user.first_name
     save(d)
     await u.message.reply_text("💰 Продажа травы!\n\n🌿 Продано: вся трава (редкость: " + gt + ")\n💰 Цена за гр: " + str(price) + " монет\n💰 Заработано: " + str(earned) + " монет\n💰 Всего монет: " + str(ud["coins"]))
+
+
+async def sell_tobacco(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not await check_group(u): return
+    d = load(); ud = get_user(d, u.effective_user.id, u.effective_chat.id)
+    if ud["tobacco"] < 1:
+        await u.message.reply_text("😢 У тебя нет табака для продажи! Напиши крафт, чтобы сделать 🌿")
+        return save(d)
+    earned = ud["tobacco"] * 4  # 1гр табака = 4 монеты
+    ud["coins"] += earned; ud["tobacco"] = 0; ud["name"] = u.effective_user.username or u.effective_user.first_name
+    save(d)
+    await u.message.reply_text("💰 Продажа табака!\n\n📦 Продано: весь табак\n💰 Цена за гр: 4 монеты\n💰 Заработано: " + str(earned) + " монет\n💰 Всего монет: " + str(ud["coins"]))
 
 async def buy_tobacco(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u): return
@@ -487,7 +499,17 @@ async def bet(u: Update, c: ContextTypes.DEFAULT_TYPE):
         await u.message.reply_text("😢 Недостаточно " + item_name + "!\n📦 У тебя: " + str(ud[item_key]) + " гр\n🃏 Ставка: " + str(num) + " гр")
         return save(d)
 
-    ud[item_key] -= num; r = random.randint(1, 100); ud["name"] = u.effective_user.username or u.effective_user.first_name
+    # Отправляем анимацию кубика
+    ud[item_key] -= num; ud["name"] = u.effective_user.username or u.effective_user.first_name
+    save(d)
+
+    dice_msg = await u.message.reply_dice(emoji="🎲")
+    # Ждем 2 секунды для эффекта
+    import asyncio
+    await asyncio.sleep(2)
+
+    # Генерируем результат
+    r = random.randint(1, 100)
     if r <= 30:
         w = num * 2; ud[item_key] += w
         msg = "🎲 Ставка " + str(num) + " гр " + item_name + "\n\n🎰 Выпало: " + str(r) + "\n🎉 ПОБЕДА!\n💰 Выигрыш: " + str(w) + " гр"
@@ -665,26 +687,70 @@ async def text(u: Update, c: ContextTypes.DEFAULT_TYPE):
         return
     t = u.message.text.lower().strip()
     cmds = {
-        "собрать": collect, "травка": collect, "собери": collect, "найти": collect,
-        "курить": smoke, "курю": smoke, "дым": smoke, "затянуться": smoke, "закурить": smoke,
-        "крафт": craft, "табак": craft, "сделать табак": craft,
-        "профиль": profile, "я": profile, "стата": profile,
-        "топ": top, "рейтинг": top, "лидеры": top,
-        "инвентарь": inv, "инв": inv,
-        "бонус": bonus, "ежедневный": bonus, "награда": bonus,
-        "продать": sell, "продажа": sell, "продать траву": sell,
+        # Сбор травы
+        "собрать": collect, "сбор": collect, "собирать": collect, "собери": collect, 
+        "найти": collect, "нашёл": collect, "нашел": collect, "травка": collect, 
+        "траву": collect, "собираю": collect, "копать": collect, "копаю": collect,
+
+        # Курение
+        "курить": smoke, "курю": smoke, "дым": smoke, "затянуться": smoke, 
+        "закурить": smoke, "покурить": smoke, "бахнуть": smoke, "бахаю": smoke,
+        "закуриваю": smoke, "курнул": smoke, "курну": smoke,
+
+        # Крафт
+        "крафт": craft, "табак": craft, "сделать табак": craft, "скрафтить": craft,
+        "крафтить": craft, "заварить": craft, "завариваю": craft, "делаю табак": craft,
+
+        # Профиль
+        "профиль": profile, "я": profile, "стата": profile, "статистика": profile,
+        "инфо": profile, "информация": profile, "о себе": profile, "кто я": profile,
+
+        # Топ
+        "топ": top, "рейтинг": top, "лидеры": top, "лидерборд": top,
+        "топчик": top, "топы": top,
+
+        # Инвентарь
+        "инвентарь": inv, "инв": inv, "рюкзак": inv, "сумка": inv, 
+        "вещи": inv, "предметы": inv, "ресурсы": inv, "шмот": inv,
+
+        # Бонус
+        "бонус": bonus, "ежедневный": bonus, "награда": bonus, "ежедневка": bonus,
+        "дневной": bonus, "приз": bonus, "ежедневный бонус": bonus,
+
+        # Продажа
+        "продать": sell, "продажа": sell, "продать траву": sell, "сбыть": sell,
+        "продам": sell, "продаю": sell, "торговать": sell, "торгую": sell,
+        "продать табак": sell_tobacco, "продажа табака": sell_tobacco, "сбыть табак": sell_tobacco,
+        "продам табак": sell_tobacco, "продаю табак": sell_tobacco,
+
+        # Часы
         "часы": check_clock, "кулдаун": check_clock, "время": check_clock,
+        "кд": check_clock, "таймер": check_clock, "когда собирать": check_clock,
         "использовать часы": use_clock, "юзать часы": use_clock, "применить часы": use_clock,
+        "юзнуть часы": use_clock, "активировать часы": use_clock, "часы использовать": use_clock,
+
+        # Трейд
         "трейд": trade_start, "обмен": trade_start, "отправить часы": trade_start,
-        "принять трейд": trade_accept, "принять": trade_accept,
-        "отменить трейд": trade_cancel, "отмена трейд": trade_cancel,
-        "ферма": farm, "собрать ферма": farm,
-        "улучшить ферму": upgrade_farm, "апгрейд фермы": upgrade_farm,
-        "бан": ban, "забанить": ban, "блок": ban,
-        "анбан": unban, "разбан": unban, "разбанить": unban,
-        "мут": mute, "замутить": mute, "заткнуть": mute,
-        "анмут": unmute, "размут": unmute, "размутить": unmute,
+        "передать часы": trade_start, "отдать часы": trade_start, "обменять": trade_start,
+        "принять трейд": trade_accept, "принять": trade_accept, "принимаю": trade_accept,
+        "отменить трейд": trade_cancel, "отмена трейд": trade_cancel, "отмена": trade_cancel,
+
+        # Ферма
+        "ферма": farm, "собрать ферма": farm, "ферму": farm, "грядка": farm,
+        "плантация": farm, "поле": farm, "урожай": farm, "собрать урожай": farm,
+        "улучшить ферму": upgrade_farm, "апгрейд фермы": upgrade_farm, 
+        "апгрейд": upgrade_farm, "прокачать ферму": upgrade_farm, "улучшить": upgrade_farm,
+
+        # Модерация
+        "бан": ban, "забанить": ban, "блок": ban, "банhammer": ban, "заблокировать": ban,
+        "анбан": unban, "разбан": unban, "разбанить": unban, "разблокировать": unban,
+        "мут": mute, "замутить": mute, "заткнуть": mute, "замолчать": mute, "молчать": mute,
+        "анмут": unmute, "размут": unmute, "размутить": unmute, "разговаривать": unmute,
+
+        # Помощь
         "помощь": start, "хелп": start, "команды": start, "старт": start, "начать": start,
+        "help": start, "help me": start, "меню": start, "список команд": start, "что умеешь": start,
+        "?": start, "!": start, "как играть": start, "гайд": start,
     }
     if t in cmds:
         await cmds[t](u, c)
@@ -712,9 +778,13 @@ async def text(u: Update, c: ContextTypes.DEFAULT_TYPE):
         await smoke(u, c)
         return
 
-    if t in ["привет", "здарова", "ку", "хай", "йо"]:
+    if t in ["привет", "здарова", "ку", "хай", "йо", "здравствуй", "прив", "хей", 
+             "хелоу", "хеллоу", "здрасьте", "добрый день", "добрый вечер", "доброе утро",
+             "здаров", "здорово", "здравия", "салют", "хаюшки", "приветик", "куку"]:
         await u.message.reply_text("🌿 Здарова, " + u.effective_user.first_name + "! Напиши помощь, чтобы узнать команды!")
-    elif t in ["пока", "бай", "до связи"]:
+    elif t in ["пока", "бай", "до связи", "прощай", "до свидания", "до встречи", 
+               "покеда", "пока-пока", "бб", "bb", "bye", "goodbye", "спокойной ночи",
+               "доброй ночи", "споки", "спок"]:
         await u.message.reply_text("👋 Пока, " + u.effective_user.first_name + "! Не забудь собрать травку перед уходом 🌿")
 
 def main():

@@ -12,6 +12,41 @@ TOBACCO_PRICE = 3
 GRASS_PRICE = 2
 OVERDOSE_CHANCE = 1
 
+# === ЛОТЕРЕЯ ТРАВНИКА ===
+LOTTERY_PRICE = 50
+LOTTERY_PRIZES = {
+    "Джекпот": {"chance": 1, "multiplier": 10, "emoji": "💎"},
+    "Крупный выигрыш": {"chance": 5, "multiplier": 5, "emoji": "🤑"},
+    "Хороший выигрыш": {"chance": 15, "multiplier": 3, "emoji": "💰"},
+    "Малый выигрыш": {"chance": 30, "multiplier": 2, "emoji": "🪙"},
+    "Утешительный": {"chance": 49, "multiplier": 1, "emoji": "🍀"},
+}
+
+EXTRA_EFFECTS = [
+    "🌀 Ты видишь, как стены дышат... это нормально?",
+    "🌟 Ты почувствовал связь со вселенной! Или это просто хорошая трава.",
+    "🎭 Ты внезапно стал философом! 'Жизнь — это просто большая грядка...'",
+    "🍕 Запах пиццы стал реальностью! Или это галлюцинация?",
+    "🌈 Ты видишь цвета, которых нет в радуге! Магия!",
+    "🐉 Ты приручил воображаемого дракона! Его зовут Пых-Пых.",
+    "🎪 Цирк в твоей голове начал представление! Билеты бесплатно.",
+    "🌊 Ты плывёшь по облакам дыма... это блаженство.",
+    "🧙‍♂️ Ты открыл тайну вселенной! Спойлер: ответ — травка.",
+    "🚀 Ты взлетел выше всех звёзд! Космос твой дом.",
+    "🎸 Воображаемый концерт! Ты — рок-звезда!",
+    "🍄 Грибочки танцуют вальс... или это просто дым?",
+    "🦋 Бабочки в животе? Нет, это просто кайф.",
+    "🌙 Луна улыбнулась тебе! Ты её любимчик.",
+    "🎁 Ты нашёл сокровище! В кармане... конфетка!",
+    "🦄 Единорог одобряет твой выбор травы!",
+    "🌮 Такос! Такос везде! Но их нет... грустно.",
+    "🎮 Ты стал про в жизни! Уровень максимальный!",
+    "🦜 Попугай кричит: 'Круто, чувак! Ещё раз!'",
+    "🍦 Мороженое растаяло... но ты не расстроился!",
+]
+
+ALL_EFFECTS = EFFECTS + EXTRA_EFFECTS
+
 GRASS = {
     "обычная": {"e": "🌿", "xp": 1, "tobacco": 1, "coins": 2, "sell": 2},
     "редкая": {"e": "🍀", "xp": 3, "tobacco": 3, "coins": 5, "sell": 5},
@@ -315,7 +350,39 @@ async def check_group(u: Update):
 
 async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u): return
-    await reply_and_delete(u, "🌿 Привет, " + u.effective_user.first_name + "!\n\nЯ Травка Бот! Вот команды:\n\n🌱 собрать / сбор — собрать траву\n🔨 крафт — сделать табак из травы\n🚬 курить / закурить — покурить табак\n🚬 скурить всё — выкурить ВЕСЬ табак за раз!\n🚬 закурить сигарету — курить сигарету (лютый эффект!)\n🚬 закурить сигару — курить сигару (мега эффект!)\n📊 профиль — статистика\n🏆 топ — топ травников\n📦 инвентарь — твоя трава, табак, монеты, сигареты\n🎁 бонус — ежедневный бонус\n🃏 ставка — казино (крутится кубик!)\n💰 продать — продать траву за монеты\n💰 продать табак — продать табак за монеты\n🛒 купить траву N — купить траву\n🛒 купить табак N — купить табак\n🛒 купить сигареты — купить сигареты\n🛒 купить сигары — купить сигары\n🎁 дать траву N — передать траву\n🎁 дать табак N — передать табак\n🎁 дать монеты N — передать монеты\n🏡 ферма — автосбор (30 мин)\n⚡ быстрая ферма — автосбор (30 сек!)\n⏱️ часы — проверить кулдаун\n⏱️ использовать часы — сбросить кулдаун\n🤝 трейд — обменять часы\n\n👮 бан / анбан / мут / анмут — модерация")
+    await reply_and_delete(u, "🌿 Привет, " + u.effective_user.first_name + "!
+
+Я Травка Бот! Вот команды:
+
+🌱 собрать / сбор — собрать траву
+🔨 крафт — сделать табак из травы
+🚬 курить / закурить — покурить табак
+🚬 скурить всё — выкурить ВЕСЬ табак за раз!
+🚬 закурить сигарету — курить сигарету (лютый эффект!)
+🚬 закурить сигару — курить сигару (мега эффект!)
+📊 профиль — статистика
+🏆 топ — топ травников
+📦 инвентарь — твоя трава, табак, монеты, сигареты
+🎁 бонус — ежедневный бонус
+🃏 ставка — казино (крутится кубик!)
+🃏 ставка монет N — казино на монеты!
+🎰 лотерея — лотерея травника (выигрыш до x10!)
+💰 продать — продать траву за монеты
+💰 продать табак — продать табак за монеты
+🛒 купить траву N — купить траву
+🛒 купить табак N — купить табак
+🛒 купить сигареты — купить сигареты
+🛒 купить сигары — купить сигары
+🎁 дать траву N — передать траву
+🎁 дать табак N — передать табак
+🎁 дать монеты N — передать монеты
+🏡 ферма — автосбор (30 мин)
+⚡ быстрая ферма — автосбор (30 сек!)
+⏱️ часы — проверить кулдаун
+⏱️ использовать часы — сбросить кулдаун
+🤝 трейд — обменять часы
+
+👮 бан / анбан / мут / анмут — модерация")
 
 async def collect(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u): return
@@ -366,7 +433,7 @@ async def smoke(u: Update, c: ContextTypes.DEFAULT_TYPE):
     text = u.message.text.lower().strip()
 
     # === СКУРИТЬ ВСЁ ===
-    if "всё" in text or "все" in text:
+    if "всё" in text or "все" in text or ("курить" in text and ("всё" in text or "все" in text)) or ("курю" in text and ("всё" in text or "все" in text)):
         if ud["tobacco"] < 1:
             await reply_and_delete(u, "😢 У тебя нет табака! Напиши крафт, чтобы сделать табак из травы 🌿")
             return save(d)
@@ -375,21 +442,29 @@ async def smoke(u: Update, c: ContextTypes.DEFAULT_TYPE):
         total_xp = 0
         total_coins = 0
 
-        # Передоз шанс умножается на количество (но макс 50%)
         overdose_risk = min(OVERDOSE_CHANCE * total_amt, 50)
         if random.randint(1, 100) <= overdose_risk:
             ud["grass"] = 0; ud["tobacco"] = 0; ud["smoked"] = 0; ud["xp"] = 0
             ud["lvl"] = 1; ud["coins"] = 0; ud["cigarettes"] = 0; ud["cigars"] = 0; ud["clocks"] = 0
             ud["name"] = u.effective_user.username or u.effective_user.first_name
             save(d)
-            await reply_and_delete(u, "💀💀💀 МЕГА-ПЕРЕДОЗ!!! 💀💀💀\n\n" + random.choice(OVERDOSE_EFFECTS) + "\n\n⚠️ Ты выкурил ВЕСЬ табак и потерял ВСЁ!\n🌿 Трава: 0\n📦 Табак: 0\n💰 Монеты: 0\n🚬 Сигареты: 0\n🚬 Сигары: 0\n⏱️ Часы: 0\n📊 Уровень сброшен до 1!\n\nБудь осторожнее в следующий раз...")
+            await reply_and_delete(u, "💀💀💀 МЕГА-ПЕРЕДОЗ!!! 💀💀💀
+
+" + random.choice(OVERDOSE_EFFECTS) + "
+
+⚠️ Ты выкурил ВЕСЬ табак и потерял ВСЁ!
+🌿 Трава: 0
+📦 Табак: 0
+💰 Монеты: 0
+🚬 Сигареты: 0
+🚬 Сигары: 0
+⏱️ Часы: 0
+📊 Уровень сброшен до 1!
+
+Будь осторожнее в следующий раз...")
             return
 
-        # Курим всё по частям
-        effects_used = []
-        for _ in range(min(total_amt, 10)):  # макс 10 эффектов
-            effects_used.append(random.choice(EFFECTS))
-
+        effect = random.choice(ALL_EFFECTS)
         ud["smoked"] += total_amt
         total_xp = total_amt
         total_coins = random.randint(total_amt, total_amt * 3)
@@ -400,11 +475,116 @@ async def smoke(u: Update, c: ContextTypes.DEFAULT_TYPE):
         old = ud["lvl"]; new = lvl_up(ud)
         save(d)
 
-        msg = "🚬🚬🚬 ТЫ ВЫКУРИЛ ВЕСЬ ТАБАК!!! 🚬🚬🚬\n\n📦 Скурил: " + str(total_amt) + " гр табака\n\n"
-        msg += "\n".join(effects_used[:3])  # показываем первые 3 эффекта
-        msg += "\n\n⭐ Опыт: +" + str(total_xp) + " XP\n💰 Монеты: +" + str(total_coins) + "\n📊 Всего покурено: " + str(ud["smoked"]) + " гр"
-        if new > old: msg += "\n\n🎉 УРОВЕНЬ ПОВЫШЕН!\nТеперь ты " + TITLES.get(new, "🌟 Уровень " + str(new)) + "!"
+        msg = "🚬🚬🚬 ТЫ ВЫКУРИЛ ВЕСЬ ТАБАК!!! 🚬🚬🚬
+
+📦 Скурил: " + str(total_amt) + " гр табака
+
+"
+        msg += effect
+        msg += "
+
+⭐ Опыт: +" + str(total_xp) + " XP
+💰 Монеты: +" + str(total_coins) + "
+📊 Всего покурено: " + str(ud["smoked"]) + " гр"
+        if new > old: msg += "
+
+🎉 УРОВЕНЬ ПОВЫШЕН!
+Теперь ты " + TITLES.get(new, "🌟 Уровень " + str(new)) + "!"
         await reply_and_delete(u, msg)
+        return
+
+    if "сигарет" in text:
+        if ud["cigarettes"] < 1:
+            await reply_and_delete(u, "😢 У тебя нет сигарет! Напиши 'купить сигареты', чтобы купить 🚬")
+            return save(d)
+        ud["cigarettes"] -= 1
+        xp_gain = random.randint(15, 25)
+        coin_gain = random.randint(10, 20)
+        ud["smoked"] += 5; ud["xp"] += xp_gain; ud["coins"] += coin_gain
+        ud["name"] = u.effective_user.username or u.effective_user.first_name
+        old = ud["lvl"]; new = lvl_up(ud)
+        save(d)
+        msg = "🚬 Ты закурил СИГАРЕТУ!
+
+" + random.choice(CIGARETTE_EFFECTS) + "
+
+⭐ Опыт: +" + str(xp_gain) + " XP
+💰 Монеты: +" + str(coin_gain) + "
+📊 Всего покурено: " + str(ud["smoked"]) + " гр
+🚬 Осталось сигарет: " + str(ud["cigarettes"]) + " " + decl_cigarettes(ud["cigarettes"])
+        if new > old: msg += "
+
+🎉 УРОВЕНЬ ПОВЫШЕН!
+Теперь ты " + TITLES.get(new, "🌟 Уровень " + str(new)) + "!"
+        await reply_and_delete(u, msg)
+        return
+
+    if "сигар" in text:
+        if ud["cigars"] < 1:
+            await reply_and_delete(u, "😢 У тебя нет сигар! Напиши 'купить сигары', чтобы купить 🚬")
+            return save(d)
+        ud["cigars"] -= 1
+        xp_gain = random.randint(40, 60)
+        coin_gain = random.randint(30, 50)
+        ud["smoked"] += 10; ud["xp"] += xp_gain; ud["coins"] += coin_gain
+        ud["name"] = u.effective_user.username or u.effective_user.first_name
+        old = ud["lvl"]; new = lvl_up(ud)
+        save(d)
+        msg = "🚬🚬 Ты закурил СИГАРУ! МЕГА ЭФФЕКТ!
+
+" + random.choice(CIGARETTE_EFFECTS) + "
+
+⭐ Опыт: +" + str(xp_gain) + " XP
+💰 Монеты: +" + str(coin_gain) + "
+📊 Всего покурено: " + str(ud["smoked"]) + " гр
+🚬 Осталось сигар: " + str(ud["cigars"]) + " " + decl_cigars(ud["cigars"])
+        if new > old: msg += "
+
+🎉 УРОВЕНЬ ПОВЫШЕН!
+Теперь ты " + TITLES.get(new, "🌟 Уровень " + str(new)) + "!"
+        await reply_and_delete(u, msg)
+        return
+
+    if ud["tobacco"] < 1:
+        await reply_and_delete(u, "😢 У тебя нет табака! Напиши крафт, чтобы сделать табак из травы 🌿")
+        return save(d)
+    amt = random.randint(1, min(5, ud["tobacco"]))
+
+    if random.randint(1, 100) <= OVERDOSE_CHANCE:
+        ud["grass"] = 0; ud["tobacco"] = 0; ud["smoked"] = 0; ud["xp"] = 0
+        ud["lvl"] = 1; ud["coins"] = 0; ud["cigarettes"] = 0; ud["cigars"] = 0; ud["clocks"] = 0
+        ud["name"] = u.effective_user.username or u.effective_user.first_name
+        save(d)
+        await reply_and_delete(u, "💀💀💀 ПЕРЕДОЗ!!! 💀💀💀
+
+" + random.choice(OVERDOSE_EFFECTS) + "
+
+⚠️ Ты потерял ВСЁ!
+🌿 Трава: 0
+📦 Табак: 0
+💰 Монеты: 0
+🚬 Сигареты: 0
+🚬 Сигары: 0
+⏱️ Часы: 0
+📊 Уровень сброшен до 1!
+
+Будь осторожнее в следующий раз...")
+        return
+
+    ud["tobacco"] -= amt; ud["smoked"] += amt; ud["xp"] += amt; ud["name"] = u.effective_user.username or u.effective_user.first_name
+    old = ud["lvl"]; new = lvl_up(ud)
+    save(d)
+    msg = "🚬 Ты закурил " + str(amt) + " " + decl_grass(amt) + " табака...
+
+" + random.choice(ALL_EFFECTS) + "
+
+📊 Всего покурено: " + str(ud["smoked"]) + " гр
+🎒 Осталось табака: " + str(ud["tobacco"]) + " гр"
+    if new > old: msg += "
+
+🎉 УРОВЕНЬ ПОВЫШЕН!
+Теперь ты " + TITLES.get(new, "🌟 Уровень " + str(new)) + "!"
+    await reply_and_delete(u, msg)
         return
 
     if "сигарет" in text:
@@ -930,9 +1110,115 @@ async def unmute(u: Update, c: ContextTypes.DEFAULT_TYPE):
         await reply_and_delete(u, "🔊 " + t.first_name + " размучен! Может снова болтать 🗣️")
     except Exception as e: await reply_and_delete(u, "❌ Ошибка: " + str(e))
 
+
+# === СТАВКА МОНЕТ ===
+async def bet_coins(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not await check_group(u): return
+    d = load(); ud = get_user(d, u.effective_user.id, u.effective_chat.id)
+    text = u.message.text.lower().strip()
+    num = parse_number(text)
+    if not num or num < 1:
+        await reply_and_delete(u, "❌ Укажи ставку! Например: 'ставка монет 100' или 'ставка 50 монет'")
+        return save(d)
+    if ud["coins"] < num:
+        await reply_and_delete(u, "😢 Недостаточно монет!
+💰 У тебя: " + str(ud["coins"]) + " монет
+🃏 Ставка: " + str(num) + " монет")
+        return save(d)
+    ud["coins"] -= num; ud["name"] = u.effective_user.username or u.effective_user.first_name
+    save(d)
+    dice_msg = await u.message.reply_dice(emoji="🎲")
+    asyncio.create_task(auto_delete(dice_msg))
+    await asyncio.sleep(2)
+    r = random.randint(1, 100)
+    if r <= 30:
+        w = num * 2; ud["coins"] += w
+        msg = "🎲 Ставка " + str(num) + " монет
+
+🎰 Выпало: " + str(r) + "
+🎉 ПОБЕДА!
+💰 Выигрыш: " + str(w) + " монет"
+    elif r <= 60:
+        ud["coins"] += num
+        msg = "🎲 Ставка " + str(num) + " монет
+
+🎰 Выпало: " + str(r) + "
+😐 Ничья — ставка возвращена"
+    else:
+        msg = "🎲 Ставка " + str(num) + " монет
+
+🎰 Выпало: " + str(r) + "
+😭 ПРОИГРЫШ!"
+    msg += "
+💰 Баланс: " + str(ud["coins"]) + " монет"; save(d)
+    await reply_and_delete(u, msg)
+
+# === ЛОТЕРЕЯ ТРАВНИКА ===
+async def lottery(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not await check_group(u): return
+    d = load(); ud = get_user(d, u.effective_user.id, u.effective_chat.id)
+    if ud["coins"] < LOTTERY_PRICE:
+        await reply_and_delete(u, "😢 Недостаточно монет!
+🎰 Билет лотереи: " + str(LOTTERY_PRICE) + " монет
+💰 У тебя: " + str(ud["coins"]) + " монет")
+        return save(d)
+    ud["coins"] -= LOTTERY_PRICE; ud["name"] = u.effective_user.username or u.effective_user.first_name
+    save(d)
+
+    spin_msg = await u.message.reply_text("🎰 Крутим барабан...")
+    await asyncio.sleep(1)
+    await spin_msg.edit_text("🎰 Крутим барабан..⭐..")
+    await asyncio.sleep(1)
+    await spin_msg.edit_text("🎰 Крутим барабан..💎..")
+    await asyncio.sleep(1)
+    await spin_msg.edit_text("🎰 Крутим барабан..🍀..")
+    await asyncio.sleep(1)
+
+    roll = random.randint(1, 100)
+    cumulative = 0
+    prize_name = "Утешительный"
+    prize_data = LOTTERY_PRIZES["Утешительный"]
+    for name, data in LOTTERY_PRIZES.items():
+        cumulative += data["chance"]
+        if roll <= cumulative:
+            prize_name = name
+            prize_data = data
+            break
+
+    win_amount = LOTTERY_PRICE * prize_data["multiplier"]
+    ud["coins"] += win_amount
+    ud["xp"] += 2
+    old = ud["lvl"]; new = lvl_up(ud)
+    save(d)
+
+    msg = "🎰🎰🎰 ЛОТЕРЕЯ ТРАВНИКА 🎰🎰🎰
+
+"
+    msg += prize_data["emoji"] + " " + prize_name + "!
+
+"
+    msg += "💰 Билет: " + str(LOTTERY_PRICE) + " монет
+"
+    msg += "💰 Выигрыш: " + str(win_amount) + " монет (x" + str(prize_data["multiplier"]) + ")
+"
+    msg += "💰 Баланс: " + str(ud["coins"]) + " монет
+"
+    msg += "⭐ +2 XP"
+    if new > old:
+        msg += "
+
+🎉 УРОВЕНЬ ПОВЫШЕН!
+Теперь ты " + TITLES.get(new, "🌟 Уровень " + str(new)) + "!"
+
+    await spin_msg.edit_text(msg)
+    asyncio.create_task(auto_delete(spin_msg))
+    asyncio.create_task(auto_delete(u.message, delay=AUTO_DELETE_DELAY))
+
 async def text(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if u.effective_chat.type == "private":
-        await u.message.reply_text("🌿 Привет! Я Травка Бот — бот для чатов!\n\nДобавь меня в группу и пиши команды там 🌿")
+        await u.message.reply_text("🌿 Привет! Я Травка Бот — бот для чатов!
+
+Добавь меня в группу и пиши команды там 🌿")
         return
     t = u.message.text.lower().strip()
     cmds = {
@@ -944,6 +1230,8 @@ async def text(u: Update, c: ContextTypes.DEFAULT_TYPE):
         "закурить": smoke, "покурить": smoke, "бахнуть": smoke, "бахаю": smoke,
         "закуриваю": smoke, "курнул": smoke, "курну": smoke,
         "скурить всё": smoke, "скурить все": smoke, "выкурить всё": smoke, "выкурить все": smoke,
+        "курить всё": smoke, "курить все": smoke, "курю всё": smoke, "курю все": smoke,
+        "закурить всё": smoke, "закурить все": smoke, "покурить всё": smoke, "покурить все": smoke,
         "крафт": craft, "табак": craft, "сделать табак": craft, "скрафтить": craft,
         "крафтить": craft, "заварить": craft, "завариваю": craft, "делаю табак": craft,
         "профиль": profile, "я": profile, "стата": profile, "статистика": profile,
@@ -985,13 +1273,18 @@ async def text(u: Update, c: ContextTypes.DEFAULT_TYPE):
         "помощь": start, "хелп": start, "команды": start, "старт": start, "начать": start,
         "help": start, "help me": start, "меню": start, "список команд": start, "что умеешь": start,
         "?": start, "!": start, "как играть": start, "гайд": start,
+        "лотерея": lottery, "лотерея травника": lottery, "лотерея травы": lottery,
+        "купить билет": lottery, "билет": lottery, "лотерея купить": lottery,
     }
     if t in cmds:
         await cmds[t](u, c)
         return
 
     if t.startswith("ставка"):
-        await bet(u, c)
+        if "монет" in t:
+            await bet_coins(u, c)
+        else:
+            await bet(u, c)
         return
     if t.startswith("купить траву"):
         await buy_grass(u, c)

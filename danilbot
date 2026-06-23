@@ -1398,6 +1398,9 @@ async def text(u: Update, c: ContextTypes.DEFAULT_TYPE):
         await cmds[t](u, c)
         return
 
+    if t.startswith("ставка монет"):
+        await bet_coins(u, c)
+        return
     if t.startswith("ставка"):
         await bet(u, c)
         return

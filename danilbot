@@ -100,9 +100,9 @@ BOT_COMMANDS = [
     BotCommand("craft", "🔨 Скрафтить табак"),
     BotCommand("smoke", "🚬 Покурить"),
     BotCommand("profile", "📊 Профиль"),
-    BotCommand("top", "🌿 Топ травники"),
-    BotCommand("top_coins", "🪙 Монетки"),
-    BotCommand("top_grass", "🌿 Травка"),
+    BotCommand("top", "топ травники🌿"),
+    BotCommand("top_coins", "топ монетки🪙"),
+    BotCommand("top_grass", "топ трава🌿"),
     BotCommand("inventory", "📦 Инвентарь"),
     BotCommand("bonus", "🎁 Ежедневный бонус"),
     BotCommand("sell", "💰 Продать траву"),
@@ -625,12 +625,11 @@ async def top(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not filtered:
         return await reply_and_delete(u, "😢 В этом чате ещё никто не курил!")
     s = sorted(filtered.items(), key=lambda x: (x[1].get("smoked", 0), x[1].get("lvl", 1)), reverse=True)[:20]
-    m = "🌿 Топ травники\n\n"
-    medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20"]
-    for i, (k, v) in enumerate(s):
+    m = "Травники🌿\n"
+    for i, (k, v) in enumerate(s, 1):
         name = v.get("name", "ID" + k)
         smoked = v.get("smoked", 0)
-        m += f"{medals[i]}   {name}\n{smoked}🌿\n"
+        m += f"\n{i}. {name} — {smoked}🌿"
     await reply_and_delete(u, m)
 
 async def top_coins(u: Update, c: ContextTypes.DEFAULT_TYPE):
@@ -643,12 +642,11 @@ async def top_coins(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not filtered:
         return await reply_and_delete(u, "😢 В этом чате ещё никто не заработал!")
     s = sorted(filtered.items(), key=lambda x: (x[1].get("coins", 0), x[1].get("lvl", 1)), reverse=True)[:20]
-    m = "💰 Топ по монетам\n\n"
-    medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20"]
-    for i, (k, v) in enumerate(s):
+    m = "Монетки🪙\n"
+    for i, (k, v) in enumerate(s, 1):
         name = v.get("name", "ID" + k)
         coins = v.get("coins", 0)
-        m += f"{medals[i]}   {name}\n{coins}💰\n"
+        m += f"\n{i}. {name} — {coins}🪙"
     await reply_and_delete(u, m)
 
 async def top_grass(u: Update, c: ContextTypes.DEFAULT_TYPE):
@@ -661,12 +659,11 @@ async def top_grass(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not filtered:
         return await reply_and_delete(u, "😢 В этом чате ещё никто не собирал!")
     s = sorted(filtered.items(), key=lambda x: (x[1].get("grass", 0), x[1].get("lvl", 1)), reverse=True)[:20]
-    m = "🌿 Топ по траве\n\n"
-    medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20"]
-    for i, (k, v) in enumerate(s):
+    m = "Травка🌿\n"
+    for i, (k, v) in enumerate(s, 1):
         name = v.get("name", "ID" + k)
         grass = v.get("grass", 0)
-        m += f"{medals[i]}   {name}\n{grass}🌿\n"
+        m += f"\n{i}. {name} — {grass}🌿"
     await reply_and_delete(u, m)
 
 async def inv(u: Update, c: ContextTypes.DEFAULT_TYPE):

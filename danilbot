@@ -1428,6 +1428,9 @@ async def text(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if t.startswith("курить сигар"):
         await smoke(u, c)
         return
+    if t.startswith("курить "):
+        await smoke(u, c)
+        return
 
     if t in ["привет", "здарова", "ку", "хай", "йо", "здравствуй", "прив", "хей",
              "хелоу", "хеллоу", "здрасьте", "добрый день", "добрый вечер", "доброе утро",

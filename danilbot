@@ -100,7 +100,7 @@ BOT_COMMANDS = [
     BotCommand("craft", "🔨 Скрафтить табак"),
     BotCommand("smoke", "🚬 Покурить"),
     BotCommand("profile", "📊 Профиль"),
-    BotCommand("top", "🏆 Топ покуренного"),
+    BotCommand("top", "🏆 Топ травники"),
     BotCommand("top_coins", "💰 Топ монет"),
     BotCommand("top_grass", "🌿 Топ травы"),
     BotCommand("inventory", "📦 Инвентарь"),
@@ -625,7 +625,7 @@ async def top(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not filtered:
         return await reply_and_delete(u, "😢 В этом чате ещё никто не курил!")
     s = sorted(filtered.items(), key=lambda x: (x[1].get("smoked", 0), x[1].get("lvl", 1)), reverse=True)[:20]
-    m = "🌿 Топ по покуренному\n\n"
+    m = "🌿 Топ травники\n\n"
     medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20"]
     for i, (k, v) in enumerate(s):
         name = v.get("name", "ID" + k)

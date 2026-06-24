@@ -310,32 +310,41 @@ async def admin_give(u: Update, c: ContextTypes.DEFAULT_TYPE):
         await reply_and_delete(u, "❌ Только владелец бота может использовать эту команду!")
         return
 
+    # Получаем цель
+    target = None
+    if u.message.reply_to_message:
+        target = u.message.reply_to_message.from_user
+
+    if not target:
+        await reply_and_delete(u, "❌ Ответь на сообщение пользователя, которому хочешь выдать!")
+        return
+
     text = u.message.text.lower().strip()
     parts = text.split()
 
     if len(parts) < 3:
-        await reply_and_delete(u, "❌ Формат: выдать [предмет] [количество]\nПример: 'выдать траву 100' или 'выдать монеты 500'")
+        await reply_and_delete(u, "❌ Формат: выдать [предмет] [количество]
+Пример: 'выдать монеты 300' или 'выдать траву 100'")
         return
 
-    num = parse_number(text)
+    # Ищем число
+    num = None
+    num_idx = -1
+    for i, part in enumerate(parts):
+        if re.match(r'^\d+$', part):
+            num = int(part)
+            num_idx = i
+            break
+
     if not num or num < 1:
-        await reply_and_delete(u, "❌ Укажи количество! Пример: 'выдать траву 100'")
+        await reply_and_delete(u, "❌ Укажи количество числом! Пример: 'выдать монеты 300'")
         return
 
-    item_words = [p for p in parts[1:] if not re.match(r'\d+', p) and not p.startswith('@')]
-    item = " ".join(item_words) if item_words else parts[1]
-
-    target = None
-    if u.message.reply_to_message:
-        target = u.message.reply_to_message.from_user
-    else:
-        for part in parts:
-            if part.startswith("@"):
-                await reply_and_delete(u, "❌ Ответь на сообщение пользователя, которому хочешь выдать!")
-                return
-
-    if not target:
-        target = u.effective_user
+    # Предмет — всё между "выдать" и числом
+    item_parts = parts[1:num_idx] if num_idx > 1 else parts[1:]
+    item = " ".join(item_parts).strip()
+    if not item:
+        item = parts[1] if len(parts) > 1 else ""
 
     d = load()
     ud = get_user(d, target.id, u.effective_chat.id)
@@ -366,31 +375,43 @@ async def admin_give(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if item_key == "lvl":
         ud["lvl"] = num
         ud["xp"] = 0
-        msg = f"📊 Уровень установлен!\n\n👤 {target.first_name}\n📊 Новый уровень: {num}"
+        msg = f"📊 Уровень установлен!
+
+👤 {target.first_name}
+📊 Новый уровень: {num}"
     elif item_key == "luck":
-        # Give random luck items
         ud["luck_x2"] += num
         ud["luck_x3"] += num
         ud["luck_x4"] += num
         ud["luck_x5"] += num
         ud["luck_x10"] += num
-        msg = f"✅ Выдано!\n\n🍀 Удача: +{num} каждого типа (x2, x3, x4, x5, x10)\n👤 Получатель: {target.first_name}"
+        msg = f"✅ Выдано!
+
+🍀 Удача: +{num} каждого типа (x2, x3, x4, x5, x10)
+👤 Получатель: {target.first_name}"
     elif item_key.startswith("luck_"):
         ud[item_key] += num
         luck_name = item_key.replace("luck_", "").upper()
-        msg = f"✅ Выдано!\n\n{LUCK_ITEMS.get(item_key.replace('luck_', 'x'), {}).get('emoji', '🍀')} Удача {luck_name}: +{num}\n👤 Получатель: {target.first_name}\n📦 Теперь: {ud[item_key]}"
+        msg = f"✅ Выдано!
+
+{LUCK_ITEMS.get(item_key.replace('luck_', 'x'), {}).get('emoji', '🍀')} Удача {luck_name}: +{num}
+👤 Получатель: {target.first_name}
+📦 Теперь: {ud[item_key]}"
     else:
         ud[item_key] += num
         item_names = {
             "grass": "🌿 Травы", "tobacco": "📦 Табака", "coins": "💰 Монет",
             "clocks": "⏱️ Часов", "cigarettes": "🚬 Сигарет", "cigars": "🚬 Сигар", "xp": "⭐ Опыта"
         }
-        msg = f"✅ Выдано!\n\n{item_names.get(item_key, item_key)}: +{num}\n👤 Получатель: {target.first_name}\n📦 Теперь: {ud[item_key]}"
+        msg = f"✅ Выдано!
+
+{item_names.get(item_key, item_key)}: +{num}
+👤 Получатель: {target.first_name}
+📦 Теперь: {ud[item_key]}"
 
     ud["name"] = target.username or target.first_name
     save(d)
     await reply_and_delete(u, msg)
-
 
 async def admin_reset(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u):
@@ -1263,10 +1284,14 @@ async def bet(u: Update, c: ContextTypes.DEFAULT_TYPE):
     item_key = "tobacco" if is_tobacco else "grass"
     num = parse_number(text)
     if not num or num < 1:
-        await reply_and_delete(u, "❌ Укажи ставку! Например:\n🃏 'ставка 5' — ставка 5 гр травы\n🃏 'ставка 10 табак' — ставка 10 гр табака")
+        await reply_and_delete(u, "❌ Укажи ставку! Например:
+🃏 'ставка 5' — ставка 5 гр травы
+🃏 'ставка 10 табак' — ставка 10 гр табака")
         return save(d)
     if ud[item_key] < num:
-        await reply_and_delete(u, f"😢 Недостаточно {item_name}!\n📦 У тебя: {ud[item_key]} гр\n🃏 Ставка: {num} гр")
+        await reply_and_delete(u, f"😢 Недостаточно {item_name}!
+📦 У тебя: {ud[item_key]} гр
+🃏 Ставка: {num} гр")
         return save(d)
 
     # Check active luck
@@ -1284,7 +1309,8 @@ async def bet(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
     ud[item_key] -= num
     ud["name"] = u.effective_user.username or u.effective_user.first_name
-    save(d)
+    # НЕ сохраняем здесь — сохраним один раз в конце
+
     dice_msg = await u.message.reply_dice(emoji="🎲")
     asyncio.create_task(auto_delete(dice_msg))
     await asyncio.sleep(2)
@@ -1299,18 +1325,30 @@ async def bet(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if r <= win_threshold:
         w = num * 2 * luck_mult
         ud[item_key] += w
-        msg = f"🎲 Ставка {num} гр {item_name}\n\n{luck_emoji} Удача x{luck_mult}!\n🎰 Выпало: {r}\n🎉 ПОБЕДА!\n💰 Выигрыш: {w} гр"
+        msg = f"🎲 Ставка {num} гр {item_name}
+
+{luck_emoji} Удача x{luck_mult}!
+🎰 Выпало: {r}
+🎉 ПОБЕДА!
+💰 Выигрыш: {w} гр"
     elif r <= draw_threshold:
         ud[item_key] += num
-        msg = f"🎲 Ставка {num} гр {item_name}\n\n{luck_emoji} Удача x{luck_mult}!\n🎰 Выпало: {r}\n😐 Ничья — ставка возвращена"
+        msg = f"🎲 Ставка {num} гр {item_name}
+
+{luck_emoji} Удача x{luck_mult}!
+🎰 Выпало: {r}
+😐 Ничья — ставка возвращена"
     else:
-        msg = f"🎲 Ставка {num} гр {item_name}\n\n{luck_emoji} Удача x{luck_mult}!\n🎰 Выпало: {r}\n😭 ПРОИГРЫШ!"
-    msg += f"\n🎒 Баланс {item_name}: {ud[item_key]} гр"
-    save(d)
+        msg = f"🎲 Ставка {num} гр {item_name}
+
+{luck_emoji} Удача x{luck_mult}!
+🎰 Выпало: {r}
+😭 ПРОИГРЫШ!"
+    msg += f"
+🎒 Баланс {item_name}: {ud[item_key]} гр"
+    save(d)  # СОХРАНЯЕМ ОДИН РАЗ В КОНЦЕ
     await reply_and_delete(u, msg)
 
-
-# === ДЕП-ИГРА (КАЗИНО) ===
 async def deposit_game(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u):
         return
@@ -1320,16 +1358,20 @@ async def deposit_game(u: Update, c: ContextTypes.DEFAULT_TYPE):
     num = parse_number(text)
 
     if not num or num < 1:
-        await reply_and_delete(u, "❌ Укажи деп! Например:\n💰 'деп 100' — депнуть 100 монет\n💰 'деп 500' — депнуть 500 монет")
+        await reply_and_delete(u, "❌ Укажи деп! Например:
+💰 'деп 100' — депнуть 100 монет
+💰 'деп 500' — депнуть 500 монет")
         return save(d)
 
     if ud["coins"] < num:
-        await reply_and_delete(u, f"😢 Недостаточно монет!\n💰 У тебя: {ud['coins']} монет\n💰 Хочешь депнуть: {num} монет")
+        await reply_and_delete(u, f"😢 Недостаточно монет!
+💰 У тебя: {ud['coins']} монет
+💰 Хочешь депнуть: {num} монет")
         return save(d)
 
     ud["coins"] -= num
     ud["name"] = u.effective_user.username or u.effective_user.first_name
-    save(d)
+    # НЕ сохраняем здесь
 
     # Animation
     spin_msg = await u.message.reply_text("🎰 Крутим барабан...")
@@ -1360,25 +1402,41 @@ async def deposit_game(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if r <= big_win_threshold:
         w = num * 5 * luck_mult
         ud["coins"] += w
-        result = f"🎰🎰🎰 ДЖЕКПОТ!!! 🎰🎰🎰\n\n{luck_emoji} Удача x{luck_mult}!\n🎰 Выпало: {r}\n💰 ДЕП x5!\n💰 Выигрыш: {w} монет"
+        result = f"🎰🎰🎰 ДЖЕКПОТ!!! 🎰🎰🎰
+
+{luck_emoji} Удача x{luck_mult}!
+🎰 Выпало: {r}
+💰 ДЕП x5!
+💰 Выигрыш: {w} монет"
     elif r <= win_threshold:
         w = num * 2 * luck_mult
         ud["coins"] += w
-        result = f"🎉 ПОБЕДА!\n\n{luck_emoji} Удача x{luck_mult}!\n🎰 Выпало: {r}\n💰 ДЕП x2!\n💰 Выигрыш: {w} монет"
+        result = f"🎉 ПОБЕДА!
+
+{luck_emoji} Удача x{luck_mult}!
+🎰 Выпало: {r}
+💰 ДЕП x2!
+💰 Выигрыш: {w} монет"
     elif r <= 50:
         ud["coins"] += num
-        result = f"😐 Ничья\n\n{luck_emoji} Удача x{luck_mult}!\n🎰 Выпало: {r}\n💰 Деп возвращён"
-    else:
-        result = f"😭 ПРОИГРЫШ!\n\n{luck_emoji} Удача x{luck_mult}!\n🎰 Выпало: {r}\n💰 Деп сожрало казино"
+        result = f"😐 Ничья
 
-    result += f"\n💰 Баланс: {ud['coins']} монет"
-    save(d)
+{luck_emoji} Удача x{luck_mult}!
+🎰 Выпало: {r}
+💰 Деп возвращён"
+    else:
+        result = f"😭 ПРОИГРЫШ!
+
+{luck_emoji} Удача x{luck_mult}!
+🎰 Выпало: {r}
+💰 Деп сожрало казино"
+
+    result += f"
+💰 Баланс: {ud['coins']} монет"
+    save(d)  # ОДИН РАЗ В КОНЦЕ
     await spin_msg.edit_text(result)
     asyncio.create_task(auto_delete(spin_msg))
     asyncio.create_task(auto_delete(u.message, delay=AUTO_DELETE_DELAY))
-
-
-TRADE_STATE = {}
 
 async def trade_start(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u):
@@ -1595,7 +1653,9 @@ async def bet_coins(u: Update, c: ContextTypes.DEFAULT_TYPE):
         await reply_and_delete(u, "❌ Укажи ставку! Например: 'ставка монет 100'")
         return save(d)
     if ud["coins"] < num:
-        msg = f"😢 Недостаточно монет!\n💰 У тебя: {ud['coins']} монет\n🃏 Ставка: {num} монет"
+        msg = f"😢 Недостаточно монет!
+💰 У тебя: {ud['coins']} монет
+🃏 Ставка: {num} монет"
         await reply_and_delete(u, msg)
         return save(d)
 
@@ -1613,7 +1673,8 @@ async def bet_coins(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
     ud["coins"] -= num
     ud["name"] = u.effective_user.username or u.effective_user.first_name
-    save(d)
+    # НЕ сохраняем здесь
+
     dice_msg = await u.message.reply_dice(emoji="🎲")
     asyncio.create_task(auto_delete(dice_msg))
     await asyncio.sleep(2)
@@ -1627,14 +1688,28 @@ async def bet_coins(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if r <= win_threshold:
         w = num * 2 * luck_mult
         ud["coins"] += w
-        msg = f"🎲 Ставка {num} монет\n\n{luck_emoji} Удача x{luck_mult}!\n🎰 Выпало: {r}\n🎉 ПОБЕДА!\n💰 Выигрыш: {w} монет"
+        msg = f"🎲 Ставка {num} монет
+
+{luck_emoji} Удача x{luck_mult}!
+🎰 Выпало: {r}
+🎉 ПОБЕДА!
+💰 Выигрыш: {w} монет"
     elif r <= draw_threshold:
         ud["coins"] += num
-        msg = f"🎲 Ставка {num} монет\n\n{luck_emoji} Удача x{luck_mult}!\n🎰 Выпало: {r}\n😐 Ничья - ставка возвращена"
+        msg = f"🎲 Ставка {num} монет
+
+{luck_emoji} Удача x{luck_mult}!
+🎰 Выпало: {r}
+😐 Ничья - ставка возвращена"
     else:
-        msg = f"🎲 Ставка {num} монет\n\n{luck_emoji} Удача x{luck_mult}!\n🎰 Выпало: {r}\n😭 ПРОИГРЫШ!"
-    msg = msg + f"\n💰 Баланс: {ud['coins']} монет"
-    save(d)
+        msg = f"🎲 Ставка {num} монет
+
+{luck_emoji} Удача x{luck_mult}!
+🎰 Выпало: {r}
+😭 ПРОИГРЫШ!"
+    msg = msg + f"
+💰 Баланс: {ud['coins']} монет"
+    save(d)  # ОДИН РАЗ В КОНЦЕ
     await reply_and_delete(u, msg)
 
 # === ЛОТЕРЕЯ ТРАВНИКА ===
@@ -1644,12 +1719,14 @@ async def lottery(u: Update, c: ContextTypes.DEFAULT_TYPE):
     d = load()
     ud = get_user(d, u.effective_user.id, u.effective_chat.id)
     if ud["coins"] < LOTTERY_PRICE:
-        msg = f"😢 Недостаточно монет!\n🎰 Билет: {LOTTERY_PRICE} монет\n💰 У тебя: {ud['coins']} монет"
+        msg = f"😢 Недостаточно монет!
+🎰 Билет: {LOTTERY_PRICE} монет
+💰 У тебя: {ud['coins']} монет"
         await reply_and_delete(u, msg)
         return save(d)
     ud["coins"] -= LOTTERY_PRICE
     ud["name"] = u.effective_user.username or u.effective_user.first_name
-    save(d)
+    # НЕ сохраняем здесь
 
     spin_msg = await u.message.reply_text("🎰 Крутим барабан...")
     await asyncio.sleep(1)
@@ -1678,23 +1755,33 @@ async def lottery(u: Update, c: ContextTypes.DEFAULT_TYPE):
     ud["xp"] += 2
     old = ud["lvl"]
     new = lvl_up(ud)
-    save(d)
 
-    event_msg = "\n🎉 ИВЕНТ АКТИВЕН! x3 удача!" if EVENT_ACTIVE else ""
-    msg = f"🎰🎰🎰 ЛОТЕРЕЯ ТРАВНИКА 🎰🎰🎰\n\n"
-    msg = msg + f"{prize_data['emoji']} {prize_name}!\n\n"
-    msg = msg + f"💰 Билет: {LOTTERY_PRICE} монет\n"
-    msg = msg + f"💰 Выигрыш: {win_amount} монет (x{prize_data['multiplier']})\n"
-    msg = msg + f"💰 Баланс: {ud['coins']} монет\n"
+    event_msg = "
+🎉 ИВЕНТ АКТИВЕН! x3 удача!" if EVENT_ACTIVE else ""
+    msg = f"🎰🎰🎰 ЛОТЕРЕЯ ТРАВНИКА 🎰🎰🎰
+
+"
+    msg = msg + f"{prize_data['emoji']} {prize_name}!
+
+"
+    msg = msg + f"💰 Билет: {LOTTERY_PRICE} монет
+"
+    msg = msg + f"💰 Выигрыш: {win_amount} монет (x{prize_data['multiplier']})
+"
+    msg = msg + f"💰 Баланс: {ud['coins']} монет
+"
     msg = msg + "⭐ +2 XP"
     if new > old:
-        msg = msg + f"\n\n🎉 УРОВЕНЬ ПОВЫШЕН!\nТеперь ты {TITLES.get(new, '🌟 Уровень ' + str(new))}!"
+        msg = msg + f"
+
+🎉 УРОВЕНЬ ПОВЫШЕН!
+Теперь ты {TITLES.get(new, '🌟 Уровень ' + str(new))}!"
     msg += event_msg
 
+    save(d)  # ОДИН РАЗ В КОНЦЕ
     await spin_msg.edit_text(msg)
     asyncio.create_task(auto_delete(spin_msg))
     asyncio.create_task(auto_delete(u.message, delay=AUTO_DELETE_DELAY))
-
 
 async def text(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if u.effective_chat.type == "private":

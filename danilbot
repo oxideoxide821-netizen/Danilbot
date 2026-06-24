@@ -208,7 +208,7 @@ async def reply_del(u, text, del_user=True):
 
 async def check_group(u):
     if u.effective_chat.type == "private":
-        await u.message.reply_text("🌿 Я бот для чатов! Добавь меня в группу")
+        await u.message.reply_text("🌿 Я бот для чатов! Добавляй в чат и становись миллионером")
         return False
     return True
 
@@ -1114,7 +1114,7 @@ async def admin_reset(u: Update, c: ContextTypes.DEFAULT_TYPE):
 async def text(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not u.message or not u.message.text: return
     if u.effective_chat.type == "private":
-        await u.message.reply_text("🌿 Я бот для чатов! Добавь меня в группу 🌿"); return
+        await u.message.reply_text("🌿 Я бот для чатов! Добавляй в чат и становись миллионером"); return
     t = u.message.text.lower().strip()
 
     if t in ["x2", "x3", "x4", "x5", "x10"]:

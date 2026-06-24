@@ -191,21 +191,21 @@ async def reply_del(u, text, del_user=True):
 
 async def check_group(u):
     if u.effective_chat.type == "private":
-        await u.message.reply_text("🌿 Я бот для чатов! Добавляй в чат и остановись миллионером 🌿")
+        await u.message.reply_text("🌿 Я бот для чатов! Добавляй в чат и становись миллионером 🌿")
         return False
     return True
 
 # === COMMANDS ===
 async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u): return
-    await reply_del(u, "🌿 Собирай траву и становись миллионером 🌿\n\nКоманды: собрать, крафт, курить, профиль, инвентарь, бонус, ферма, роб, ставка, деп, лотерея, топ")
+    await reply_del(u, "🌿 Собирай травку и становись миллионером\n\nКоманды: собрать, крафт, курить, профиль, инвентарь, бонус, ферма, роб, ставка, деп, лотерея, топ")
 
 async def collect(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u): return
     d = load(); ud = get_user(d, u.effective_user.id, u.effective_chat.id)
     now = datetime.now().timestamp(); cd = get_cd(ud); passed = now - ud["last"]
     if passed < cd:
-        await reply_del(u, f"Трава еще растет🌿{fmt(cd - passed)}!\nКулдаун: {fmt(cd)} (Lv.{ud['lvl']})")
+        await reply_del(u, f"Травка ещё растёт🌿{fmt(cd - passed)}!\nКулдаун: {fmt(cd)} (Lv.{ud['lvl']})")
         return save(d)
     r = random.randint(1, 100)
     gt = "обычная" if r <= 50 else "редкая" if r <= 80 else "эпическая" if r <= 95 else "легендарная" if r <= 99 else "божественная"
@@ -1162,6 +1162,18 @@ async def text(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if t.startswith("продаю табак"): await sell(u, c); return
     if t.startswith("сбыть траву"): await sell(u, c); return
     if t.startswith("сбыть табак"): await sell(u, c); return
+    # Rackumar shop items - route to buy()
+    if t.startswith("купить благословение"): await buy(u, c); return
+    if t.startswith("купить двойной"): await buy(u, c); return
+    if t.startswith("купить щит"): await buy(u, c); return
+    if t.startswith("купить магнит"): await buy(u, c); return
+    if t.startswith("купить золотую"): await buy(u, c); return
+    if t.startswith("купить кристалл"): await buy(u, c); return
+    if t.startswith("купить портал"): await buy(u, c); return
+    if t.startswith("купить копилку"): await buy(u, c); return
+    if t.startswith("купить взрыв"): await buy(u, c); return
+    if t.startswith("купить легендарное"): await buy(u, c); return
+    if t.startswith("купить бессмертие"): await buy(u, c); return
 
     # Greetings
     if t in ["привет", "здарова", "ку", "хай", "йо", "здравствуй", "прив", "хей",

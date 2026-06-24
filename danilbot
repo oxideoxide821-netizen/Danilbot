@@ -209,7 +209,7 @@ async def check_group(u):
 # === COMMANDS ===
 async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u): return
-    await reply_del(u, "🌿 Собирай травку и становись миллионером 🌿\n\nКоманды: собрать, крафт, курить, профиль, инвентарь, бонус, ферма, роб, ставка, деп, лотерея, топ")
+    await reply_del(u, "🌿 Собирай Травку и становись миллионером 🌿\n\nКоманды: собрать, крафт, курить, профиль, инвентарь, бонус, ферма, роб, ставка, деп, лотерея, топ")
 
 async def collect(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u): return
@@ -807,18 +807,6 @@ async def lottery(u: Update, c: ContextTypes.DEFAULT_TYPE):
     await spin.edit_text(msg); asyncio.create_task(auto_del(spin))
     asyncio.create_task(auto_del(u.message, delay=AUTO_DELETE_DELAY))
 
-    async with _db_lock:
-        ud = get_user_db(u.effective_chat.id, target.id)
-        for k in ["grass", "smoked", "xp", "lvl", "last", "clocks", "bonus", "tobacco", "coins",
-                  "cigarettes", "cigars", "fast_farm", "fast_farm_last", "last_grass_type", "is_bot",
-                  "luck_x2", "luck_x3", "luck_x4", "luck_x5", "luck_x10", "active_luck", "rackumar",
-                  "bag", "rob_lvl", "rob_last", "blessing_end", "double_harvest", "shield_end",
-                  "magnet_end", "golden_hand_end", "immortal_end"]:
-            ud[k] = 0
-        ud["lvl"] = 1; ud["name"] = target.username or target.first_name
-        save_user_db(u.effective_chat.id, target.id, ud)
-    await reply_del(u, f"🗑️ Сброс!\n\n👤 {target.first_name} обнулён!")
-
 async def admin_give_all(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u): return
     if not is_owner(u.effective_user.id):
@@ -988,7 +976,6 @@ async def unmute(u: Update, c: ContextTypes.DEFAULT_TYPE):
     except Exception as e: await reply_del(u, f"❌ Ошибка: {e}")
 
 
-
 async def rob(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u): return
     text = u.message.text.lower().strip()
@@ -998,7 +985,6 @@ async def rob(u: Update, c: ContextTypes.DEFAULT_TYPE):
     else:
         parts = text.split()
         if len(parts) >= 2:
-            # Try to find user by mention or ID
             mention_text = parts[1].replace("@", "")
             users = get_all_users_db(u.effective_chat.id)
             for user in users:
@@ -1020,23 +1006,19 @@ async def rob(u: Update, c: ContextTypes.DEFAULT_TYPE):
         passed = now - ud.get("rob_last", 0)
         cd = rob_cd(ud)
         if passed < cd:
-            await reply_del(u, f"⏳ Подожди {fmt(cd - passed)}!
-🥷 Кулдаун: {fmt(cd)}"); return
+            await reply_del(u, f"⏳ Подожди {fmt(cd - passed)}!\n🥷 Кулдаун: {fmt(cd)}"); return
         if td.get("shield_end", 0) > now:
             await reply_del(u, f"🛡️ {target.first_name} под щитом! Нельзя ограбить!"); return
         if td.get("grass", 0) < 1 and td.get("tobacco", 0) < 1 and td.get("coins", 0) < 1:
             await reply_del(u, f"😢 У {target.first_name} нет ничего ценного!"); return
-        # Calculate steal amount
         max_steal = rob_max(ud)
         if ud.get("golden_hand_end", 0) > now: max_steal = int(max_steal * 1.5)
-        # Luck multiplier
         luck_mult = 1; luck_emoji = ""
         if ud.get("active_luck") in LUCK:
             ld = LUCK[ud["active_luck"]]; luck_mult = ld["m"]; luck_emoji = ld["e"]
             lk = f"luck_{ud['active_luck']}"; ud[lk] -= 1
             if ud[lk] <= 0: ud["active_luck"] = None
         eff = luck_mult * (EVENT_MULT if EVENT_ACTIVE else 1)
-        # Choose what to steal
         items = []
         if td.get("grass", 0) > 0: items.append(("grass", "🌿", "травы"))
         if td.get("tobacco", 0) > 0: items.append(("tobacco", "📦", "табака"))
@@ -1045,47 +1027,29 @@ async def rob(u: Update, c: ContextTypes.DEFAULT_TYPE):
         steal_amt = min(random.randint(1, max_steal), td.get(item_key, 0))
         steal_amt = max(1, int(steal_amt * eff))
         steal_amt = min(steal_amt, td.get(item_key, 0))
-        # Success chance
         success_chance = 50 + (ud["rob_lvl"] - 1) * 5
         if ud.get("golden_hand_end", 0) > now: success_chance += 25
         success_chance = min(95, int(success_chance * eff))
         ud["rob_last"] = now
         ud["name"] = u.effective_user.username or u.effective_user.first_name
         if random.randint(1, 100) <= success_chance:
-            # Success
             td[item_key] -= steal_amt; ud[item_key] += steal_amt
             ud["xp"] += 5; old = ud["lvl"]; new = lvl_up(ud)
             save_user_db(u.effective_chat.id, u.effective_user.id, ud)
             save_user_db(u.effective_chat.id, target.id, td)
-            msg = f"🥷 ОГРАБЛЕНИЕ!
-
-{luck_emoji} Удача x{eff}!
-🎯 Цель: {target.first_name}
-{emoji} Украдено: {steal_amt} {item_name}
-⭐ +5 XP"
+            msg = f"🥷 ОГРАБЛЕНИЕ!\n\n{luck_emoji} Удача x{eff}!\n🎯 Цель: {target.first_name}\n{emoji} Украдено: {steal_amt} {item_name}\n⭐ +5 XP"
             if new > old: msg += f"\n\n🎉 УРОВЕНЬ ПОВЫШЕН!\n{TITLES.get(new, 'Lv.' + str(new))}!"
         else:
-            # Fail - lose some resources or get caught
             penalty = random.randint(1, 3)
             if ud.get("immortal_end", 0) > now:
                 save_user_db(u.effective_chat.id, u.effective_user.id, ud)
-                msg = f"🥷 ОГРАБЛЕНИЕ ПРОВАЛИЛОСЬ!
-
-{luck_emoji} Удача x{eff}!
-🎯 Цель: {target.first_name}
-😭 Тебя поймали!
-👼 Бессмертие спасло ресурсы!"
+                msg = f"🥷 ОГРАБЛЕНИЕ ПРОВАЛИЛОСЬ!\n\n{luck_emoji} Удача x{eff}!\n🎯 Цель: {target.first_name}\n😭 Тебя поймали!\n👼 Бессмертие спасло ресурсы!"
             else:
                 if ud.get("coins", 0) >= penalty: ud["coins"] -= penalty
                 elif ud.get("grass", 0) >= penalty: ud["grass"] -= penalty
                 elif ud.get("tobacco", 0) >= penalty: ud["tobacco"] -= penalty
                 save_user_db(u.effective_chat.id, u.effective_user.id, ud)
-                msg = f"🥷 ОГРАБЛЕНИЕ ПРОВАЛИЛОСЬ!
-
-{luck_emoji} Удача x{eff}!
-🎯 Цель: {target.first_name}
-😭 Тебя поймали!
-📦 Штраф: {penalty}"
+                msg = f"🥷 ОГРАБЛЕНИЕ ПРОВАЛИЛОСЬ!\n\n{luck_emoji} Удача x{eff}!\n🎯 Цель: {target.first_name}\n😭 Тебя поймали!\n📦 Штраф: {penalty}"
         await reply_del(u, msg)
 
 async def upgrade_rob(u: Update, c: ContextTypes.DEFAULT_TYPE):
@@ -1096,17 +1060,11 @@ async def upgrade_rob(u: Update, c: ContextTypes.DEFAULT_TYPE):
             await reply_del(u, "👑 Максимальный уровень вора!"); return
         cost = 500 * ud["rob_lvl"]
         if ud["coins"] < cost:
-            await reply_del(u, f"😢 Недостаточно!
-🥷 Вор Lv.{ud['rob_lvl']+1} = {cost}\n💰 У тебя: {ud['coins']}"); return
+            await reply_del(u, f"😢 Недостаточно!\n🥷 Вор Lv.{ud['rob_lvl']+1} = {cost}\n💰 У тебя: {ud['coins']}"); return
         ud["coins"] -= cost; ud["rob_lvl"] += 1
         ud["name"] = u.effective_user.username or u.effective_user.first_name
         save_user_db(u.effective_chat.id, u.effective_user.id, ud)
-    await reply_del(u, f"🥷 Вор улучшен!
-
-📊 Lv.{ud['rob_lvl']}
-💰 Потрачено: {cost}
-⚡ Макс украсть: {rob_max(ud)}
-⏱️ Кулдаун: {fmt(rob_cd(ud))}")
+    await reply_del(u, f"🥷 Вор улучшен!\n\n📊 Lv.{ud['rob_lvl']}\n💰 Потрачено: {cost}\n⚡ Макс украсть: {rob_max(ud)}\n⏱️ Кулдаун: {fmt(rob_cd(ud))}")
 
 async def admin_give(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u): return
@@ -1130,11 +1088,7 @@ async def admin_give(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ud = get_user_db(u.effective_chat.id, target.id)
         ud[item_key] += num; ud["name"] = target.username or target.first_name
         save_user_db(u.effective_chat.id, target.id, ud)
-    await reply_del(u, f"👑 Выдача!
-
-👤 {target.first_name}
-{emoji} +{num} {name}
-📦 Теперь: {ud[item_key]}")
+    await reply_del(u, f"👑 Выдача!\n\n👤 {target.first_name}\n{emoji} +{num} {name}\n📦 Теперь: {ud[item_key]}")
 
 async def admin_reset(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u): return
@@ -1152,9 +1106,7 @@ async def admin_reset(u: Update, c: ContextTypes.DEFAULT_TYPE):
             ud[k] = 0
         ud["lvl"] = 1; ud["name"] = target.username or target.first_name
         save_user_db(u.effective_chat.id, target.id, ud)
-    await reply_del(u, f"🗑️ Сброс!
-
-👤 {target.first_name} обнулён!")
+    await reply_del(u, f"🗑️ Сброс!\n\n👤 {target.first_name} обнулён!")
 
 async def text(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if u.effective_chat.type == "private":

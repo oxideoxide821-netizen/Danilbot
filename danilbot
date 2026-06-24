@@ -330,7 +330,7 @@ async def admin_give(u: Update, c: ContextTypes.DEFAULT_TYPE):
     num = None
     num_idx = -1
     for i, part in enumerate(parts):
-        if re.match(r'^\d+$, part):
+        if re.match(r'^\d+$', part):
             num = int(part)
             num_idx = i
             break
@@ -385,7 +385,7 @@ async def admin_give(u: Update, c: ContextTypes.DEFAULT_TYPE):
     elif item_key.startswith("luck_"):
         ud[item_key] += num
         luck_name = item_key.replace("luck_", "").upper()
-        msg = f"✅ Выдано!\n\n{LUCK_ITEMS.get(item_key.replace(\'luck_', 'x'), {}).get(\'emoji', '🍀')} Удача {luck_name}: +{num}\n👤 Получатель: {target.first_name}\n📦 Теперь: {ud[item_key]}"
+        msg = f"✅ Выдано!\n\n{LUCK_ITEMS.get(item_key.replace('luck_', 'x'), {}).get('emoji', '🍀')} Удача {luck_name}: +{num}\n👤 Получатель: {target.first_name}\n📦 Теперь: {ud[item_key]}"
     else:
         ud[item_key] += num
         item_names = {
@@ -1689,7 +1689,7 @@ async def lottery(u: Update, c: ContextTypes.DEFAULT_TYPE):
     msg = msg + f"💰 Баланс: {ud['coins']} монет\n"
     msg = msg + "⭐ +2 XP"
     if new > old:
-        msg = msg + f"\n\n🎉 УРОВЕНЬ ПОВЫШЕН!\nТеперь ты {TITLES.get(new, \'🌟 Уровень ' + str(new))}!"
+        msg = msg + f"\n\n🎉 УРОВЕНЬ ПОВЫШЕН!\nТеперь ты {TITLES.get(new, '🌟 Уровень ' + str(new))}!"
     msg += event_msg
 
     save(d)  # ОДИН РАЗ В КОНЦЕ

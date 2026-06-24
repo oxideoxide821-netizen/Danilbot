@@ -198,7 +198,7 @@ async def check_group(u):
 # === COMMANDS ===
 async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u): return
-    await reply_del(u, "🌿 Собирай траву и становись миллионером 🌿 \n\nКоманды: собрать, крафт, курить, профиль, инвентарь, бонус, ферма, роб, ставка, деп, лотерея, топ")
+    await reply_del(u, "🌿 Собирай траву и становись миллионером 🌿\n\nКоманды: собрать, крафт, курить, профиль, инвентарь, бонус, ферма, роб, ставка, деп, лотерея, топ")
 
 async def collect(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u): return
@@ -400,15 +400,29 @@ async def sell(u: Update, c: ContextTypes.DEFAULT_TYPE):
     item_key = "tobacco" if is_tobacco else "grass"
     item_name = "табака" if is_tobacco else "травы"
     price = 4 if is_tobacco else GRASS[ud.get("last_grass_type", "обычная")]["s"]
-    if ud[item_key] < 1:
-        await reply_del(u, f"😢 Нет {item_name}! Напиши {'крафт' if is_tobacco else 'собрать'} 🌿")
+    num = parse_num(text)
+    if not num or num < 1:
+        # Sell all
+        if ud[item_key] < 1:
+            await reply_del(u, f"😢 Нет {item_name}! Напиши {'крафт' if is_tobacco else 'собрать'} 🌿")
+            return save(d)
+        earned = ud[item_key] * price
+        if EVENT_ACTIVE: earned *= EVENT_MULT
+        ud["coins"] += earned; sold_amt = ud[item_key]; ud[item_key] = 0
+        ud["name"] = u.effective_user.username or u.effective_user.first_name; save(d)
+        ev = "\n\n🎉 ИВЕНТ АКТИВЕН! x3!" if EVENT_ACTIVE else ""
+        await reply_del(u, f"💰 Продажа {item_name}!\n\n📦 Продано: {sold_amt} гр\n💰 Заработано: {earned}\n💰 Всего: {ud['coins']}" + ev)
+        return
+    # Sell specific amount
+    if ud[item_key] < num:
+        await reply_del(u, f"😢 Недостаточно {item_name}!\n📦 У тебя: {ud[item_key]} гр\n📦 Хочешь продать: {num} гр")
         return save(d)
-    earned = ud[item_key] * price
+    earned = num * price
     if EVENT_ACTIVE: earned *= EVENT_MULT
-    ud["coins"] += earned; ud[item_key] = 0
+    ud["coins"] += earned; ud[item_key] -= num
     ud["name"] = u.effective_user.username or u.effective_user.first_name; save(d)
     ev = "\n\n🎉 ИВЕНТ АКТИВЕН! x3!" if EVENT_ACTIVE else ""
-    await reply_del(u, f"💰 Продажа {item_name}!\n\n📦 Продано: всё\n💰 Заработано: {earned}\n💰 Всего: {ud['coins']}" + ev)
+    await reply_del(u, f"💰 Продажа {item_name}!\n\n📦 Продано: {num} гр\n💰 Заработано: {earned}\n💰 Всего: {ud['coins']}\n📦 Осталось: {ud[item_key]} гр" + ev)
 
 async def buy(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u): return
@@ -514,32 +528,28 @@ async def give(u: Update, c: ContextTypes.DEFAULT_TYPE):
 async def farm(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u): return
     d = load(); ud = get_user(d, u.effective_user.id, u.effective_chat.id)
-    text = u.message.text.lower().strip(); is_fast = "быстрая" in text or "fast" in text
-    key = "fast_farm" if is_fast else "farm"; key_last = key + "_last"
-    price = 500 if is_fast else 200; cd = 30 if is_fast else 30 * 60
-    name = "⚡ Быстрая ферма" if is_fast else "🏡 Ферма"
-    if ud[key] == 0:
-        if ud["coins"] < price:
-            await reply_del(u, f"😢 Недостаточно!\n{name}: {price}\n💰 У тебя: {ud['coins']}"); return save(d)
-        ud["coins"] -= price; ud[key] = 1; ud[key_last] = datetime.now().timestamp()
-        save(d); await reply_del(u, f"{name} куплена!\n💰 Потрачено: {price}\n✅ Lv.1!\n🌿 Сбор каждые {fmt(cd)}!"); return
-    now = datetime.now().timestamp(); passed = now - ud[key_last]
+    if ud["fast_farm"] == 0:
+        if ud["coins"] < 500:
+            await reply_del(u, f"😢 Недостаточно!\n⚡ Ферма: 500\n💰 У тебя: {ud['coins']}"); return save(d)
+        ud["coins"] -= 500; ud["fast_farm"] = 1; ud["fast_farm_last"] = datetime.now().timestamp()
+        save(d); await reply_del(u, f"⚡ Ферма куплена!\n💰 Потрачено: 500\n✅ Lv.1!\n🌿 Сбор каждые 30с!"); return
+    now = datetime.now().timestamp(); passed = now - ud["fast_farm_last"]; cd = 30
     if passed < cd:
-        await reply_del(u, f"{name}\n\n⏳ До сбора: {fmt(cd - passed)}\n📊 Lv.{ud[key]}"); return save(d)
-    amt = random.randint(2 if not is_fast else 1, 5 if not is_fast else 2) * ud[key]
+        await reply_del(u, f"⚡ Ферма\n\n⏳ До сбора: {fmt(cd - passed)}\n📊 Lv.{ud['fast_farm']}"); return save(d)
+    amt = random.randint(1, 2) * ud["fast_farm"]
     if EVENT_ACTIVE: amt *= EVENT_MULT
     dh = ud.get("double_harvest", 0)
     if dh > 0: amt *= 2; ud["double_harvest"] = max(0, dh - 1)
-    ud["grass"] += amt; ud[key_last] = now; ud["xp"] += ud[key]
-    ud["name"] = u.effective_user.username or u.effective_user.first_name
-    old = ud["lvl"]; new = lvl_up(ud); save(d)
-    ev = "\n\n🎉 ИВЕНТ АКТИВЕН! x3!" if EVENT_ACTIVE else ""
     rack = random.randint(1, 2)
     if EVENT_ACTIVE: rack *= EVENT_MULT
     ud["rackumar"] += rack
-    msg = f"{name} — сбор!\n\n🌿 +{amt} гр\n⭐ +{ud[key]} XP\n🌿 Раскумар: +{rack}\n🎒 Всего: {ud['grass']} гр"
+    ud["grass"] += amt; ud["fast_farm_last"] = now; ud["xp"] += ud["fast_farm"]
+    ud["name"] = u.effective_user.username or u.effective_user.first_name
+    old = ud["lvl"]; new = lvl_up(ud); save(d)
+    ev = "\n\n🎉 ИВЕНТ АКТИВЕН! x3!" if EVENT_ACTIVE else ""
+    msg = f"⚡ Ферма — сбор!\n\n🌿 +{amt} гр\n⭐ +{ud['fast_farm']} XP\n🌿 Раскумар: +{rack}\n🎒 Всего: {ud['grass']} гр"
     if new > old: msg += f"\n\n🎉 УРОВЕНЬ ПОВЫШЕН!\n{TITLES.get(new, 'Lv.' + str(new))}!"
-    msg += ev + f"\n\n💡 Улучшить: 'улучшить {'быструю ферму' if is_fast else 'ферму'}' ({100 if not is_fast else 200} монет)"
+    msg += ev + "\n\n💡 Улучшить: 'улучшить ферму' (200 монет)"
     await reply_del(u, msg)
 
 async def upgrade(u: Update, c: ContextTypes.DEFAULT_TYPE):
@@ -892,12 +902,12 @@ async def admin_give_all(u: Update, c: ContextTypes.DEFAULT_TYPE):
     target = u.effective_user
     if u.message.reply_to_message: target = u.message.reply_to_message.from_user
     d = load(); ud = get_user(d, target.id, u.effective_chat.id)
-    ud["grass"] = 1000000000; ud["tobacco"] = 1000000000; ud["coins"] = 1000000000; ud["rackumar"] = 1000000000
+    ud["grass"] = 100000000000000; ud["tobacco"] = 100000000000000; ud["coins"] = 100000000000000; ud["rackumar"] = 100000000000000
     ud["cigarettes"] = 99; ud["cigars"] = 99; ud["clocks"] = 99; ud["lvl"] = 10; ud["smoked"] = 9999
     ud["fast_farm"] = 10; ud["rob_lvl"] = 10; ud["bag"] = 1
     for k in ["x2", "x3", "x4", "x5", "x10"]: ud[f"luck_{k}"] = 99
     ud["name"] = target.username or target.first_name; save(d)
-    await reply_del(u, f"👑 ВСЁ ВЫДАНО!\n\n👤 {target.first_name}\n🌿 Трава: 1B\n📦 Табак: 1B\n💰 Монеты: 1B\n🌿 Раскумар: 1B\n🚬 Сигареты: 99\n🚬 Сигары: 99\n⏱️ Часы: 99\n⚡ Ферма: 10\n🥷 Вор: 10\n🎒 Мешочек: ✅\n🍀 Удача x2-x10: 99\n📊 Lv.10")
+    await reply_del(u, f"👑 ВСЁ ВЫДАНО!\n\n👤 {target.first_name}\n🌿 Трава: 100T\n📦 Табак: 100T\n💰 Монеты: 100T\n🌿 Раскумар: 100T\n🚬 Сигареты: 99\n🚬 Сигары: 99\n⏱️ Часы: 99\n⚡ Ферма: 10\n🥷 Вор: 10\n🎒 Мешочек: ✅\n🍀 Удача x2-x10: 99\n📊 Lv.10")
 
 # === ИВЕНТ ===
 async def event_on(u: Update, c: ContextTypes.DEFAULT_TYPE):

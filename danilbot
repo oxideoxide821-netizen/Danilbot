@@ -205,7 +205,7 @@ async def collect(u: Update, c: ContextTypes.DEFAULT_TYPE):
     d = load(); ud = get_user(d, u.effective_user.id, u.effective_chat.id)
     now = datetime.now().timestamp(); cd = get_cd(ud); passed = now - ud["last"]
     if passed < cd:
-        await reply_del(u, f"⏳ Подожди {fmt(cd - passed)}!\n📊 Кулдаун: {fmt(cd)} (Lv.{ud['lvl']})")
+        await reply_del(u, f"Травка ещё растёт🌿 {fmt(cd - passed)}!\nКулдаун: {fmt(cd)} (Lv.{ud['lvl']})")
         return save(d)
     r = random.randint(1, 100)
     gt = "обычная" if r <= 50 else "редкая" if r <= 80 else "эпическая" if r <= 95 else "легендарная" if r <= 99 else "божественная"

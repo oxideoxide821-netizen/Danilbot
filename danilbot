@@ -191,14 +191,14 @@ async def reply_del(u, text, del_user=True):
 
 async def check_group(u):
     if u.effective_chat.type == "private":
-        await u.message.reply_text("🌿 Я бот для чатов! Добавь меня в группу 🌿")
+        await u.message.reply_text("🌿 Я бот для чатов! Добавляй в чат и становись миллионером  🌿")
         return False
     return True
 
 # === COMMANDS ===
 async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u): return
-    await reply_del(u, "🌿 Травка Бот v9\n\nКоманды: собрать, крафт, курить, профиль, инвентарь, бонус, ферма, роб, ставка, деп, лотерея, топ")
+    await reply_del(u, "🌿 Собирай траву и становись миллионером 🌿 \n\nКоманды: собрать, крафт, курить, профиль, инвентарь, бонус, ферма, роб, ставка, деп, лотерея, топ")
 
 async def collect(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u): return

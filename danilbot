@@ -55,7 +55,13 @@ RACK_SHOP = {
     "двойной_урожай": {"p": 200, "e": "🌾", "d": "x2 ферма 10 сборов"},
     "щит": {"p": 300, "e": "🛡️", "d": "Защита от воров 24ч"},
     "магнит": {"p": 500, "e": "🧲", "d": "+25% шанс часов 24ч"},
-    "золотая_рука": {"p": 1000, "e": "✋", "d": "+50% к воровству 24ч"}}
+    "золотая_рука": {"p": 1000, "e": "✋", "d": "+50% к воровству 24ч"},
+    "кристалл_удачи": {"p": 150, "e": "💎", "d": "+1 удача x2"},
+    "портал_травы": {"p": 250, "e": "🌀", "d": "+50 травы мгновенно"},
+    "копилка": {"p": 400, "e": "🏦", "d": "+200 монет мгновенно"},
+    "взрыв_опыта": {"p": 350, "e": "💥", "d": "+50 XP мгновенно"},
+    "легендарный_семя": {"p": 2000, "e": "🌺", "d": "Следующий сбор — божественная трава"},
+    "бессмертие": {"p": 5000, "e": "👼", "d": "Не теряешь ресурсы при проигрыше 24ч"}}
 
 LOTTERY = {
     "Джекпот": {"c": 1, "m": 10, "e": "💎"}, "Крупный": {"c": 5, "m": 5, "e": "🤑"},
@@ -115,7 +121,7 @@ DEF = {"grass": 0, "smoked": 0, "xp": 0, "lvl": 1, "last": 0, "name": "",
        "last_grass_type": "обычная", "is_bot": False,
        "luck_x2": 0, "luck_x3": 0, "luck_x4": 0, "luck_x5": 0, "luck_x10": 0,
        "active_luck": None, "rackumar": 0, "bag": 0, "rob_lvl": 1, "rob_last": 0,
-       "blessing_end": 0, "double_harvest": 0, "shield_end": 0, "magnet_end": 0, "golden_hand_end": 0}
+       "blessing_end": 0, "double_harvest": 0, "shield_end": 0, "magnet_end": 0, "golden_hand_end": 0, "immortal_end": 0}
 
 def ensure(ud):
     changed = False
@@ -185,7 +191,7 @@ async def reply_del(u, text, del_user=True):
 
 async def check_group(u):
     if u.effective_chat.type == "private":
-        await u.message.reply_text("🌿 Я бот для чатов! Добавь меня в группу 🌿")
+        await u.message.reply_text("🌿 Я бот для чатов! Добававляй в чат и становись миллионером 🌿")
         return False
     return True
 
@@ -258,7 +264,10 @@ async def smoke(u: Update, c: ContextTypes.DEFAULT_TYPE):
         old = ud["lvl"]; new = lvl_up(ud); save(d)
         ev = "\n\n🎉 ИВЕНТ АКТИВЕН! x3!" if EVENT_ACTIVE else ""
         fx = "\n".join(random.sample(SMOKE_TXT, min(3, len(SMOKE_TXT))))
-        msg = f"🚬🚬🚬 ВЫКУРИЛ ВСЁ!!! 🚬🚬🚬\n\n📦 {total} гр\n\n{fx}\n\n⭐ +{xp} XP\n💰 +{coins}\n📊 Всего: {ud['smoked']} гр"
+        rack_gain = random.randint(3, 8)
+        if EVENT_ACTIVE: rack_gain *= EVENT_MULT
+        ud["rackumar"] += rack_gain
+        msg = f"🚬🚬🚬 ВЫКУРИЛ ВСЁ!!! 🚬🚬🚬\n\n📦 {total} гр\n\n{fx}\n\n⭐ +{xp} XP\n💰 +{coins}\n🌿 Раскумар: +{rack_gain}\n📊 Всего: {ud['smoked']} гр"
         if new > old: msg += f"\n\n🎉 УРОВЕНЬ ПОВЫШЕН!\n{TITLES.get(new, 'Lv.' + str(new))}!"
         msg += ev
         await reply_del(u, msg); return
@@ -274,7 +283,10 @@ async def smoke(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ud["name"] = u.effective_user.username or u.effective_user.first_name
         old = ud["lvl"]; new = lvl_up(ud); save(d)
         ev = "\n\n🎉 ИВЕНТ АКТИВЕН! x3!" if EVENT_ACTIVE else ""
-        msg = f"🚬 Сигарета!\n\n{random.choice(CIG_FX)}\n\n⭐ +{xp} XP\n💰 +{coins}\n📊 Всего: {ud['smoked']} гр\n🚬 Осталось: {ud['cigarettes']} {decl_cig(ud['cigarettes'])}"
+        rack_gain = random.randint(1, 2)
+        if EVENT_ACTIVE: rack_gain *= EVENT_MULT
+        ud["rackumar"] += rack_gain
+        msg = f"🚬 Сигарета!\n\n{random.choice(CIG_FX)}\n\n⭐ +{xp} XP\n💰 +{coins}\n🌿 Раскумар: +{rack_gain}\n📊 Всего: {ud['smoked']} гр\n🚬 Осталось: {ud['cigarettes']} {decl_cig(ud['cigarettes'])}"
         if new > old: msg += f"\n\n🎉 УРОВЕНЬ ПОВЫШЕН!\n{TITLES.get(new, 'Lv.' + str(new))}!"
         msg += ev
         await reply_del(u, msg); return
@@ -290,7 +302,10 @@ async def smoke(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ud["name"] = u.effective_user.username or u.effective_user.first_name
         old = ud["lvl"]; new = lvl_up(ud); save(d)
         ev = "\n\n🎉 ИВЕНТ АКТИВЕН! x3!" if EVENT_ACTIVE else ""
-        msg = f"🚬🚬 Сигара! МЕГА!\n\n{random.choice(CIG_FX)}\n\n⭐ +{xp} XP\n💰 +{coins}\n📊 Всего: {ud['smoked']} гр\n🚬 Осталось: {ud['cigars']} {decl_cigar(ud['cigars'])}"
+        rack_gain = random.randint(2, 4)
+        if EVENT_ACTIVE: rack_gain *= EVENT_MULT
+        ud["rackumar"] += rack_gain
+        msg = f"🚬🚬 Сигара! МЕГА!\n\n{random.choice(CIG_FX)}\n\n⭐ +{xp} XP\n💰 +{coins}\n🌿 Раскумар: +{rack_gain}\n📊 Всего: {ud['smoked']} гр\n🚬 Осталось: {ud['cigars']} {decl_cigar(ud['cigars'])}"
         if new > old: msg += f"\n\n🎉 УРОВЕНЬ ПОВЫШЕН!\n{TITLES.get(new, 'Lv.' + str(new))}!"
         msg += ev
         await reply_del(u, msg); return
@@ -304,10 +319,13 @@ async def smoke(u: Update, c: ContextTypes.DEFAULT_TYPE):
         xp = int(amt * xp_mult)
         if EVENT_ACTIVE: xp *= EVENT_MULT
         ud["xp"] += xp
+        rack_gain = random.randint(1, 2)
+        if EVENT_ACTIVE: rack_gain *= EVENT_MULT
+        ud["rackumar"] += rack_gain
         ud["name"] = u.effective_user.username or u.effective_user.first_name
         old = ud["lvl"]; new = lvl_up(ud); save(d)
         ev = "\n\n🎉 ИВЕНТ АКТИВЕН! x3!" if EVENT_ACTIVE else ""
-        msg = f"🚬 Закурил {amt} {decl(amt)}...\n\n{random.choice(SMOKE_TXT)}\n\n📊 Всего: {ud['smoked']} гр\n🎒 Табака: {ud['tobacco']} гр"
+        msg = f"🚬 Закурил {amt} {decl(amt)}...\n\n{random.choice(SMOKE_TXT)}\n\n📊 Всего: {ud['smoked']} гр\n🎒 Табака: {ud['tobacco']} гр\n🌿 Раскумар: +{rack_gain}"
         if new > old: msg += f"\n\n🎉 УРОВЕНЬ ПОВЫШЕН!\n{TITLES.get(new, 'Lv.' + str(new))}!"
         msg += ev
         await reply_del(u, msg); return
@@ -321,8 +339,12 @@ async def smoke(u: Update, c: ContextTypes.DEFAULT_TYPE):
     ud["xp"] += xp
     ud["name"] = u.effective_user.username or u.effective_user.first_name
     old = ud["lvl"]; new = lvl_up(ud); save(d)
+    # Rackumar from smoking
+    rack_gain = random.randint(1, 3)
+    if EVENT_ACTIVE: rack_gain *= EVENT_MULT
+    ud["rackumar"] += rack_gain
     ev = "\n\n🎉 ИВЕНТ АКТИВЕН! x3!" if EVENT_ACTIVE else ""
-    msg = f"🚬 Закурил {amt} {decl(amt)}...\n\n{random.choice(SMOKE_TXT)}\n\n📊 Всего: {ud['smoked']} гр\n🎒 Табака: {ud['tobacco']} гр"
+    msg = f"🚬 Закурил {amt} {decl(amt)}...\n\n{random.choice(SMOKE_TXT)}\n\n📊 Всего: {ud['smoked']} гр\n🎒 Табака: {ud['tobacco']} гр\n🌿 Раскумар: +{rack_gain}"
     if new > old: msg += f"\n\n🎉 УРОВЕНЬ ПОВЫШЕН!\n{TITLES.get(new, 'Lv.' + str(new))}!"
     msg += ev
     await reply_del(u, msg)
@@ -342,6 +364,7 @@ async def profile(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if ud.get("golden_hand_end", 0) > now: buffs += "\n✋ Золотая рука"
     if ud.get("magnet_end", 0) > now: buffs += "\n🧲 Магнит"
     if ud.get("double_harvest", 0) > 0: buffs += f"\n🌾 Двойной урожай: {ud['double_harvest']}"
+    if ud.get("immortal_end", 0) > now: buffs += "\n👼 Бессмертие"
     msg = f"👤 {u.effective_user.first_name}\n\n{TITLES.get(ud['lvl'], 'Lv.' + str(ud['lvl']))}\n📊 Lv.{ud['lvl']}\n⭐ XP: {ud['xp']}/{nx}\n[{bar}] {pr}%\n\n🌿 Трава: {ud['grass']} гр\n📦 Табак: {ud['tobacco']} гр\n💰 Монеты: {ud['coins']}\n🚬 Сигареты: {ud['cigarettes']} {decl_cig(ud['cigarettes'])}\n🚬 Сигары: {ud['cigars']} {decl_cigar(ud['cigars'])}\n🌿 Раскумар: {ud['rackumar']}\n🚬 Всего: {ud['smoked']} гр\n⏱️ Часы: {ud['clocks']}\n🏡 Ферма: {'✅ Lv.' + str(ud['farm']) if ud['farm'] > 0 else '❌'}\n⚡ Быстрая: {'✅ Lv.' + str(ud['fast_farm']) if ud['fast_farm'] > 0 else '❌'}\n🥷 Вор: Lv.{ud['rob_lvl']}\n🎒 Мешочек: {'✅' if ud['bag'] else '❌'}\n\n🍀 Удача:\n{luck}{active}{buffs}\n\n⏱️ Кулдаун: {fmt(cd)}\n🥷 Кулдаун воровства: {fmt(rob_cd(ud))}\n\n🏆 Место: {rank(d, u.effective_chat.id, uid)}\n🌿 Раскумар: #{rank(d, u.effective_chat.id, uid, 'rackumar')}" + ev
     await reply_del(u, msg)
 
@@ -419,6 +442,12 @@ async def buy(u: Update, c: ContextTypes.DEFAULT_TYPE):
             elif name == "щит": ud["shield_end"] = now + 86400; effect = "Защита 24ч!"
             elif name == "магнит": ud["magnet_end"] = now + 86400; effect = "+25% часы 24ч!"
             elif name == "золотая_рука": ud["golden_hand_end"] = now + 86400; effect = "+50% воровство 24ч!"
+            elif name == "кристалл_удачи": ud["luck_x2"] += 1; effect = "+1 удача x2!"
+            elif name == "портал_травы": ud["grass"] += 50; effect = "+50 травы!"
+            elif name == "копилка": ud["coins"] += 200; effect = "+200 монет!"
+            elif name == "взрыв_опыта": ud["xp"] += 50; oldx = ud["lvl"]; newx = lvl_up(ud); effect = f"+50 XP!{' УРОВЕНЬ ПОВЫШЕН!' if newx > oldx else ''}"
+            elif name == "легендарный_семя": ud["last_grass_type"] = "божественная"; effect = "Следующий сбор — божественная!"
+            elif name == "бессмертие": ud["immortal_end"] = now + 86400; effect = "Не теряешь ресурсы 24ч!"
             ud["name"] = u.effective_user.username or u.effective_user.first_name; save(d)
             await reply_del(u, f"🌿 Куплено!\n\n{data['e']} {name}\n🌿 Потрачено: {data['p']}\n🌿 Осталось: {ud['rackumar']}\n\n✨ {effect}")
             return
@@ -505,7 +534,10 @@ async def farm(u: Update, c: ContextTypes.DEFAULT_TYPE):
     ud["name"] = u.effective_user.username or u.effective_user.first_name
     old = ud["lvl"]; new = lvl_up(ud); save(d)
     ev = "\n\n🎉 ИВЕНТ АКТИВЕН! x3!" if EVENT_ACTIVE else ""
-    msg = f"{name} — сбор!\n\n🌿 +{amt} гр\n⭐ +{ud[key]} XP\n🎒 Всего: {ud['grass']} гр"
+    rack = random.randint(1, 2)
+    if EVENT_ACTIVE: rack *= EVENT_MULT
+    ud["rackumar"] += rack
+    msg = f"{name} — сбор!\n\n🌿 +{amt} гр\n⭐ +{ud[key]} XP\n🌿 Раскумар: +{rack}\n🎒 Всего: {ud['grass']} гр"
     if new > old: msg += f"\n\n🎉 УРОВЕНЬ ПОВЫШЕН!\n{TITLES.get(new, 'Lv.' + str(new))}!"
     msg += ev + f"\n\n💡 Улучшить: 'улучшить {'быструю ферму' if is_fast else 'ферму'}' ({100 if not is_fast else 200} монет)"
     await reply_del(u, msg)
@@ -513,8 +545,11 @@ async def farm(u: Update, c: ContextTypes.DEFAULT_TYPE):
 async def upgrade(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u): return
     d = load(); ud = get_user(d, u.effective_user.id, u.effective_chat.id)
-    text = u.message.text.lower().strip(); is_fast = "быстрая" in text or "fast" in text
-    key = "fast_farm" if is_fast else "farm"; cost = 200 if is_fast else 100
+    text = u.message.text.lower().strip()
+    # Detect which farm to upgrade
+    is_fast = "быстра" in text or "fast" in text or "скоростн" in text
+    key = "fast_farm" if is_fast else "farm"
+    cost = 200 if is_fast else 100
     name = "⚡ Быстрая ферма" if is_fast else "🏡 Ферма"
     if ud[key] == 0:
         await reply_del(u, f"❌ Нет {name}! Напиши '{'быстрая ферма' if is_fast else 'ферма'}'!"); return save(d)
@@ -551,10 +586,13 @@ async def bonus(u: Update, c: ContextTypes.DEFAULT_TYPE):
     b = random.randint(5, 15)
     if EVENT_ACTIVE: b *= EVENT_MULT
     ud["grass"] += b; ud["bonus"] = today; ud["xp"] += 5
+    rack = random.randint(1, 3)
+    if EVENT_ACTIVE: rack *= EVENT_MULT
+    ud["rackumar"] += rack
     ud["name"] = u.effective_user.username or u.effective_user.first_name
     old = ud["lvl"]; new = lvl_up(ud); save(d)
     ev = "\n\n🎉 ИВЕНТ АКТИВЕН! x3!" if EVENT_ACTIVE else ""
-    msg = f"🎁 Бонус!\n\n🌿 +{b} гр\n⭐ +5 XP\n🎒 Всего: {ud['grass']} гр"
+    msg = f"🎁 Бонус!\n\n🌿 +{b} гр\n⭐ +5 XP\n🌿 Раскумар: +{rack}\n🎒 Всего: {ud['grass']} гр"
     if new > old: msg += f"\n\n🎉 УРОВЕНЬ ПОВЫШЕН!\n{TITLES.get(new, 'Lv.' + str(new))}!"
     msg += ev
     await reply_del(u, msg)
@@ -639,7 +677,12 @@ async def bet(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ud[item_key] += num
         msg = f"🎲 Ставка {num} {item_name}\n\n{luck_emoji} Удача x{eff}!\n🎰 Выпало: {r}\n😐 Ничья — возврат"
     else:
-        msg = f"🎲 Ставка {num} {item_name}\n\n{luck_emoji} Удача x{eff}!\n🎰 Выпало: {r}\n😭 ПРОИГРЫШ!"
+        # Immortal check
+        if ud.get("immortal_end", 0) > datetime.now().timestamp():
+            ud[item_key] += num
+            msg = f"🎲 Ставка {num} {item_name}\n\n{luck_emoji} Удача x{eff}!\n🎰 Выпало: {r}\n😭 ПРОИГРЫШ!\n\n👼 Бессмертие спасло ресурсы!"
+        else:
+            msg = f"🎲 Ставка {num} {item_name}\n\n{luck_emoji} Удача x{eff}!\n🎰 Выпало: {r}\n😭 ПРОИГРЫШ!"
     msg += f"\n📦 Баланс: {ud[item_key]}"; save(d); await reply_del(u, msg)
 
 # === ДЕП ===
@@ -672,7 +715,11 @@ async def deposit_game(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ud["coins"] += num
         result = f"😐 Ничья\n\n{luck_emoji} Удача x{eff}!\n🎰 Выпало: {r}\n💰 Деп возвращён"
     else:
-        result = f"😭 ПРОИГРЫШ!\n\n{luck_emoji} Удача x{eff}!\n🎰 Выпало: {r}\n💰 Деп сожрало казино"
+        if ud.get("immortal_end", 0) > datetime.now().timestamp():
+            ud["coins"] += num
+            result = f"😭 ПРОИГРЫШ!\n\n{luck_emoji} Удача x{eff}!\n🎰 Выпало: {r}\n👼 Бессмертие спасло деп!"
+        else:
+            result = f"😭 ПРОИГРЫШ!\n\n{luck_emoji} Удача x{eff}!\n🎰 Выпало: {r}\n💰 Деп сожрало казино"
     result += f"\n💰 Баланс: {ud['coins']}"; save(d)
     await spin.edit_text(result); asyncio.create_task(auto_del(spin))
     asyncio.create_task(auto_del(u.message, delay=AUTO_DELETE_DELAY))
@@ -1102,6 +1149,12 @@ async def text(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if t.startswith("ограбить "): await rob(u, c); return
     if t.startswith("улучшить вора"): await upgrade_rob(u, c); return
     if t.startswith("прокачать вора"): await upgrade_rob(u, c); return
+    if t.startswith("улучшить быструю"): await upgrade(u, c); return
+    if t.startswith("улучшить ферму"): await upgrade(u, c); return
+    if t.startswith("апгрейд быстрой"): await upgrade(u, c); return
+    if t.startswith("апгрейд фермы"): await upgrade(u, c); return
+    if t.startswith("прокачать быструю"): await upgrade(u, c); return
+    if t.startswith("прокачать ферму"): await upgrade(u, c); return
 
     # Greetings
     if t in ["привет", "здарова", "ку", "хай", "йо", "здравствуй", "прив", "хей",

@@ -191,7 +191,7 @@ async def reply_del(u, text, del_user=True):
 
 async def check_group(u):
     if u.effective_chat.type == "private":
-        await u.message.reply_text("🌿 Я бот для чатов! Добавляй в чат и становись миллионером  🌿")
+        await u.message.reply_text("🌿 Я бот для чатов! Добавляй в чат и остановись миллионером 🌿")
         return False
     return True
 
@@ -205,7 +205,7 @@ async def collect(u: Update, c: ContextTypes.DEFAULT_TYPE):
     d = load(); ud = get_user(d, u.effective_user.id, u.effective_chat.id)
     now = datetime.now().timestamp(); cd = get_cd(ud); passed = now - ud["last"]
     if passed < cd:
-        await reply_del(u, f"Травка ещё растёт🌿 {fmt(cd - passed)}!\nКулдаун: {fmt(cd)} (Lv.{ud['lvl']})")
+        await reply_del(u, f"Трава еще растет🌿{fmt(cd - passed)}!\nКулдаун: {fmt(cd)} (Lv.{ud['lvl']})")
         return save(d)
     r = random.randint(1, 100)
     gt = "обычная" if r <= 50 else "редкая" if r <= 80 else "эпическая" if r <= 95 else "легендарная" if r <= 99 else "божественная"
@@ -1154,6 +1154,14 @@ async def text(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if t.startswith("улучшить ферму"): await upgrade(u, c); return
     if t.startswith("апгрейд фермы"): await upgrade(u, c); return
     if t.startswith("прокачать ферму"): await upgrade(u, c); return
+    if t.startswith("продать траву"): await sell(u, c); return
+    if t.startswith("продать табак"): await sell(u, c); return
+    if t.startswith("продам траву"): await sell(u, c); return
+    if t.startswith("продам табак"): await sell(u, c); return
+    if t.startswith("продаю траву"): await sell(u, c); return
+    if t.startswith("продаю табак"): await sell(u, c); return
+    if t.startswith("сбыть траву"): await sell(u, c); return
+    if t.startswith("сбыть табак"): await sell(u, c); return
 
     # Greetings
     if t in ["привет", "здарова", "ку", "хай", "йо", "здравствуй", "прив", "хей",

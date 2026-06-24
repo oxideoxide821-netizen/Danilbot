@@ -198,7 +198,7 @@ async def check_group(u):
 # === COMMANDS ===
 async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u): return
-    await reply_del(u, "🌿 Собирай травку и становись миллионером\n\nКоманды: собрать, крафт, курить, профиль, инвентарь, бонус, ферма, роб, ставка, деп, лотерея, топ")
+    await reply_del(u, "🌿 Собирай травку и становись миллионером 🌿\n\nКоманды: собрать, крафт, курить, профиль, инвентарь, бонус, ферма, роб, ставка, деп, лотерея, топ")
 
 async def collect(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u): return

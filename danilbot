@@ -3,9 +3,6 @@ from datetime import datetime, timedelta
 from telegram import Update, BotCommand
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
-_data_cache = None
-_data_dirty = False
-
 BOT_TOKEN = "8968491013:AAEbpJkA2h8AS5Q7gim_o4sc5wBRerZLl5w"
 DATA_FILE = "travka_data.json"
 BASE_COOLDOWN = 3 * 60
@@ -13,6 +10,19 @@ MIN_COOLDOWN = 3 * 60
 CLOCK_DROP_CHANCE = 5
 TOBACCO_PRICE = 3
 GRASS_PRICE = 2
+
+# === ИВЕНТ ===
+EVENT_ACTIVE = False  # Врубается через команду владельца
+EVENT_MULTIPLIER = 3  # x3 удача на всё
+
+# === УДАЧА ===
+LUCK_ITEMS = {
+    "x2": {"price": 500, "multiplier": 2, "emoji": "✨"},
+    "x3": {"price": 1200, "multiplier": 3, "emoji": "🔥"},
+    "x4": {"price": 2500, "multiplier": 4, "emoji": "💎"},
+    "x5": {"price": 5000, "multiplier": 5, "emoji": "👑"},
+    "x10": {"price": 15000, "multiplier": 10, "emoji": "🌟"},
+}
 
 GRASS = {
     "обычная": {"e": "🌿", "xp": 1, "tobacco": 1, "coins": 2, "sell": 2},
@@ -110,6 +120,10 @@ BOT_COMMANDS = [
     BotCommand("help", "❓ Помощь"),
 ]
 
+_data_cache = None
+_data_dirty = False
+
+
 def load():
     global _data_cache
     if _data_cache is not None:
@@ -129,6 +143,7 @@ def load():
             return _data_cache
     _data_cache = {"chats": {}}
     return _data_cache
+
 
 def save(d=None):
     global _data_cache, _data_dirty
@@ -155,12 +170,15 @@ def force_save():
         except Exception as e:
             logger.error(f"Force save error: {e}")
 
+
 def ensure_fields(ud):
     defaults = {
         "grass": 0, "smoked": 0, "xp": 0, "lvl": 1, "last": 0, "name": "",
         "clocks": 0, "bonus": "", "tobacco": 0, "coins": 0, "cigarettes": 0,
         "cigars": 0, "farm": 0, "farm_last": 0, "fast_farm": 0,
-        "fast_farm_last": 0, "last_grass_type": "обычная", "is_bot": False
+        "fast_farm_last": 0, "last_grass_type": "обычная", "is_bot": False,
+        "luck_x2": 0, "luck_x3": 0, "luck_x4": 0, "luck_x5": 0, "luck_x10": 0,
+        "active_luck": None, "deposit_game": 0
     }
     changed = False
     for k, v in defaults.items():
@@ -168,6 +186,7 @@ def ensure_fields(ud):
             ud[k] = v
             changed = True
     return ud, changed
+
 
 def get_user(d, uid, cid):
     c, u = str(cid), str(uid)
@@ -180,9 +199,11 @@ def get_user(d, uid, cid):
         save(d)
     return ud
 
+
 def get_cd(ud):
     reduction = (ud["lvl"] - 1) * 120
     return max(BASE_COOLDOWN - reduction, MIN_COOLDOWN)
+
 
 def fmt(t):
     if t >= 3600:
@@ -191,21 +212,23 @@ def fmt(t):
         return f"{int(t//60)}м {int(t%60)}с"
     return f"{int(t)}с"
 
+
 def lvl_up(ud):
     while ud["xp"] >= ud["lvl"] * 10:
         ud["xp"] -= ud["lvl"] * 10
         ud["lvl"] += 1
     return ud["lvl"]
 
+
 def rank(d, cid, uid):
     c = d["chats"].get(str(cid), {})
-    # Filter out bots
     filtered = {k: v for k, v in c.items() if not v.get("is_bot", False)}
     s = sorted(filtered.items(), key=lambda x: (x[1].get("smoked", 0), x[1].get("lvl", 1)), reverse=True)
     for i, (k, _) in enumerate(s, 1):
         if int(k) == uid:
             return f"#{i}"
     return "?"
+
 
 def decl_grass(n):
     if 11 <= n % 100 <= 14:
@@ -216,6 +239,7 @@ def decl_grass(n):
         return "грамма"
     return "грамм"
 
+
 def decl_cigarettes(n):
     if 11 <= n % 100 <= 14:
         return "сигарет"
@@ -225,6 +249,7 @@ def decl_cigarettes(n):
         return "сигареты"
     return "сигарет"
 
+
 def decl_cigars(n):
     if 11 <= n % 100 <= 14:
         return "сигар"
@@ -233,6 +258,7 @@ def decl_cigars(n):
     elif 2 <= n % 10 <= 4:
         return "сигары"
     return "сигар"
+
 
 def parse_duration(text):
     text = text.strip().lower().replace(" ", "")
@@ -249,14 +275,17 @@ def parse_duration(text):
         return num
     return num * 60
 
+
 def parse_number(text):
     match = re.search(r'(\d+)', text)
     if match:
         return int(match.group(1))
     return None
 
+
 async def is_owner(user_id):
     return user_id in OWNER_IDS
+
 
 async def auto_delete(msg, delay=AUTO_DELETE_DELAY):
     try:
@@ -265,12 +294,14 @@ async def auto_delete(msg, delay=AUTO_DELETE_DELAY):
     except:
         pass
 
+
 async def reply_and_delete(u, text, delete_user_msg=True):
     bot_msg = await u.message.reply_text(text)
     asyncio.create_task(auto_delete(bot_msg))
     if delete_user_msg:
         asyncio.create_task(auto_delete(u.message, delay=AUTO_DELETE_DELAY))
     return bot_msg
+
 
 async def admin_give(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u):
@@ -318,6 +349,8 @@ async def admin_give(u: Update, c: ContextTypes.DEFAULT_TYPE):
         "сигар": "cigars", "сигары": "cigars", "cigars": "cigars",
         "опыт": "xp", "xp": "xp",
         "уровень": "lvl", "level": "lvl", "lvl": "lvl",
+        "удач": "luck", "luck": "luck", "везен": "luck",
+        "x2": "luck_x2", "x3": "luck_x3", "x4": "luck_x4", "x5": "luck_x5", "x10": "luck_x10",
     }
 
     item_key = None
@@ -327,13 +360,25 @@ async def admin_give(u: Update, c: ContextTypes.DEFAULT_TYPE):
             break
 
     if not item_key:
-        await reply_and_delete(u, "❌ Неизвестный предмет! Доступные: траву, табак, монеты, часы, сигареты, сигары, опыт, уровень")
+        await reply_and_delete(u, "❌ Неизвестный предмет! Доступные: траву, табак, монеты, часы, сигареты, сигары, опыт, уровень, удачу (x2/x3/x4/x5/x10)")
         return
 
     if item_key == "lvl":
         ud["lvl"] = num
         ud["xp"] = 0
         msg = f"📊 Уровень установлен!\n\n👤 {target.first_name}\n📊 Новый уровень: {num}"
+    elif item_key == "luck":
+        # Give random luck items
+        ud["luck_x2"] += num
+        ud["luck_x3"] += num
+        ud["luck_x4"] += num
+        ud["luck_x5"] += num
+        ud["luck_x10"] += num
+        msg = f"✅ Выдано!\n\n🍀 Удача: +{num} каждого типа (x2, x3, x4, x5, x10)\n👤 Получатель: {target.first_name}"
+    elif item_key.startswith("luck_"):
+        ud[item_key] += num
+        luck_name = item_key.replace("luck_", "").upper()
+        msg = f"✅ Выдано!\n\n{LUCK_ITEMS.get(item_key.replace('luck_', 'x'), {}).get('emoji', '🍀')} Удача {luck_name}: +{num}\n👤 Получатель: {target.first_name}\n📦 Теперь: {ud[item_key]}"
     else:
         ud[item_key] += num
         item_names = {
@@ -345,6 +390,7 @@ async def admin_give(u: Update, c: ContextTypes.DEFAULT_TYPE):
     ud["name"] = target.username or target.first_name
     save(d)
     await reply_and_delete(u, msg)
+
 
 async def admin_reset(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u):
@@ -380,9 +426,17 @@ async def admin_reset(u: Update, c: ContextTypes.DEFAULT_TYPE):
     ud["fast_farm"] = 0
     ud["fast_farm_last"] = 0
     ud["last_grass_type"] = "обычная"
+    ud["luck_x2"] = 0
+    ud["luck_x3"] = 0
+    ud["luck_x4"] = 0
+    ud["luck_x5"] = 0
+    ud["luck_x10"] = 0
+    ud["active_luck"] = None
+    ud["deposit_game"] = 0
     ud["name"] = target.username or target.first_name
     save(d)
     await reply_and_delete(u, f"🗑️ Сброс!\n\n👤 {target.first_name} обнулён!\n⚠️ Весь прогресс удалён!")
+
 
 async def admin_give_all(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u):
@@ -408,9 +462,38 @@ async def admin_give_all(u: Update, c: ContextTypes.DEFAULT_TYPE):
     ud["smoked"] = 9999
     ud["farm"] = 10
     ud["fast_farm"] = 10
+    ud["luck_x2"] = 99
+    ud["luck_x3"] = 99
+    ud["luck_x4"] = 99
+    ud["luck_x5"] = 99
+    ud["luck_x10"] = 99
     ud["name"] = target.username or target.first_name
     save(d)
-    await reply_and_delete(u, f"👑 ВСЁ ВЫДАНО!\n\n👤 {target.first_name} получил максимум всего!\n🌿 Трава: 9999\n📦 Табак: 9999\n💰 Монеты: 99999\n🚬 Сигареты: 99\n🚬 Сигары: 99\n⏱️ Часы: 99\n🏡 Ферма: 10\n⚡ Быстрая ферма: 10\n📊 Уровень: 10")
+    await reply_and_delete(u, f"👑 ВСЁ ВЫДАНО!\n\n👤 {target.first_name} получил максимум всего!\n🌿 Трава: 9999\n📦 Табак: 9999\n💰 Монеты: 99999\n🚬 Сигареты: 99\n🚬 Сигары: 99\n⏱️ Часы: 99\n🏡 Ферма: 10\n⚡ Быстрая ферма: 10\n🍀 Удача x2-x10: 99 каждой\n📊 Уровень: 10")
+
+
+# === ИВЕНТ КОМАНДЫ ===
+async def event_on(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not await check_group(u):
+        return
+    if not await is_owner(u.effective_user.id):
+        await reply_and_delete(u, "❌ Только владелец может включать ивент!")
+        return
+    global EVENT_ACTIVE
+    EVENT_ACTIVE = True
+    await reply_and_delete(u, f"🎉 ИВЕНТ ВКЛЮЧЕН!\n\n🍀 Удача x{EVENT_MULTIPLIER} на ВСЁ!\n🌿 Сбор травы, крафт, ставки, ферма — всё с бонусом!\n\n⚡ Вперёд, травники!")
+
+
+async def event_off(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not await check_group(u):
+        return
+    if not await is_owner(u.effective_user.id):
+        await reply_and_delete(u, "❌ Только владелец может выключать ивент!")
+        return
+    global EVENT_ACTIVE
+    EVENT_ACTIVE = False
+    await reply_and_delete(u, "🔚 Ивент завершён!\n\nСпасибо за участие! Следующий ивент скоро...")
+
 
 async def check_group(u: Update):
     if u.effective_chat.type == "private":
@@ -418,10 +501,12 @@ async def check_group(u: Update):
         return False
     return True
 
+
 async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u):
         return
     await reply_and_delete(u, "🌿 Собирай травку и становись миллионером 🌿")
+
 
 async def collect(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u):
@@ -438,6 +523,10 @@ async def collect(u: Update, c: ContextTypes.DEFAULT_TYPE):
     gt = "обычная" if r <= 50 else "редкая" if r <= 80 else "эпическая" if r <= 95 else "легендарная" if r <= 99 else "божественная"
     g = GRASS[gt]
     amt = random.randint(1, 3)
+    # Event bonus
+    if EVENT_ACTIVE:
+        amt *= EVENT_MULTIPLIER
+        g = {k: v * EVENT_MULTIPLIER if isinstance(v, int) else v for k, v in g.items()}
     ud["grass"] += amt
     ud["xp"] += g["xp"]
     ud["last"] = now
@@ -447,15 +536,18 @@ async def collect(u: Update, c: ContextTypes.DEFAULT_TYPE):
     new = lvl_up(ud)
     clock_drop = ""
     if random.randint(1, 100) <= CLOCK_DROP_CHANCE:
-        ud["clocks"] += 1
+        drop_amt = EVENT_MULTIPLIER if EVENT_ACTIVE else 1
+        ud["clocks"] += drop_amt
         clock_drop = f"\n\n✨ РЕДКАЯ НАХОДКА!\n⏱️ Ты нашёл Часы травника! (всего: {ud['clocks']})"
     save(d)
     decl = GRASS_DECL[gt]
+    event_msg = "\n\n🎉 ИВЕНТ АКТИВЕН! x3 удача!" if EVENT_ACTIVE else ""
     msg = f"{g['e']} Ты собрал {decl[0]} траву!\n📦 Получено: {amt} {decl_grass(amt)}\n⭐ Опыт: +{g['xp']} XP\n🎒 Всего травы: {ud['grass']} гр"
     if new > old:
         msg += f"\n\n🎉 УРОВЕНЬ ПОВЫШЕН!\nТеперь ты {TITLES.get(new, '🌟 Уровень ' + str(new))}!"
-    msg += clock_drop
+    msg += clock_drop + event_msg
     await reply_and_delete(u, msg)
+
 
 async def craft(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u):
@@ -471,6 +563,10 @@ async def craft(u: Update, c: ContextTypes.DEFAULT_TYPE):
         total_tobacco += random.randint(1, 3)
         total_xp += 1
     crafted = ud["grass"]
+    # Event bonus
+    if EVENT_ACTIVE:
+        total_tobacco *= EVENT_MULTIPLIER
+        total_xp *= EVENT_MULTIPLIER
     ud["tobacco"] += total_tobacco
     ud["grass"] = 0
     ud["xp"] += total_xp
@@ -478,10 +574,13 @@ async def craft(u: Update, c: ContextTypes.DEFAULT_TYPE):
     old = ud["lvl"]
     new = lvl_up(ud)
     save(d)
+    event_msg = "\n\n🎉 ИВЕНТ АКТИВЕН! x3 удача!" if EVENT_ACTIVE else ""
     msg = f"🔨 Ты скрафтил табак!\n\n🌿 Использовано: {crafted} гр травы\n📦 Получено: {total_tobacco} гр табака\n⭐ Опыт: +{total_xp} XP\n🎒 Всего табака: {ud['tobacco']} гр"
     if new > old:
         msg += f"\n\n🎉 УРОВЕНЬ ПОВЫШЕН!\nТеперь ты {TITLES.get(new, '🌟 Уровень ' + str(new))}!"
+    msg += event_msg
     await reply_and_delete(u, msg)
+
 
 async def smoke(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u):
@@ -504,6 +603,9 @@ async def smoke(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ud["smoked"] += total_amt
         total_xp = total_amt
         total_coins = random.randint(total_amt, total_amt * 3)
+        if EVENT_ACTIVE:
+            total_xp *= EVENT_MULTIPLIER
+            total_coins *= EVENT_MULTIPLIER
         ud["xp"] += total_xp
         ud["coins"] += total_coins
         ud["tobacco"] = 0
@@ -512,11 +614,13 @@ async def smoke(u: Update, c: ContextTypes.DEFAULT_TYPE):
         new = lvl_up(ud)
         save(d)
 
+        event_msg = "\n\n🎉 ИВЕНТ АКТИВЕН! x3 удача!" if EVENT_ACTIVE else ""
         msg = f"🚬🚬🚬 ТЫ ВЫКУРИЛ ВЕСЬ ТАБАК!!! 🚬🚬🚬\n\n📦 Скурил: {total_amt} гр табака\n\n"
         msg += "\n".join(effects_used[:3])
         msg += f"\n\n⭐ Опыт: +{total_xp} XP\n💰 Монеты: +{total_coins}\n📊 Всего покурено: {ud['smoked']} гр"
         if new > old:
             msg += f"\n\n🎉 УРОВЕНЬ ПОВЫШЕН!\nТеперь ты {TITLES.get(new, '🌟 Уровень ' + str(new))}!"
+        msg += event_msg
         await reply_and_delete(u, msg)
         return
 
@@ -529,15 +633,20 @@ async def smoke(u: Update, c: ContextTypes.DEFAULT_TYPE):
         xp_gain = random.randint(15, 25)
         coin_gain = random.randint(10, 20)
         ud["smoked"] += 5
+        if EVENT_ACTIVE:
+            xp_gain *= EVENT_MULTIPLIER
+            coin_gain *= EVENT_MULTIPLIER
         ud["xp"] += xp_gain
         ud["coins"] += coin_gain
         ud["name"] = u.effective_user.username or u.effective_user.first_name
         old = ud["lvl"]
         new = lvl_up(ud)
         save(d)
+        event_msg = "\n\n🎉 ИВЕНТ АКТИВЕН! x3 удача!" if EVENT_ACTIVE else ""
         msg = f"🚬 Ты закурил СИГАРЕТУ!\n\n{random.choice(CIGARETTE_EFFECTS)}\n\n⭐ Опыт: +{xp_gain} XP\n💰 Монеты: +{coin_gain}\n📊 Всего покурено: {ud['smoked']} гр\n🚬 Осталось сигарет: {ud['cigarettes']} {decl_cigarettes(ud['cigarettes'])}"
         if new > old:
             msg += f"\n\n🎉 УРОВЕНЬ ПОВЫШЕН!\nТеперь ты {TITLES.get(new, '🌟 Уровень ' + str(new))}!"
+        msg += event_msg
         await reply_and_delete(u, msg)
         return
 
@@ -550,15 +659,20 @@ async def smoke(u: Update, c: ContextTypes.DEFAULT_TYPE):
         xp_gain = random.randint(40, 60)
         coin_gain = random.randint(30, 50)
         ud["smoked"] += 10
+        if EVENT_ACTIVE:
+            xp_gain *= EVENT_MULTIPLIER
+            coin_gain *= EVENT_MULTIPLIER
         ud["xp"] += xp_gain
         ud["coins"] += coin_gain
         ud["name"] = u.effective_user.username or u.effective_user.first_name
         old = ud["lvl"]
         new = lvl_up(ud)
         save(d)
+        event_msg = "\n\n🎉 ИВЕНТ АКТИВЕН! x3 удача!" if EVENT_ACTIVE else ""
         msg = f"🚬🚬 Ты закурил СИГАРУ! МЕГА ЭФФЕКТ!\n\n{random.choice(CIGARETTE_EFFECTS)}\n\n⭐ Опыт: +{xp_gain} XP\n💰 Монеты: +{coin_gain}\n📊 Всего покурено: {ud['smoked']} гр\n🚬 Осталось сигар: {ud['cigars']} {decl_cigars(ud['cigars'])}"
         if new > old:
             msg += f"\n\n🎉 УРОВЕНЬ ПОВЫШЕН!\nТеперь ты {TITLES.get(new, '🌟 Уровень ' + str(new))}!"
+        msg += event_msg
         await reply_and_delete(u, msg)
         return
 
@@ -571,14 +685,19 @@ async def smoke(u: Update, c: ContextTypes.DEFAULT_TYPE):
         amt = min(num, ud["tobacco"])
         ud["tobacco"] -= amt
         ud["smoked"] += amt
-        ud["xp"] += amt
+        xp_gain = amt
+        if EVENT_ACTIVE:
+            xp_gain *= EVENT_MULTIPLIER
+        ud["xp"] += xp_gain
         ud["name"] = u.effective_user.username or u.effective_user.first_name
         old = ud["lvl"]
         new = lvl_up(ud)
         save(d)
+        event_msg = "\n\n🎉 ИВЕНТ АКТИВЕН! x3 удача!" if EVENT_ACTIVE else ""
         msg = f"🚬 Ты закурил {amt} {decl_grass(amt)} табака...\n\n{random.choice(EFFECTS)}\n\n📊 Всего покурено: {ud['smoked']} гр\n🎒 Осталось табака: {ud['tobacco']} гр"
         if new > old:
             msg += f"\n\n🎉 УРОВЕНЬ ПОВЫШЕН!\nТеперь ты {TITLES.get(new, '🌟 Уровень ' + str(new))}!"
+        msg += event_msg
         await reply_and_delete(u, msg)
         return
 
@@ -590,15 +709,21 @@ async def smoke(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
     ud["tobacco"] -= amt
     ud["smoked"] += amt
-    ud["xp"] += amt
+    xp_gain = amt
+    if EVENT_ACTIVE:
+        xp_gain *= EVENT_MULTIPLIER
+    ud["xp"] += xp_gain
     ud["name"] = u.effective_user.username or u.effective_user.first_name
     old = ud["lvl"]
     new = lvl_up(ud)
     save(d)
+    event_msg = "\n\n🎉 ИВЕНТ АКТИВЕН! x3 удача!" if EVENT_ACTIVE else ""
     msg = f"🚬 Ты закурил {amt} {decl_grass(amt)} табака...\n\n{random.choice(EFFECTS)}\n\n📊 Всего покурено: {ud['smoked']} гр\n🎒 Осталось табака: {ud['tobacco']} гр"
     if new > old:
         msg += f"\n\n🎉 УРОВЕНЬ ПОВЫШЕН!\nТеперь ты {TITLES.get(new, '🌟 Уровень ' + str(new))}!"
+    msg += event_msg
     await reply_and_delete(u, msg)
+
 
 async def profile(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u):
@@ -612,59 +737,64 @@ async def profile(u: Update, c: ContextTypes.DEFAULT_TYPE):
     pr = min(100, int(ud["xp"] / nx * 100))
     bar = "█" * (pr // 10) + "░" * (10 - pr // 10)
     cd = get_cd(ud)
-    msg = f"👤 Профиль {u.effective_user.first_name}\n\n{TITLES.get(ud['lvl'], '🌟 Уровень ' + str(ud['lvl']))}\n📊 Уровень: {ud['lvl']}\n⭐ XP: {ud['xp']}/{nx}\n[{bar}] {pr}%\n\n🌿 Трава: {ud['grass']} гр\n📦 Табак: {ud['tobacco']} гр\n💰 Монеты: {ud['coins']}\n🚬 Сигареты: {ud['cigarettes']} {decl_cigarettes(ud['cigarettes'])}\n🚬 Сигары: {ud['cigars']} {decl_cigars(ud['cigars'])}\n🚬 Всего покурено: {ud['smoked']} гр\n⏱️ Часы травника: {ud['clocks']}\n🏡 Ферма: {'✅ Lv.' + str(ud['farm']) if ud['farm'] > 0 else '❌ Нет'}\n⚡ Быстрая ферма: {'✅ Lv.' + str(ud['fast_farm']) if ud['fast_farm'] > 0 else '❌ Нет'}\n⏱️ Кулдаун сбора: {fmt(cd)}\n\n🏆 Место в топе: {rank(d, u.effective_chat.id, uid)}"
+    luck_items = f"✨x2:{ud['luck_x2']} 🔥x3:{ud['luck_x3']} 💎x4:{ud['luck_x4']} 👑x5:{ud['luck_x5']} 🌟x10:{ud['luck_x10']}"
+    active = f"\n🍀 Активная удача: {ud['active_luck'].upper()}" if ud.get("active_luck") else ""
+    event_msg = "\n\n🎉 ИВЕНТ АКТИВЕН! x3 удача!" if EVENT_ACTIVE else ""
+    msg = f"👤 Профиль {u.effective_user.first_name}\n\n{TITLES.get(ud['lvl'], '🌟 Уровень ' + str(ud['lvl']))}\n📊 Уровень: {ud['lvl']}\n⭐ XP: {ud['xp']}/{nx}\n[{bar}] {pr}%\n\n🌿 Трава: {ud['grass']} гр\n📦 Табак: {ud['tobacco']} гр\n💰 Монеты: {ud['coins']}\n🚬 Сигареты: {ud['cigarettes']} {decl_cigarettes(ud['cigarettes'])}\n🚬 Сигары: {ud['cigars']} {decl_cigars(ud['cigars'])}\n🚬 Всего покурено: {ud['smoked']} гр\n⏱️ Часы травника: {ud['clocks']}\n🏡 Ферма: {'✅ Lv.' + str(ud['farm']) if ud['farm'] > 0 else '❌ Нет'}\n⚡ Быстрая ферма: {'✅ Lv.' + str(ud['fast_farm']) if ud['fast_farm'] > 0 else '❌ Нет'}\n\n🍀 Удача:\n{luck_items}{active}\n⏱️ Кулдаун сбора: {fmt(cd)}\n\n🏆 Место в топе: {rank(d, u.effective_chat.id, uid)}"
+    msg += event_msg
     await reply_and_delete(u, msg)
+
 
 async def top(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u):
         return
     d = load()
     chat = d["chats"].get(str(u.effective_chat.id), {})
-    # Filter out bots
     filtered = {k: v for k, v in chat.items() if not v.get("is_bot", False)}
     if not filtered:
         return await reply_and_delete(u, "😢 В этом чате ещё никто не курил!")
     s = sorted(filtered.items(), key=lambda x: (x[1].get("smoked", 0), x[1].get("lvl", 1)), reverse=True)[:20]
     m = "Травники🌿\n"
     for i, (k, v) in enumerate(s, 1):
-        name = v.get("name", "ID" + k)
+        name = v.get("name", "ID" + k) or "Без имени"
         smoked = v.get("smoked", 0)
         m += f"\n{i}. {name} — {smoked}🌿"
     await reply_and_delete(u, m)
+
 
 async def top_coins(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u):
         return
     d = load()
     chat = d["chats"].get(str(u.effective_chat.id), {})
-    # Filter out bots
     filtered = {k: v for k, v in chat.items() if not v.get("is_bot", False)}
     if not filtered:
         return await reply_and_delete(u, "😢 В этом чате ещё никто не заработал!")
     s = sorted(filtered.items(), key=lambda x: (x[1].get("coins", 0), x[1].get("lvl", 1)), reverse=True)[:20]
     m = "Монетки🪙\n"
     for i, (k, v) in enumerate(s, 1):
-        name = v.get("name", "ID" + k)
+        name = v.get("name", "ID" + k) or "Без имени"
         coins = v.get("coins", 0)
         m += f"\n{i}. {name} — {coins}🪙"
     await reply_and_delete(u, m)
+
 
 async def top_grass(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u):
         return
     d = load()
     chat = d["chats"].get(str(u.effective_chat.id), {})
-    # Filter out bots
     filtered = {k: v for k, v in chat.items() if not v.get("is_bot", False)}
     if not filtered:
         return await reply_and_delete(u, "😢 В этом чате ещё никто не собирал!")
     s = sorted(filtered.items(), key=lambda x: (x[1].get("grass", 0), x[1].get("lvl", 1)), reverse=True)[:20]
     m = "Травка🌿\n"
     for i, (k, v) in enumerate(s, 1):
-        name = v.get("name", "ID" + k)
+        name = v.get("name", "ID" + k) or "Без имени"
         grass = v.get("grass", 0)
         m += f"\n{i}. {name} — {grass}🌿"
     await reply_and_delete(u, m)
+
 
 async def inv(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u):
@@ -672,13 +802,16 @@ async def inv(u: Update, c: ContextTypes.DEFAULT_TYPE):
     d = load()
     ud = get_user(d, u.effective_user.id, u.effective_chat.id)
     cd = get_cd(ud)
-    msg = f"🎒 Инвентарь\n\n🌿 Трава: {ud['grass']} гр\n📦 Табак: {ud['tobacco']} гр\n💰 Монеты: {ud['coins']}\n🚬 Сигареты: {ud['cigarettes']} {decl_cigarettes(ud['cigarettes'])}\n🚬 Сигары: {ud['cigars']} {decl_cigars(ud['cigars'])}\n⏱️ Часы травника: {ud.get('clocks', 0)}\n🏡 Ферма: {'✅ Lv.' + str(ud['farm']) if ud['farm'] > 0 else '❌ Нет'}\n⚡ Быстрая ферма: {'✅ Lv.' + str(ud['fast_farm']) if ud['fast_farm'] > 0 else '❌ Нет'}\n\n⏱️ Текущий кулдаун: {fmt(cd)} (Lv.{ud['lvl']})"
+    luck_items = f"✨x2:{ud['luck_x2']} 🔥x3:{ud['luck_x3']} 💎x4:{ud['luck_x4']} 👑x5:{ud['luck_x5']} 🌟x10:{ud['luck_x10']}"
+    active = f"\n🍀 Активная: {ud['active_luck'].upper()}" if ud.get("active_luck") else ""
+    msg = f"🎒 Инвентарь\n\n🌿 Трава: {ud['grass']} гр\n📦 Табак: {ud['tobacco']} гр\n💰 Монеты: {ud['coins']}\n🚬 Сигареты: {ud['cigarettes']} {decl_cigarettes(ud['cigarettes'])}\n🚬 Сигары: {ud['cigars']} {decl_cigars(ud['cigars'])}\n⏱️ Часы травника: {ud.get('clocks', 0)}\n🏡 Ферма: {'✅ Lv.' + str(ud['farm']) if ud['farm'] > 0 else '❌ Нет'}\n⚡ Быстрая ферма: {'✅ Lv.' + str(ud['fast_farm']) if ud['fast_farm'] > 0 else '❌ Нет'}\n\n🍀 Удача:\n{luck_items}{active}\n\n⏱️ Текущий кулдаун: {fmt(cd)} (Lv.{ud['lvl']})"
     if ud.get("clocks", 0) > 0:
         msg += "\n\n💡 Напиши 'использовать часы', чтобы сбросить кулдаун!"
     if ud["grass"] == 0 and ud["tobacco"] == 0:
         msg += "\n\n🌿 Твой инвентарь пуст! Напиши собрать, чтобы найти траву."
     save(d)
     await reply_and_delete(u, msg)
+
 
 async def sell(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u):
@@ -691,11 +824,15 @@ async def sell(u: Update, c: ContextTypes.DEFAULT_TYPE):
     gt = ud.get("last_grass_type", "обычная")
     price = GRASS[gt]["sell"]
     earned = ud["grass"] * price
+    if EVENT_ACTIVE:
+        earned *= EVENT_MULTIPLIER
     ud["coins"] += earned
     ud["grass"] = 0
     ud["name"] = u.effective_user.username or u.effective_user.first_name
     save(d)
-    await reply_and_delete(u, f"💰 Продажа травы!\n\n🌿 Продано: вся трава (редкость: {gt})\n💰 Цена за гр: {price} монет\n💰 Заработано: {earned} монет\n💰 Всего монет: {ud['coins']}")
+    event_msg = "\n\n🎉 ИВЕНТ АКТИВЕН! x3 удача!" if EVENT_ACTIVE else ""
+    await reply_and_delete(u, f"💰 Продажа травы!\n\n🌿 Продано: вся трава (редкость: {gt})\n💰 Цена за гр: {price} монет\n💰 Заработано: {earned} монет\n💰 Всего монет: {ud['coins']}" + event_msg)
+
 
 async def sell_tobacco(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u):
@@ -706,11 +843,15 @@ async def sell_tobacco(u: Update, c: ContextTypes.DEFAULT_TYPE):
         await reply_and_delete(u, "😢 У тебя нет табака для продажи! Напиши крафт, чтобы сделать 🌿")
         return save(d)
     earned = ud["tobacco"] * 4
+    if EVENT_ACTIVE:
+        earned *= EVENT_MULTIPLIER
     ud["coins"] += earned
     ud["tobacco"] = 0
     ud["name"] = u.effective_user.username or u.effective_user.first_name
     save(d)
-    await reply_and_delete(u, f"💰 Продажа табака!\n\n📦 Продано: весь табак\n💰 Цена за гр: 4 монеты\n💰 Заработано: {earned} монет\n💰 Всего монет: {ud['coins']}")
+    event_msg = "\n\n🎉 ИВЕНТ АКТИВЕН! x3 удача!" if EVENT_ACTIVE else ""
+    await reply_and_delete(u, f"💰 Продажа табака!\n\n📦 Продано: весь табак\n💰 Цена за гр: 4 монеты\n💰 Заработано: {earned} монет\n💰 Всего монет: {ud['coins']}" + event_msg)
+
 
 async def buy_grass(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u):
@@ -732,6 +873,7 @@ async def buy_grass(u: Update, c: ContextTypes.DEFAULT_TYPE):
     save(d)
     await reply_and_delete(u, f"🛒 Покупка травы!\n\n🌿 Куплено: {num} гр травы\n💰 Потрачено: {cost} монет\n💰 Осталось: {ud['coins']} монет\n🎒 Всего травы: {ud['grass']} гр")
 
+
 async def buy_tobacco(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u):
         return
@@ -752,6 +894,7 @@ async def buy_tobacco(u: Update, c: ContextTypes.DEFAULT_TYPE):
     save(d)
     await reply_and_delete(u, f"🛒 Покупка табака!\n\n📦 Куплено: {num} гр табака\n💰 Потрачено: {cost} монет\n💰 Осталось: {ud['coins']} монет\n📦 Всего табака: {ud['tobacco']} гр")
 
+
 async def buy_cigarettes(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u):
         return
@@ -766,6 +909,7 @@ async def buy_cigarettes(u: Update, c: ContextTypes.DEFAULT_TYPE):
     save(d)
     await reply_and_delete(u, f"🛒 Покупка!\n\n🚬 Ты купил 1 сигарету!\n💰 Потрачено: {CIGARETTE_PRICE} монет\n💰 Осталось: {ud['coins']} монет\n🚬 Всего сигарет: {ud['cigarettes']} {decl_cigarettes(ud['cigarettes'])}")
 
+
 async def buy_cigars(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u):
         return
@@ -779,6 +923,7 @@ async def buy_cigars(u: Update, c: ContextTypes.DEFAULT_TYPE):
     ud["name"] = u.effective_user.username or u.effective_user.first_name
     save(d)
     await reply_and_delete(u, f"🛒 Покупка!\n\n🚬 Ты купил 1 сигару!\n💰 Потрачено: {CIGAR_PRICE} монет\n💰 Осталось: {ud['coins']} монет\n🚬 Всего сигар: {ud['cigars']} {decl_cigars(ud['cigars'])}")
+
 
 async def give(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u):
@@ -834,6 +979,7 @@ async def give(u: Update, c: ContextTypes.DEFAULT_TYPE):
     save(d)
     await reply_and_delete(u, f"🎁 Передача!\n\n{item_emoji} {u.effective_user.first_name} передал {num} {item_name} пользователю {target.first_name}!")
 
+
 async def farm(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u):
         return
@@ -857,6 +1003,8 @@ async def farm(u: Update, c: ContextTypes.DEFAULT_TYPE):
         await reply_and_delete(u, f"🏡 Ферма\n\n⏳ До следующего сбора: {fmt(farm_cd - passed)}\n🏡 Уровень фермы: {ud['farm']}\n💡 Ферма собирает траву автоматически!")
         return save(d)
     amt = random.randint(2, 5) * ud["farm"]
+    if EVENT_ACTIVE:
+        amt *= EVENT_MULTIPLIER
     ud["grass"] += amt
     ud["farm_last"] = now
     ud["name"] = u.effective_user.username or u.effective_user.first_name
@@ -864,11 +1012,13 @@ async def farm(u: Update, c: ContextTypes.DEFAULT_TYPE):
     old = ud["lvl"]
     new = lvl_up(ud)
     save(d)
+    event_msg = "\n\n🎉 ИВЕНТ АКТИВЕН! x3 удача!" if EVENT_ACTIVE else ""
     msg = f"🏡 Сбор с фермы!\n\n🌿 Собрано: {amt} гр травы!\n⭐ Опыт: +{ud['farm']} XP\n🎒 Всего травы: {ud['grass']} гр"
     if new > old:
         msg += f"\n\n🎉 УРОВЕНЬ ПОВЫШЕН!\nТеперь ты {TITLES.get(new, '🌟 Уровень ' + str(new))}!"
-    msg += "\n\n💡 Улучшить ферму: 'улучшить ферму' (100 монет за уровень)"
+    msg += event_msg + "\n\n💡 Улучшить ферму: 'улучшить ферму' (100 монет за уровень)"
     await reply_and_delete(u, msg)
+
 
 async def fast_farm(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u):
@@ -893,6 +1043,8 @@ async def fast_farm(u: Update, c: ContextTypes.DEFAULT_TYPE):
         await reply_and_delete(u, f"⚡ Быстрая ферма\n\n⏳ До следующего сбора: {fmt(fast_farm_cd - passed)}\n⚡ Уровень: {ud['fast_farm']}\n💡 Супер быстрый сбор!")
         return save(d)
     amt = random.randint(1, 2) * ud["fast_farm"]
+    if EVENT_ACTIVE:
+        amt *= EVENT_MULTIPLIER
     ud["grass"] += amt
     ud["fast_farm_last"] = now
     ud["name"] = u.effective_user.username or u.effective_user.first_name
@@ -900,11 +1052,13 @@ async def fast_farm(u: Update, c: ContextTypes.DEFAULT_TYPE):
     old = ud["lvl"]
     new = lvl_up(ud)
     save(d)
+    event_msg = "\n\n🎉 ИВЕНТ АКТИВЕН! x3 удача!" if EVENT_ACTIVE else ""
     msg = f"⚡ Сбор с быстрой фермы!\n\n🌿 Собрано: {amt} гр травы!\n⭐ Опыт: +{ud['fast_farm']} XP\n🎒 Всего травы: {ud['grass']} гр"
     if new > old:
         msg += f"\n\n🎉 УРОВЕНЬ ПОВЫШЕН!\nТеперь ты {TITLES.get(new, '🌟 Уровень ' + str(new))}!"
-    msg += "\n\n💡 Улучшить: 'улучшить быструю ферму' (200 монет за уровень)"
+    msg += event_msg + "\n\n💡 Улучшить: 'улучшить быструю ферму' (200 монет за уровень)"
     await reply_and_delete(u, msg)
+
 
 async def upgrade_fast_farm(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u):
@@ -924,6 +1078,7 @@ async def upgrade_fast_farm(u: Update, c: ContextTypes.DEFAULT_TYPE):
     save(d)
     await reply_and_delete(u, f"⚡ Быстрая ферма улучшена!\n\n⚡ Новый уровень: {ud['fast_farm']}\n💰 Потрачено: {cost} монет\n🌿 Теперь собирает больше травы за 30 секунд!")
 
+
 async def upgrade_farm(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u):
         return
@@ -941,6 +1096,7 @@ async def upgrade_farm(u: Update, c: ContextTypes.DEFAULT_TYPE):
     ud["name"] = u.effective_user.username or u.effective_user.first_name
     save(d)
     await reply_and_delete(u, f"🏡 Ферма улучшена!\n\n🏡 Новый уровень: {ud['farm']}\n💰 Потрачено: {cost} монет\n🌿 Теперь собирает больше травы!")
+
 
 async def check_clock(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u):
@@ -963,6 +1119,7 @@ async def check_clock(u: Update, c: ContextTypes.DEFAULT_TYPE):
     save(d)
     await reply_and_delete(u, msg)
 
+
 async def use_clock(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u):
         return
@@ -977,6 +1134,7 @@ async def use_clock(u: Update, c: ContextTypes.DEFAULT_TYPE):
     save(d)
     await reply_and_delete(u, f"⏱️ Часы травника использованы!\n\n✅ Кулдаун сброшен!\n🌿 Теперь можешь собирать траву!\n\n⏱️ Осталось часов: {ud['clocks']}")
 
+
 async def bonus(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u):
         return
@@ -987,6 +1145,8 @@ async def bonus(u: Update, c: ContextTypes.DEFAULT_TYPE):
         await reply_and_delete(u, "🎁 Ты уже получал бонус сегодня! Приходи завтра 😎")
         return save(d)
     b = random.randint(5, 15)
+    if EVENT_ACTIVE:
+        b *= EVENT_MULTIPLIER
     ud["grass"] += b
     ud["bonus"] = today
     ud["xp"] += 5
@@ -994,11 +1154,104 @@ async def bonus(u: Update, c: ContextTypes.DEFAULT_TYPE):
     old = ud["lvl"]
     new = lvl_up(ud)
     save(d)
+    event_msg = "\n\n🎉 ИВЕНТ АКТИВЕН! x3 удача!" if EVENT_ACTIVE else ""
     msg = f"🎁 Ежедневный бонус!\n\n🌿 Получено: {b} гр травы!\n⭐ +5 XP\n🎒 Всего: {ud['grass']} гр"
     if new > old:
         msg += f"\n\n🎉 УРОВЕНЬ ПОВЫШЕН!\nТеперь ты {TITLES.get(new, '🌟 Уровень ' + str(new))}!"
+    msg += event_msg
     await reply_and_delete(u, msg)
 
+
+# === УДАЧА: ПОКУПКА И АКТИВАЦИЯ ===
+async def buy_luck(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not await check_group(u):
+        return
+    d = load()
+    ud = get_user(d, u.effective_user.id, u.effective_chat.id)
+    text = u.message.text.lower().strip()
+
+    # Parse which luck item
+    luck_type = None
+    for key in ["x10", "x5", "x4", "x3", "x2"]:
+        if key in text:
+            luck_type = key
+            break
+
+    if not luck_type:
+        # Show shop
+        shop = "🍀 Магазин удачи\n\n"
+        for key, data in LUCK_ITEMS.items():
+            shop += f"{data['emoji']} Удача {key.upper()} — {data['price']} монет\n   (множитель x{data['multiplier']})\n\n"
+        shop += "💡 Напиши 'купить удачу x2' или 'купить удачу x3' и т.д."
+        await reply_and_delete(u, shop)
+        return save(d)
+
+    data = LUCK_ITEMS[luck_type]
+    if ud["coins"] < data["price"]:
+        await reply_and_delete(u, f"😢 Недостаточно монет!\n{data['emoji']} Удача {luck_type.upper()} стоит {data['price']} монет\n💰 У тебя: {ud['coins']} монет")
+        return save(d)
+
+    ud["coins"] -= data["price"]
+    luck_key = f"luck_{luck_type}"
+    ud[luck_key] += 1
+    ud["name"] = u.effective_user.username or u.effective_user.first_name
+    save(d)
+    await reply_and_delete(u, f"🍀 Покупка удачи!\n\n{data['emoji']} Удача {luck_type.upper()} куплена!\n💰 Потрачено: {data['price']} монет\n📦 Теперь: {ud[luck_key]} шт.\n💰 Осталось: {ud['coins']} монет")
+
+
+async def activate_luck(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not await check_group(u):
+        return
+    d = load()
+    ud = get_user(d, u.effective_user.id, u.effective_chat.id)
+    text = u.message.text.lower().strip()
+
+    luck_type = None
+    for key in ["x10", "x5", "x4", "x3", "x2"]:
+        if key in text:
+            luck_type = key
+            break
+
+    if not luck_type:
+        # Show current luck items
+        msg = "🍀 Твоя удача:\n\n"
+        for key, data in LUCK_ITEMS.items():
+            luck_key = f"luck_{key}"
+            count = ud.get(luck_key, 0)
+            active = " ✅ АКТИВНА" if ud.get("active_luck") == key else ""
+            msg += f"{data['emoji']} {key.upper()}: {count} шт.{active}\n"
+        msg += f"\n💡 Напиши 'включить удачу x2' или 'включить удачу x3' и т.д.\n🎰 Удача работает на СТАВКАХ!"
+        await reply_and_delete(u, msg)
+        return save(d)
+
+    luck_key = f"luck_{luck_type}"
+    if ud.get(luck_key, 0) < 1:
+        await reply_and_delete(u, f"😢 У тебя нет удачи {luck_type.upper()}!\n💡 Купи: 'купить удачу {luck_type}'")
+        return save(d)
+
+    ud["active_luck"] = luck_type
+    ud["name"] = u.effective_user.username or u.effective_user.first_name
+    save(d)
+    data = LUCK_ITEMS[luck_type]
+    await reply_and_delete(u, f"🍀 Удача активирована!\n\n{data['emoji']} Удача {luck_type.upper()} (x{data['multiplier']}) теперь работает!\n🎰 Все ставки с множителем x{data['multiplier']}!\n\n💡 Напиши 'выключить удачу', чтобы отключить.")
+
+
+async def deactivate_luck(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not await check_group(u):
+        return
+    d = load()
+    ud = get_user(d, u.effective_user.id, u.effective_chat.id)
+    if not ud.get("active_luck"):
+        await reply_and_delete(u, "🍀 У тебя нет активной удачи!")
+        return save(d)
+    old = ud["active_luck"]
+    ud["active_luck"] = None
+    ud["name"] = u.effective_user.username or u.effective_user.first_name
+    save(d)
+    await reply_and_delete(u, f"🍀 Удача {old.upper()} отключена!\n\nСтавки теперь без бонуса.")
+
+
+# === СТАВКА С УДАЧЕЙ ===
 async def bet(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u):
         return
@@ -1015,6 +1268,20 @@ async def bet(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if ud[item_key] < num:
         await reply_and_delete(u, f"😢 Недостаточно {item_name}!\n📦 У тебя: {ud[item_key]} гр\n🃏 Ставка: {num} гр")
         return save(d)
+
+    # Check active luck
+    luck_mult = 1
+    luck_emoji = ""
+    if ud.get("active_luck") and ud.get("active_luck") in LUCK_ITEMS:
+        luck_data = LUCK_ITEMS[ud["active_luck"]]
+        luck_mult = luck_data["multiplier"]
+        luck_emoji = luck_data["emoji"]
+        # Consume one luck use
+        luck_key = f"luck_{ud['active_luck']}"
+        ud[luck_key] -= 1
+        if ud[luck_key] <= 0:
+            ud["active_luck"] = None
+
     ud[item_key] -= num
     ud["name"] = u.effective_user.username or u.effective_user.first_name
     save(d)
@@ -1022,18 +1289,94 @@ async def bet(u: Update, c: ContextTypes.DEFAULT_TYPE):
     asyncio.create_task(auto_delete(dice_msg))
     await asyncio.sleep(2)
     r = random.randint(1, 100)
-    if r <= 30:
-        w = num * 2
+
+    # Apply luck to win chance
+    win_threshold = 30 * luck_mult
+    draw_threshold = 60
+    if luck_mult > 1:
+        draw_threshold = 30 + (30 * luck_mult)
+
+    if r <= win_threshold:
+        w = num * 2 * luck_mult
         ud[item_key] += w
-        msg = f"🎲 Ставка {num} гр {item_name}\n\n🎰 Выпало: {r}\n🎉 ПОБЕДА!\n💰 Выигрыш: {w} гр"
-    elif r <= 60:
+        msg = f"🎲 Ставка {num} гр {item_name}\n\n{luck_emoji} Удача x{luck_mult}!\n🎰 Выпало: {r}\n🎉 ПОБЕДА!\n💰 Выигрыш: {w} гр"
+    elif r <= draw_threshold:
         ud[item_key] += num
-        msg = f"🎲 Ставка {num} гр {item_name}\n\n🎰 Выпало: {r}\n😐 Ничья — ставка возвращена"
+        msg = f"🎲 Ставка {num} гр {item_name}\n\n{luck_emoji} Удача x{luck_mult}!\n🎰 Выпало: {r}\n😐 Ничья — ставка возвращена"
     else:
-        msg = f"🎲 Ставка {num} гр {item_name}\n\n🎰 Выпало: {r}\n😭 ПРОИГРЫШ!"
+        msg = f"🎲 Ставка {num} гр {item_name}\n\n{luck_emoji} Удача x{luck_mult}!\n🎰 Выпало: {r}\n😭 ПРОИГРЫШ!"
     msg += f"\n🎒 Баланс {item_name}: {ud[item_key]} гр"
     save(d)
     await reply_and_delete(u, msg)
+
+
+# === ДЕП-ИГРА (КАЗИНО) ===
+async def deposit_game(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not await check_group(u):
+        return
+    d = load()
+    ud = get_user(d, u.effective_user.id, u.effective_chat.id)
+    text = u.message.text.lower().strip()
+    num = parse_number(text)
+
+    if not num or num < 1:
+        await reply_and_delete(u, "❌ Укажи деп! Например:\n💰 'деп 100' — депнуть 100 монет\n💰 'деп 500' — депнуть 500 монет")
+        return save(d)
+
+    if ud["coins"] < num:
+        await reply_and_delete(u, f"😢 Недостаточно монет!\n💰 У тебя: {ud['coins']} монет\n💰 Хочешь депнуть: {num} монет")
+        return save(d)
+
+    ud["coins"] -= num
+    ud["name"] = u.effective_user.username or u.effective_user.first_name
+    save(d)
+
+    # Animation
+    spin_msg = await u.message.reply_text("🎰 Крутим барабан...")
+    await asyncio.sleep(1)
+    await spin_msg.edit_text("🎰 Крутим барабан..⭐..")
+    await asyncio.sleep(1)
+    await spin_msg.edit_text("🎰 Крутим барабан..💎..")
+    await asyncio.sleep(1)
+
+    # Check active luck
+    luck_mult = 1
+    luck_emoji = ""
+    if ud.get("active_luck") and ud.get("active_luck") in LUCK_ITEMS:
+        luck_data = LUCK_ITEMS[ud["active_luck"]]
+        luck_mult = luck_data["multiplier"]
+        luck_emoji = luck_data["emoji"]
+        luck_key = f"luck_{ud['active_luck']}"
+        ud[luck_key] -= 1
+        if ud[luck_key] <= 0:
+            ud["active_luck"] = None
+
+    r = random.randint(1, 100)
+
+    # Apply luck to thresholds
+    win_threshold = 25 * luck_mult
+    big_win_threshold = 10 * luck_mult
+
+    if r <= big_win_threshold:
+        w = num * 5 * luck_mult
+        ud["coins"] += w
+        result = f"🎰🎰🎰 ДЖЕКПОТ!!! 🎰🎰🎰\n\n{luck_emoji} Удача x{luck_mult}!\n🎰 Выпало: {r}\n💰 ДЕП x5!\n💰 Выигрыш: {w} монет"
+    elif r <= win_threshold:
+        w = num * 2 * luck_mult
+        ud["coins"] += w
+        result = f"🎉 ПОБЕДА!\n\n{luck_emoji} Удача x{luck_mult}!\n🎰 Выпало: {r}\n💰 ДЕП x2!\n💰 Выигрыш: {w} монет"
+    elif r <= 50:
+        ud["coins"] += num
+        result = f"😐 Ничья\n\n{luck_emoji} Удача x{luck_mult}!\n🎰 Выпало: {r}\n💰 Деп возвращён"
+    else:
+        result = f"😭 ПРОИГРЫШ!\n\n{luck_emoji} Удача x{luck_mult}!\n🎰 Выпало: {r}\n💰 Деп сожрало казино"
+
+    result += f"\n💰 Баланс: {ud['coins']} монет"
+    save(d)
+    await spin_msg.edit_text(result)
+    asyncio.create_task(auto_delete(spin_msg))
+    asyncio.create_task(auto_delete(u.message, delay=AUTO_DELETE_DELAY))
+
 
 TRADE_STATE = {}
 
@@ -1060,6 +1403,7 @@ async def trade_start(u: Update, c: ContextTypes.DEFAULT_TYPE):
     TRADE_STATE[cid][str(u.effective_user.id)] = {"to_id": target.id, "clocks": 1}
     await reply_and_delete(u, f"🤝 Трейд\n\nТы предлагаешь обменять 1 ⏱️ Часы травника пользователю {target.first_name}!\n\n{target.first_name}, напиши 'принять трейд', чтобы получить часы!")
     save(d)
+
 
 async def trade_accept(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u):
@@ -1093,6 +1437,7 @@ async def trade_accept(u: Update, c: ContextTypes.DEFAULT_TYPE):
     save(d)
     await reply_and_delete(u, f"🤝 Трейд завершён!\n\n{from_ud['name']} → {to_ud['name']}\n⏱️ Передано: 1 Часы травника")
 
+
 async def trade_cancel(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u):
         return
@@ -1104,12 +1449,14 @@ async def trade_cancel(u: Update, c: ContextTypes.DEFAULT_TYPE):
     else:
         await reply_and_delete(u, "❌ У тебя нет активных трейдов!")
 
+
 async def is_admin(chat, user_id):
     try:
         member = await chat.get_member(user_id)
         return member.status in ["creator", "administrator"]
     except:
         return False
+
 
 async def ban(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u):
@@ -1138,6 +1485,7 @@ async def ban(u: Update, c: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await reply_and_delete(u, f"❌ Ошибка: {e}")
 
+
 async def unban(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u):
         return
@@ -1162,6 +1510,7 @@ async def unban(u: Update, c: ContextTypes.DEFAULT_TYPE):
         await reply_and_delete(u, f"✅ {t.first_name} разбанен! Может снова собирать траву 🌿")
     except Exception as e:
         await reply_and_delete(u, f"❌ Ошибка: {e}")
+
 
 async def mute(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u):
@@ -1197,6 +1546,7 @@ async def mute(u: Update, c: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await reply_and_delete(u, f"❌ Ошибка: {e}")
 
+
 async def unmute(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not await check_group(u):
         return
@@ -1221,6 +1571,7 @@ async def unmute(u: Update, c: ContextTypes.DEFAULT_TYPE):
         await reply_and_delete(u, f"🔊 {t.first_name} размучен! Может снова болтать 🗣️")
     except Exception as e:
         await reply_and_delete(u, f"❌ Ошибка: {e}")
+
 
 # === ЛОТЕРЕЯ ТРАВНИКА ===
 LOTTERY_PRICE = 50
@@ -1247,6 +1598,19 @@ async def bet_coins(u: Update, c: ContextTypes.DEFAULT_TYPE):
         msg = f"😢 Недостаточно монет!\n💰 У тебя: {ud['coins']} монет\n🃏 Ставка: {num} монет"
         await reply_and_delete(u, msg)
         return save(d)
+
+    # Check active luck
+    luck_mult = 1
+    luck_emoji = ""
+    if ud.get("active_luck") and ud.get("active_luck") in LUCK_ITEMS:
+        luck_data = LUCK_ITEMS[ud["active_luck"]]
+        luck_mult = luck_data["multiplier"]
+        luck_emoji = luck_data["emoji"]
+        luck_key = f"luck_{ud['active_luck']}"
+        ud[luck_key] -= 1
+        if ud[luck_key] <= 0:
+            ud["active_luck"] = None
+
     ud["coins"] -= num
     ud["name"] = u.effective_user.username or u.effective_user.first_name
     save(d)
@@ -1254,15 +1618,21 @@ async def bet_coins(u: Update, c: ContextTypes.DEFAULT_TYPE):
     asyncio.create_task(auto_delete(dice_msg))
     await asyncio.sleep(2)
     r = random.randint(1, 100)
-    if r <= 30:
-        w = num * 2
+
+    win_threshold = 30 * luck_mult
+    draw_threshold = 60
+    if luck_mult > 1:
+        draw_threshold = 30 + (30 * luck_mult)
+
+    if r <= win_threshold:
+        w = num * 2 * luck_mult
         ud["coins"] += w
-        msg = f"🎲 Ставка {num} монет\n\n🎰 Выпало: {r}\n🎉 ПОБЕДА!\n💰 Выигрыш: {w} монет"
-    elif r <= 60:
+        msg = f"🎲 Ставка {num} монет\n\n{luck_emoji} Удача x{luck_mult}!\n🎰 Выпало: {r}\n🎉 ПОБЕДА!\n💰 Выигрыш: {w} монет"
+    elif r <= draw_threshold:
         ud["coins"] += num
-        msg = f"🎲 Ставка {num} монет\n\n🎰 Выпало: {r}\n😐 Ничья - ставка возвращена"
+        msg = f"🎲 Ставка {num} монет\n\n{luck_emoji} Удача x{luck_mult}!\n🎰 Выпало: {r}\n😐 Ничья - ставка возвращена"
     else:
-        msg = f"🎲 Ставка {num} монет\n\n🎰 Выпало: {r}\n😭 ПРОИГРЫШ!"
+        msg = f"🎲 Ставка {num} монет\n\n{luck_emoji} Удача x{luck_mult}!\n🎰 Выпало: {r}\n😭 ПРОИГРЫШ!"
     msg = msg + f"\n💰 Баланс: {ud['coins']} монет"
     save(d)
     await reply_and_delete(u, msg)
@@ -1302,12 +1672,15 @@ async def lottery(u: Update, c: ContextTypes.DEFAULT_TYPE):
             break
 
     win_amount = LOTTERY_PRICE * prize_data["multiplier"]
+    if EVENT_ACTIVE:
+        win_amount *= EVENT_MULTIPLIER
     ud["coins"] += win_amount
     ud["xp"] += 2
     old = ud["lvl"]
     new = lvl_up(ud)
     save(d)
 
+    event_msg = "\n🎉 ИВЕНТ АКТИВЕН! x3 удача!" if EVENT_ACTIVE else ""
     msg = f"🎰🎰🎰 ЛОТЕРЕЯ ТРАВНИКА 🎰🎰🎰\n\n"
     msg = msg + f"{prize_data['emoji']} {prize_name}!\n\n"
     msg = msg + f"💰 Билет: {LOTTERY_PRICE} монет\n"
@@ -1316,10 +1689,12 @@ async def lottery(u: Update, c: ContextTypes.DEFAULT_TYPE):
     msg = msg + "⭐ +2 XP"
     if new > old:
         msg = msg + f"\n\n🎉 УРОВЕНЬ ПОВЫШЕН!\nТеперь ты {TITLES.get(new, '🌟 Уровень ' + str(new))}!"
+    msg += event_msg
 
     await spin_msg.edit_text(msg)
     asyncio.create_task(auto_delete(spin_msg))
     asyncio.create_task(auto_delete(u.message, delay=AUTO_DELETE_DELAY))
+
 
 async def text(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if u.effective_chat.type == "private":
@@ -1378,6 +1753,15 @@ async def text(u: Update, c: ContextTypes.DEFAULT_TYPE):
         "помощь": start, "хелп": start, "команды": start, "старт": start, "начать": start,
         "help": start, "help me": start, "меню": start, "список команд": start, "что умеешь": start,
         "?": start, "!": start, "как играть": start, "гайд": start,
+        # Удача
+        "купить удачу": buy_luck, "удача": buy_luck, "магазин удачи": buy_luck,
+        "включить удачу": activate_luck, "активировать удачу": activate_luck, "врубить удачу": activate_luck,
+        "выключить удачу": deactivate_luck, "отключить удачу": deactivate_luck,
+        # Ивент
+        "ивент": event_on, "врубить ивент": event_on, "включить ивент": event_on,
+        "выключить ивент": event_off, "отключить ивент": event_off, "ивент офф": event_off,
+        # Деп-игра
+        "деп": deposit_game, "депнуть": deposit_game, "казино": deposit_game, "крутить": deposit_game,
     }
     if t in cmds:
         await cmds[t](u, c)
@@ -1419,6 +1803,18 @@ async def text(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if t.startswith("курить "):
         await smoke(u, c)
         return
+    if t.startswith("деп "):
+        await deposit_game(u, c)
+        return
+    if t.startswith("купить удачу"):
+        await buy_luck(u, c)
+        return
+    if t.startswith("включить удачу"):
+        await activate_luck(u, c)
+        return
+    if t.startswith("врубить удачу"):
+        await activate_luck(u, c)
+        return
 
     if t in ["привет", "здарова", "ку", "хай", "йо", "здравствуй", "прив", "хей",
              "хелоу", "хеллоу", "здрасьте", "добрый день", "добрый вечер", "доброе утро",
@@ -1429,8 +1825,10 @@ async def text(u: Update, c: ContextTypes.DEFAULT_TYPE):
                "доброй ночи", "споки", "спок"]:
         await reply_and_delete(u, f"👋 Пока, {u.effective_user.first_name}! Не забудь собрать травку перед уходом 🌿")
 
+
 async def post_init(app: Application):
     await app.bot.set_my_commands(BOT_COMMANDS)
+
 
 def main():
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
@@ -1449,6 +1847,7 @@ def main():
     app.add_handler(CommandHandler("farm", farm))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text))
     atexit.register(force_save)
-    print("🌿 Травка Бот v6 запущен!"); app.run_polling()
+    print("🌿 Травка Бот v7 запущен!"); app.run_polling()
+
 
 if __name__ == "__main__": main()

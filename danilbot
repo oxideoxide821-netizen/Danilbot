@@ -253,10 +253,11 @@ async def craft(u: Update, c: ContextTypes.DEFAULT_TYPE):
         if ud["grass"] < 1:
             await reply_del(u, "😢 Нет травы! Напиши собрать 🌿")
             return
-        crafted = ud["grass"]; total_t = 0; total_x = 0
-        for _ in range(crafted): total_t += random.randint(1, 3); total_x += 1
+        crafted = min(ud["grass"], 10000)  # MAX 10k per craft
+        total_t = sum(random.randint(1, 3) for _ in range(crafted))
+        total_x = crafted
         if EVENT_ACTIVE: total_t *= EVENT_MULT; total_x *= EVENT_MULT
-        ud["tobacco"] += total_t; ud["grass"] = 0; ud["xp"] += total_x
+        ud["tobacco"] += total_t; ud["grass"] -= crafted; ud["xp"] += total_x
         ud["name"] = u.effective_user.username or u.effective_user.first_name
         old = ud["lvl"]; new = lvl_up(ud)
         save_user_db(u.effective_chat.id, u.effective_user.id, ud)
@@ -278,8 +279,9 @@ async def smoke(u: Update, c: ContextTypes.DEFAULT_TYPE):
             if ud["tobacco"] < 1:
                 await reply_del(u, "😢 Нет табака! Напиши крафт 🌿")
                 return
-            total = ud["tobacco"]; ud["smoked"] += total
-            xp = int(total * xp_mult); coins = random.randint(total, total * 3)
+            total = min(ud["tobacco"], 10000)  # MAX 10k per smoke
+            ud["tobacco"] -= total; ud["smoked"] += total
+            xp = int(total * xp_mult); coins = random.randint(total, min(total * 3, 30000))
             if EVENT_ACTIVE: xp *= EVENT_MULT; coins *= EVENT_MULT
             ud["xp"] += xp; ud["coins"] += coins; ud["tobacco"] = 0
             ud["name"] = u.effective_user.username or u.effective_user.first_name
@@ -1113,7 +1115,6 @@ async def admin_reset(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
 async def text(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not u.message or not u.message.text: return
-    logger.info(f"MSG from {u.effective_user.id} in {u.effective_chat.id}: {u.message.text[:50]}")
     if u.effective_chat.type == "private":
         await u.message.reply_text("🌿 Я бот для чатов! Добавляй в чат и становись миллионером"); return
     t = u.message.text.lower().strip()
@@ -1239,38 +1240,21 @@ async def text(u: Update, c: ContextTypes.DEFAULT_TYPE):
 async def post_init(app: Application):
     await app.bot.set_my_commands(BOT_COMMANDS)
 
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    logger.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
-
 def main():
-    while True:
-        try:
-            app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
-            app.add_handler(CommandHandler("start", start))
-            app.add_handler(CommandHandler("help", start))
-            app.add_handler(CommandHandler("collect", collect))
-            app.add_handler(CommandHandler("craft", craft))
-            app.add_handler(CommandHandler("smoke", smoke))
-            app.add_handler(CommandHandler("profile", profile))
-            app.add_handler(CommandHandler("top", tops))
-            app.add_handler(CommandHandler("inventory", inv))
-            app.add_handler(CommandHandler("bonus", bonus))
-            app.add_handler(CommandHandler("sell", sell))
-            app.add_handler(CommandHandler("farm", farm))
-            app.add_handler(CommandHandler("rob", rob))
-            app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text))
-            app.add_error_handler(error_handler)
-            print("🌿 Травка Бот v10 (SQLite) запущен!")
-            app.run_polling(
-                poll_interval=1.0,
-                timeout=30,
-                drop_pending_updates=True,
-                allowed_updates=Update.ALL_TYPES
-            )
-        except Exception as e:
-            logger.error(f"Bot crashed: {e}", exc_info=True)
-            print(f"💥 Бот упал: {e}. Перезапуск через 10 сек...")
-            import time
-            time.sleep(10)
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", start))
+    app.add_handler(CommandHandler("collect", collect))
+    app.add_handler(CommandHandler("craft", craft))
+    app.add_handler(CommandHandler("smoke", smoke))
+    app.add_handler(CommandHandler("profile", profile))
+    app.add_handler(CommandHandler("top", tops))
+    app.add_handler(CommandHandler("inventory", inv))
+    app.add_handler(CommandHandler("bonus", bonus))
+    app.add_handler(CommandHandler("sell", sell))
+    app.add_handler(CommandHandler("farm", farm))
+    app.add_handler(CommandHandler("rob", rob))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text))
+    print("🌿 Травка Бот v10 (SQLite) запущен!"); app.run_polling()
 
 if __name__ == "__main__": main()

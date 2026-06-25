@@ -12,7 +12,7 @@ DB_PATH = "tapok.db"
 def init_db():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     cursor = conn.cursor()
-    
+
     cursor.executescript("""
     CREATE TABLE IF NOT EXISTS users (
         user_id INTEGER PRIMARY KEY,
@@ -38,15 +38,14 @@ def init_db():
         PRIMARY KEY (user_id, chat_id)
     );
     """)
-    
-    # Migration
+
     for col in [("cooldown_level", "INTEGER DEFAULT 0"), ("bonus_level", "INTEGER DEFAULT 0"), ("balance", "INTEGER DEFAULT 0")]:
         try:
             cursor.execute(f"SELECT {col[0]} FROM users LIMIT 1")
         except sqlite3.OperationalError:
             cursor.execute(f"ALTER TABLE users ADD COLUMN {col[0]} {col[1]}")
             print(f"Added {col[0]} column")
-    
+
     conn.commit()
     return conn, cursor
 
@@ -111,18 +110,6 @@ def get_multiplier(user_id):
     lvl = result[0] if result else 0
     return BONUS_LEVELS.get(lvl, BONUS_LEVELS[0])["multiplier"]
 
-# === CHECK MESSAGE OWNER ===
-def check_owner(update: Update):
-    """Returns True if the callback query user is the message owner"""
-    if not update.callback_query:
-        return True
-    query = update.callback_query
-    # Get the user who sent the original message
-    msg_user_id = query.message.from_user.id if query.message and query.message.from_user else None
-    # Get the user who clicked the button
-    clicker_id = query.from_user.id
-    return msg_user_id == clicker_id
-
 # === MAIN MENU ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == "private":
@@ -133,28 +120,28 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML"
         )
         return
-    
+
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
     username = update.effective_user.username
     first_name = update.effective_user.first_name
     chat_title = update.effective_chat.title
-    
+
     get_user(user_id, username, first_name)
     get_chat(chat_id, chat_title)
-    
+
     keyboard = [
-        [InlineKeyboardButton("🩴 Тапок", callback_data="tapok")],
-        [InlineKeyboardButton("📊 Статистика", callback_data="stats")],
-        [InlineKeyboardButton("🏆 Топ", callback_data="top")],
-        [InlineKeyboardButton("🛒 Магазин тапка", callback_data="shop")],
-        [InlineKeyboardButton("🎁 Тапки бесплатно", callback_data="ref")],
-        [InlineKeyboardButton("🤖 Другие боты", callback_data="bots")],
-        [InlineKeyboardButton("💌 Стикеры", callback_data="sticker")],
-        [InlineKeyboardButton("❓ Помощь", callback_data="help")],
+        [InlineKeyboardButton("🩴 Тапок", callback_data=f"tapok_{user_id}")],
+        [InlineKeyboardButton("📊 Статистика", callback_data=f"stats_{user_id}")],
+        [InlineKeyboardButton("🏆 Топ", callback_data=f"top_{user_id}")],
+        [InlineKeyboardButton("🛒 Магазин тапка", callback_data=f"shop_{user_id}")],
+        [InlineKeyboardButton("🎁 Тапки бесплатно", callback_data=f"ref_{user_id}")],
+        [InlineKeyboardButton("🤖 Другие боты", callback_data=f"bots_{user_id}")],
+        [InlineKeyboardButton("💌 Стикеры", callback_data=f"sticker_{user_id}")],
+        [InlineKeyboardButton("❓ Помощь", callback_data=f"help_{user_id}")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    
+
     await update.message.reply_text(
         f"<b>🩴 Тапкометр</b>\n"
         f"Бот-линейка для групп\n\n"
@@ -171,20 +158,20 @@ async def do_tapok(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = update.effective_user.username
     first_name = update.effective_user.first_name
     chat_title = update.effective_chat.title
-    
+
     user = get_user(user_id, username, first_name)
     get_chat(chat_id, chat_title)
-    
+
     now = time.time()
     cooldown = get_cooldown(user_id)
     multiplier = get_multiplier(user_id)
-    
+
     cursor.execute("SELECT last_used FROM cooldowns WHERE user_id=? AND chat_id=?", (user_id, chat_id))
     cd = cursor.fetchone()
     last_used = cd[0] if cd else 0
-    
+
     remaining = cooldown - (now - last_used)
-    
+
     if remaining > 0:
         text = f"⏳ <b>{first_name}</b>, подожди ещё {format_time(remaining)}\nВсего тапков — <b>{user[3]:.2f}</b> см."
         if update.callback_query:
@@ -192,10 +179,10 @@ async def do_tapok(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text(text, parse_mode="HTML")
         return
-    
+
     base_tapok = round(random.uniform(0.5, 5.0), 2)
     tapok_size = round(base_tapok * multiplier, 2)
-    
+
     cursor.execute("UPDATE users SET total_tapoks = total_tapoks + ?, last_tapok = ? WHERE user_id=?",
                    (tapok_size, now, user_id))
     cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (int(tapok_size * 10), user_id))
@@ -203,18 +190,18 @@ async def do_tapok(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cursor.execute("INSERT OR REPLACE INTO cooldowns (user_id, chat_id, last_used) VALUES (?,?,?)",
                    (user_id, chat_id, now))
     conn.commit()
-    
+
     user = cursor.execute("SELECT * FROM users WHERE user_id=?", (user_id,)).fetchone()
-    
+
     messages = [
         f"💥 <b>{first_name}</b>, получил(а) тапок <b>{tapok_size}</b> см по жопе!\nВсего тапков — <b>{user[3]:.2f}</b> см.",
         f"👋 <b>{first_name}</b>, раздался хлопок! Тапок <b>{tapok_size}</b> см!\nОбщий счёт — <b>{user[3]:.2f}</b> см.",
         f"🩴 <b>{first_name}</b>, жопа горит! Тапок на <b>{tapok_size}</b> см!\nНакоплено — <b>{user[3]:.2f}</b> см.",
     ]
-    
-    keyboard = [[InlineKeyboardButton("🩴 Ещё тапок!", callback_data="tapok")]]
+
+    keyboard = [[InlineKeyboardButton("🩴 Ещё тапок!", callback_data=f"tapok_{user_id}")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    
+
     msg = random.choice(messages)
     if update.callback_query:
         await update.callback_query.edit_message_text(msg, parse_mode="HTML", reply_markup=reply_markup)
@@ -231,13 +218,13 @@ async def tapok_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
-    
+
     text = update.message.text.strip().lower()
     chat_type = update.effective_chat.type
-    
+
     if chat_type == "private":
         return
-    
+
     if text in ("тапок", "/тапок", "т", "tapok"):
         await do_tapok(update, context)
     elif text in ("статистика", "/статистика", "стат", "stats"):
@@ -257,9 +244,9 @@ async def do_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = get_chat(chat_id, "")
     cursor.execute("SELECT COUNT(DISTINCT user_id) FROM cooldowns WHERE chat_id=?", (chat_id,))
     players = cursor.fetchone()[0] or 0
-    
+
     text = f"📊 <b>Статистика чата</b>\n\n🩴 Всего тапков в чате: <b>{chat[2]:.2f}</b> см\n👥 Игроков: <b>{players}</b>\n\nРаз в час — тапок по жопе!"
-    
+
     if update.callback_query:
         await update.callback_query.edit_message_text(text, parse_mode="HTML")
     else:
@@ -275,18 +262,18 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def do_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cursor.execute("SELECT first_name, total_tapoks FROM users ORDER BY total_tapoks DESC LIMIT 10")
     top_users = cursor.fetchall()
-    
+
     cursor.execute("SELECT chat_title, total_tapoks FROM chats ORDER BY total_tapoks DESC LIMIT 10")
     top_chats = cursor.fetchall()
-    
+
     text = "🏆 <b>Топ-10 игроков</b>\n\n"
     for i, (name, tapoks) in enumerate(top_users, 1):
         text += f"{i}. {name} — <b>{tapoks:.2f}</b> см\n"
-    
+
     text += "\n🏆 <b>Топ-10 чатов</b>\n\n"
     for i, (title, tapoks) in enumerate(top_chats, 1):
         text += f"{i}. {title} — <b>{tapoks:.2f}</b> см\n"
-    
+
     if update.callback_query:
         await update.callback_query.edit_message_text(text, parse_mode="HTML")
     else:
@@ -301,29 +288,29 @@ async def do_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = update.effective_user.username
     first_name = update.effective_user.first_name
     user = get_user(user_id, username, first_name)
-    
+
     balance = user[7] if len(user) > 7 else 0
     cd_lvl = user[8] if len(user) > 8 else 0
     bonus_lvl = user[9] if len(user) > 9 else 0
-    
+
     text = f"🛒 <b>Магазин тапка</b>\n\n💰 Баланс: <b>{balance}</b> монет\n\n"
-    
+
     text += "⏱ <b>Уменьшение кулдауна:</b>\n"
     for lvl, info in COOLDOWN_LEVELS.items():
         status = " ✅" if cd_lvl >= lvl else ""
         text += f"  {info['name']} — {info['price']} монет{status}\n"
-    
+
     text += f"\n📈 <b>Увеличение см:</b>\n"
     for lvl, info in BONUS_LEVELS.items():
         status = " ✅" if bonus_lvl >= lvl else ""
         text += f"  {info['name']} — {info['price']} монет{status}\n"
-    
+
     keyboard = [
-        [InlineKeyboardButton("⏱ Улучшить кулдаун", callback_data="shop_cooldown")],
-        [InlineKeyboardButton("📈 Улучшить см", callback_data="shop_bonus")],
-        [InlineKeyboardButton("🔙 Назад", callback_data="menu")],
+        [InlineKeyboardButton("⏱ Улучшить кулдаун", callback_data=f"buy_cd_{user_id}")],
+        [InlineKeyboardButton("📈 Улучшить см", callback_data=f"buy_bonus_{user_id}")],
+        [InlineKeyboardButton("🔙 Назад", callback_data=f"menu_{user_id}")],
     ]
-    
+
     if update.callback_query:
         await update.callback_query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
     else:
@@ -337,9 +324,9 @@ async def do_ref(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     bot_username = context.bot.username
     ref_link = f"https://t.me/{bot_username}?start={user_id}"
-    
+
     text = f"🎁 <b>Тапки бесплатно!</b>\n\nПригласи друга по ссылке и получи бонус:\n<code>{ref_link}</code>\n\nЗа каждого приглашённого — <b>+1000</b> монет!"
-    
+
     if update.callback_query:
         await update.callback_query.edit_message_text(text, parse_mode="HTML")
     else:
@@ -358,7 +345,7 @@ async def do_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "<b>🎁 реф</b> — реферальная ссылка\n"
             "<b>❓ помощь</b> — это сообщение\n\n"
             "Раз в час жми тапок и копи сантиметры!")
-    
+
     if update.callback_query:
         await update.callback_query.edit_message_text(text, parse_mode="HTML")
     else:
@@ -370,107 +357,119 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # === CALLBACKS ===
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
-    
+
     data = query.data
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
     first_name = update.effective_user.first_name
     username = update.effective_user.username
-    
-    # Check if message belongs to this user
-    if not check_owner(update):
+
+    # Parse owner_id from callback_data
+    # Format: "action_ownerid" or "buy_cd_ownerid" or "buy_bonus_ownerid"
+    parts = data.rsplit("_", 1)
+    if len(parts) == 2 and parts[1].isdigit():
+        owner_id = int(parts[1])
+        action = parts[0]
+    else:
+        action = data
+        owner_id = user_id
+
+    # Check ownership
+    if owner_id != user_id:
         await query.answer("🚫 Сообщение не твое!", show_alert=True)
         return
-    
-    if data == "tapok":
+
+    # Single answer for the callback
+    await query.answer()
+
+    if action == "tapok":
         await do_tapok(update, context)
-    
-    elif data == "stats":
+
+    elif action == "stats":
         await do_stats(update, context)
-    
-    elif data == "top":
+
+    elif action == "top":
         await do_top(update, context)
-    
-    elif data == "shop":
+
+    elif action == "shop":
         await do_shop(update, context)
-    
-    elif data == "shop_cooldown":
+
+    elif action == "buy_cd":
         user = get_user(user_id, username, first_name)
         balance = user[7] if len(user) > 7 else 0
         cd_lvl = user[8] if len(user) > 8 else 0
-        
+
         next_lvl = cd_lvl + 1
         if next_lvl not in COOLDOWN_LEVELS:
             await query.answer("Максимальный уровень кулдауна достигнут!", show_alert=True)
             return
-        
+
         price = COOLDOWN_LEVELS[next_lvl]["price"]
         if balance < price:
-            await query.answer(f"❌ Недостаточно монет!\nНужно: {price} монет\nУ тебя: {balance} монет", show_alert=True)
+            await query.answer(f"❌ Недостаточно монет!\nНужно: {price}\nУ тебя: {balance}", show_alert=True)
             return
-        
+
         cursor.execute("UPDATE users SET balance = balance - ?, cooldown_level = ? WHERE user_id=?",
                        (price, next_lvl, user_id))
         conn.commit()
-        
+
         await query.answer(f"✅ Куплено! Кулдаун теперь {COOLDOWN_LEVELS[next_lvl]['name']}", show_alert=True)
         await do_shop(update, context)
-    
-    elif data == "shop_bonus":
+
+    elif action == "buy_bonus":
         user = get_user(user_id, username, first_name)
         balance = user[7] if len(user) > 7 else 0
         bonus_lvl = user[9] if len(user) > 9 else 0
-        
+
         next_lvl = bonus_lvl + 1
         if next_lvl not in BONUS_LEVELS:
             await query.answer("Максимальный уровень см достигнут!", show_alert=True)
             return
-        
+
         price = BONUS_LEVELS[next_lvl]["price"]
         if balance < price:
-            await query.answer(f"❌ Недостаточно монет!\nНужно: {price} монет\nУ тебя: {balance} монет", show_alert=True)
+            await query.answer(f"❌ Недостаточно монет!\nНужно: {price}\nУ тебя: {balance}", show_alert=True)
             return
-        
+
         cursor.execute("UPDATE users SET balance = balance - ?, bonus_level = ? WHERE user_id=?",
                        (price, next_lvl, user_id))
         conn.commit()
-        
+
         await query.answer(f"✅ Куплено! Множитель теперь {BONUS_LEVELS[next_lvl]['name']}", show_alert=True)
         await do_shop(update, context)
-    
-    elif data == "menu":
+
+    elif action == "menu":
         keyboard = [
-            [InlineKeyboardButton("🩴 Тапок", callback_data="tapok")],
-            [InlineKeyboardButton("📊 Статистика", callback_data="stats")],
-            [InlineKeyboardButton("🏆 Топ", callback_data="top")],
-            [InlineKeyboardButton("🛒 Магазин тапка", callback_data="shop")],
-            [InlineKeyboardButton("🎁 Тапки бесплатно", callback_data="ref")],
-            [InlineKeyboardButton("🤖 Другие боты", callback_data="bots")],
-            [InlineKeyboardButton("💌 Стикеры", callback_data="sticker")],
-            [InlineKeyboardButton("❓ Помощь", callback_data="help")],
+            [InlineKeyboardButton("🩴 Тапок", callback_data=f"tapok_{user_id}")],
+            [InlineKeyboardButton("📊 Статистика", callback_data=f"stats_{user_id}")],
+            [InlineKeyboardButton("🏆 Топ", callback_data=f"top_{user_id}")],
+            [InlineKeyboardButton("🛒 Магазин тапка", callback_data=f"shop_{user_id}")],
+            [InlineKeyboardButton("🎁 Тапки бесплатно", callback_data=f"ref_{user_id}")],
+            [InlineKeyboardButton("🤖 Другие боты", callback_data=f"bots_{user_id}")],
+            [InlineKeyboardButton("💌 Стикеры", callback_data=f"sticker_{user_id}")],
+            [InlineKeyboardButton("❓ Помощь", callback_data=f"help_{user_id}")],
         ]
         await query.edit_message_text(
             f"<b>🩴 Тапкометр</b>\nБот-линейка для групп\n\nРаз в час — тапок по жопе!\nНажми кнопку ниже 👇",
             parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard)
         )
-    
-    elif data == "ref":
+
+    elif action == "ref":
         await do_ref(update, context)
-    
-    elif data == "bots":
+
+    elif action == "bots":
         await query.edit_message_text(
             f"🤖 <b>Другие боты</b>\n\n@{context.bot.username} — Тапкометр\n\nСкоро добавим ещё!",
             parse_mode="HTML"
         )
-    
-    elif data == "sticker":
+
+    elif action == "sticker":
         await query.edit_message_text(
             "💌 <b>Стикеры</b>\n\nСтикерпак скоро будет доступен!",
             parse_mode="HTML"
         )
-    
-    elif data == "help":
+
+    elif action == "help":
         await do_help(update, context)
 
 # === START HANDLER FOR REFS ===
@@ -478,14 +477,14 @@ async def start_ref(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         await start(update, context)
         return
-    
+
     args = context.args
     user_id = update.effective_user.id
     username = update.effective_user.username
     first_name = update.effective_user.first_name
-    
+
     get_user(user_id, username, first_name)
-    
+
     if args and args[0].isdigit():
         ref_id = int(args[0])
         if ref_id != user_id:
@@ -501,7 +500,7 @@ async def start_ref(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"🎉 <b>{first_name}</b> присоединился по твоей ссылке!\nТебе начислено <b>+1000</b> монет!",
                     parse_mode="HTML"
                 )
-    
+
     await update.message.reply_text(
         "🩴 <b>Тапкометр</b>\n\nБот-линейка для групп. Добавь меня в чат и пиши <b>тапок</b>!\n\nМои команды — <b>помощь</b>",
         parse_mode="HTML"
@@ -517,14 +516,13 @@ async def post_init(app: Application):
 
 def main():
     app = Application.builder().token(TOKEN).post_init(post_init).build()
-    
+
     app.add_handler(CommandHandler("start", start_ref))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CallbackQueryHandler(button_handler))
-    
-    # Russian text commands
+
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
-    
+
     print("🩴 Тапкометр запущен!")
     app.run_polling()
 

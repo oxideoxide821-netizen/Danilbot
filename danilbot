@@ -139,7 +139,7 @@ async def safe_stealth_spam(event):
     try:
         for msg in messages_to_send:
             await client.send_message(target_chat, msg)
-            await asyncio.sleep(random.uniform(0.05, 0.15))
+            await asyncio.sleep(random.uniform(0.0, 0.01))
 
     except Exception as e:
         await event.reply(f"❌ Ошибка: {e}")

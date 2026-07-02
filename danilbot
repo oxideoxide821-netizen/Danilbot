@@ -1,530 +1,162 @@
-import sqlite3
+import asyncio
 import random
-import time
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
+import re
+from telethon import TelegramClient
+from telethon.sessions import StringSession
+from telethon import events
+from telethon.tl.types import PeerChannel, PeerChat, PeerUser
 
-TOKEN = "8654134456:AAGgOe52KTGgU8Ge4NqGrIkkq_xi0p8LGu8"
+# ТВОИ ДАННЫЕ
+API_ID = 36403406      
+API_HASH = "ecdc945d831f24eee69eae668c6c4ad1"  
+STRING_SESSION = "1ApWapzMBuyjgs7a2GfT6X6CyOn5oDdbVLAplyU9aDNFe2Mmk2WaCHhVCOGia1BrX5ZLOnP77_pXd41nxc70cGdgfMOxEstVKFYsFj3o8GY3q08h59CMNg0ycCi2H45W-5qUqwL_u5RmXo2_HYdqmlf452iQqBt8tIl0QYTewAnyBtQb16Q9QCYi4h0blGzCZlCRNcbJTqeJAeB38p4imzSwWd-9E8n_rnlxq8hpvpbMNbHFjoL8E_PDAwyTDUFQrKhj7BOfki-ahG89J2-bDcpzf9QYwV7gLvEP9Ut_IP83y6KT9mkJyIURpSgHo6GjoDJYZhJbODJDSRTzaw_qJa3g6nQ0jYJw="
 
-DB_PATH = "tapok.db"
+client = TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH)
 
-# === DATABASE ===
-def init_db():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    cursor = conn.cursor()
 
-    cursor.executescript("""
-    CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
-        username TEXT,
-        first_name TEXT,
-        total_tapoks REAL DEFAULT 0,
-        last_tapok REAL DEFAULT 0,
-        refs INTEGER DEFAULT 0,
-        ref_by INTEGER DEFAULT 0,
-        balance INTEGER DEFAULT 0,
-        cooldown_level INTEGER DEFAULT 0,
-        bonus_level INTEGER DEFAULT 0
-    );
-    CREATE TABLE IF NOT EXISTS chats (
-        chat_id INTEGER PRIMARY KEY,
-        chat_title TEXT,
-        total_tapoks REAL DEFAULT 0
-    );
-    CREATE TABLE IF NOT EXISTS cooldowns (
-        user_id INTEGER,
-        chat_id INTEGER,
-        last_used REAL DEFAULT 0,
-        PRIMARY KEY (user_id, chat_id)
-    );
-    """)
+def extract_target(text):
+    """Извлекает цель: @username, t.me/ссылка, или числовой ID чата"""
+    text = text.strip()
 
-    for col in [("cooldown_level", "INTEGER DEFAULT 0"), ("bonus_level", "INTEGER DEFAULT 0"), ("balance", "INTEGER DEFAULT 0")]:
-        try:
-            cursor.execute(f"SELECT {col[0]} FROM users LIMIT 1")
-        except sqlite3.OperationalError:
-            cursor.execute(f"ALTER TABLE users ADD COLUMN {col[0]} {col[1]}")
-            print(f"Added {col[0]} column")
+    match = re.search(r't\.me/([a-zA-Z0-9_]{5,})', text)
+    if match:
+        return match.group(1)
 
-    conn.commit()
-    return conn, cursor
+    match = re.search(r'@([a-zA-Z0-9_]{5,})', text)
+    if match:
+        return match.group(1)
 
-conn, cursor = init_db()
+    match = re.search(r'^(-?\d+)$', text)
+    if match:
+        return int(match.group(1))
 
-# === SHOP CONFIG ===
-COOLDOWN_LEVELS = {
-    0: {"time": 3600, "price": 0, "name": "1 час (стандарт)"},
-    1: {"time": 1800, "price": 5000, "name": "30 минут"},
-    2: {"time": 600, "price": 15000, "name": "10 минут"},
-    3: {"time": 300, "price": 50000, "name": "5 минут"},
-}
+    if re.match(r'^[a-zA-Z][a-zA-Z0-9_]{4,}$', text):
+        return text
 
-BONUS_LEVELS = {
-    0: {"multiplier": 1.0, "price": 0, "name": "x1 (стандарт)"},
-    1: {"multiplier": 1.5, "price": 3000, "name": "x1.5"},
-    2: {"multiplier": 2.0, "price": 10000, "name": "x2"},
-    3: {"multiplier": 3.0, "price": 30000, "name": "x3"},
-    4: {"multiplier": 5.0, "price": 100000, "name": "x5"},
-}
+    return None
 
-# === HELPERS ===
-def get_user(user_id, username, first_name):
-    cursor.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
-    user = cursor.fetchone()
-    if not user:
-        cursor.execute(
-            "INSERT INTO users (user_id, username, first_name, total_tapoks, last_tapok, refs, ref_by, balance, cooldown_level, bonus_level) VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (user_id, username or "", first_name or "", 0, 0, 0, 0, 0, 0, 0)
-        )
-        conn.commit()
-    return cursor.execute("SELECT * FROM users WHERE user_id=?", (user_id,)).fetchone()
 
-def get_chat(chat_id, title):
-    cursor.execute("SELECT * FROM chats WHERE chat_id=?", (chat_id,))
-    chat = cursor.fetchone()
-    if not chat:
-        cursor.execute("INSERT INTO chats (chat_id, chat_title) VALUES (?,?)", (chat_id, title or "Чат"))
-        conn.commit()
-    return cursor.execute("SELECT * FROM chats WHERE chat_id=?", (chat_id,)).fetchone()
+def get_chat_id_from_fwd(fwd_from):
+    """Получает ID чата из пересланного сообщения"""
+    # Пробуем saved_from_peer
+    if fwd_from.saved_from_peer:
+        peer = fwd_from.saved_from_peer
+        if isinstance(peer, PeerChannel):
+            return peer.channel_id
+        elif isinstance(peer, PeerChat):
+            return peer.chat_id
+        elif isinstance(peer, PeerUser):
+            return peer.user_id
 
-def format_time(seconds):
-    if seconds <= 0:
-        return "сейчас"
-    m, s = divmod(int(seconds), 60)
-    h, m = divmod(m, 60)
-    parts = []
-    if h: parts.append(f"{h} ч.")
-    if m: parts.append(f"{m} мин.")
-    if s: parts.append(f"{s} сек.")
-    return " ".join(parts)
+    # Пробуем saved_from_id
+    if fwd_from.saved_from_id:
+        peer = fwd_from.saved_from_id
+        if isinstance(peer, PeerChannel):
+            return peer.channel_id
+        elif isinstance(peer, PeerChat):
+            return peer.chat_id
+        elif isinstance(peer, PeerUser):
+            return peer.user_id
 
-def get_cooldown(user_id):
-    cursor.execute("SELECT cooldown_level FROM users WHERE user_id=?", (user_id,))
-    result = cursor.fetchone()
-    lvl = result[0] if result else 0
-    return COOLDOWN_LEVELS.get(lvl, COOLDOWN_LEVELS[0])["time"]
+    # Пробуем from_id (отправитель, fallback)
+    if fwd_from.from_id:
+        peer = fwd_from.from_id
+        if isinstance(peer, PeerChannel):
+            return peer.channel_id
+        elif isinstance(peer, PeerChat):
+            return peer.chat_id
+        elif isinstance(peer, PeerUser):
+            return peer.user_id
 
-def get_multiplier(user_id):
-    cursor.execute("SELECT bonus_level FROM users WHERE user_id=?", (user_id,))
-    result = cursor.fetchone()
-    lvl = result[0] if result else 0
-    return BONUS_LEVELS.get(lvl, BONUS_LEVELS[0])["multiplier"]
+    return None
 
-# === MAIN MENU ===
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type == "private":
-        await update.message.reply_text(
-            "🩴 <b>Тапкометр</b> — бот-линейка для групп (чатов)\n\n"
-            "Раз в час игрок может получить тапок по жопе\n\n"
-            "Добавь меня в группу и дай права админа!",
-            parse_mode="HTML"
-        )
+
+@client.on(events.NewMessage(outgoing=True, chats='me'))
+async def safe_stealth_spam(event):
+    text = event.text.strip()
+
+    if not text or not text.isupper():
         return
 
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-    username = update.effective_user.username
-    first_name = update.effective_user.first_name
-    chat_title = update.effective_chat.title
+    target_chat = None
+    spam_text = ""
 
-    get_user(user_id, username, first_name)
-    get_chat(chat_id, chat_title)
+    # === СЛУЧАЙ 1: Ответ на пересланное сообщение ===
+    if event.is_reply:
+        reply_msg = await event.get_reply_message()
+        if reply_msg:
+            if reply_msg.fwd_from:
+                # === ОТЛАДКА: показываем что видим в fwd_from ===
+                fwd = reply_msg.fwd_from
+                debug_info = f"📋 Отладка fwd_from:\n"
+                debug_info += f"saved_from_peer: {fwd.saved_from_peer}\n"
+                debug_info += f"saved_from_id: {fwd.saved_from_id}\n"
+                debug_info += f"from_id: {fwd.from_id}\n"
+                debug_info += f"post_author: {fwd.post_author}\n"
+                debug_info += f"date: {fwd.date}\n"
 
-    keyboard = [
-        [InlineKeyboardButton("🩴 Тапок", callback_data=f"tapok_{user_id}")],
-        [InlineKeyboardButton("📊 Статистика", callback_data=f"stats_{user_id}")],
-        [InlineKeyboardButton("🏆 Топ", callback_data=f"top_{user_id}")],
-        [InlineKeyboardButton("🛒 Магазин тапка", callback_data=f"shop_{user_id}")],
-        [InlineKeyboardButton("🎁 Тапки бесплатно", callback_data=f"ref_{user_id}")],
-        [InlineKeyboardButton("🤖 Другие боты", callback_data=f"bots_{user_id}")],
-        [InlineKeyboardButton("💌 Стикеры", callback_data=f"sticker_{user_id}")],
-        [InlineKeyboardButton("❓ Помощь", callback_data=f"help_{user_id}")],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+                # Пробуем получить ID всеми способами
+                target_chat = get_chat_id_from_fwd(fwd)
 
-    await update.message.reply_text(
-        f"<b>🩴 Тапкометр</b>\n"
-        f"Бот-линейка для групп\n\n"
-        f"Раз в час — тапок по жопе!\n"
-        f"Нажми кнопку ниже 👇",
-        parse_mode="HTML",
-        reply_markup=reply_markup
-    )
+                if not target_chat:
+                    # Если не получилось — показываем отладку и просим ID
+                    await event.reply(debug_info + "\n❌ Не удалось определить чат. Используй @username или ID чата.")
+                    return
+                else:
+                    # Показываем что нашли
+                    await event.reply(f"✅ Найден чат: {target_chat}")
+            else:
+                await event.reply("❌ Ответь на ПЕРЕСЛАННОЕ сообщение из целевого чата, чтобы я понял куда слать.")
+                return
 
-# === TAPOK ===
-async def do_tapok(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-    username = update.effective_user.username
-    first_name = update.effective_user.first_name
-    chat_title = update.effective_chat.title
+            spam_text = text
 
-    user = get_user(user_id, username, first_name)
-    get_chat(chat_id, chat_title)
-
-    now = time.time()
-    cooldown = get_cooldown(user_id)
-    multiplier = get_multiplier(user_id)
-
-    cursor.execute("SELECT last_used FROM cooldowns WHERE user_id=? AND chat_id=?", (user_id, chat_id))
-    cd = cursor.fetchone()
-    last_used = cd[0] if cd else 0
-
-    remaining = cooldown - (now - last_used)
-
-    if remaining > 0:
-        text = f"⏳ <b>{first_name}</b>, подожди ещё {format_time(remaining)}\nВсего тапков — <b>{user[3]:.2f}</b> см."
-        if update.callback_query:
-            await update.callback_query.edit_message_text(text, parse_mode="HTML")
-        else:
-            await update.message.reply_text(text, parse_mode="HTML")
-        return
-
-    base_tapok = round(random.uniform(0.5, 5.0), 2)
-    tapok_size = round(base_tapok * multiplier, 2)
-
-    cursor.execute("UPDATE users SET total_tapoks = total_tapoks + ?, last_tapok = ? WHERE user_id=?",
-                   (tapok_size, now, user_id))
-    cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (int(tapok_size * 10), user_id))
-    cursor.execute("UPDATE chats SET total_tapoks = total_tapoks + ? WHERE chat_id=?", (tapok_size, chat_id))
-    cursor.execute("INSERT OR REPLACE INTO cooldowns (user_id, chat_id, last_used) VALUES (?,?,?)",
-                   (user_id, chat_id, now))
-    conn.commit()
-
-    user = cursor.execute("SELECT * FROM users WHERE user_id=?", (user_id,)).fetchone()
-
-    messages = [
-        f"💥 <b>{first_name}</b>, получил(а) тапок <b>{tapok_size}</b> см по жопе!\nВсего тапков — <b>{user[3]:.2f}</b> см.",
-        f"👋 <b>{first_name}</b>, раздался хлопок! Тапок <b>{tapok_size}</b> см!\nОбщий счёт — <b>{user[3]:.2f}</b> см.",
-        f"🩴 <b>{first_name}</b>, жопа горит! Тапок на <b>{tapok_size}</b> см!\nНакоплено — <b>{user[3]:.2f}</b> см.",
-    ]
-
-    keyboard = [[InlineKeyboardButton("🩴 Ещё тапок!", callback_data=f"tapok_{user_id}")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    msg = random.choice(messages)
-    if update.callback_query:
-        await update.callback_query.edit_message_text(msg, parse_mode="HTML", reply_markup=reply_markup)
-    else:
-        await update.message.reply_text(msg, parse_mode="HTML", reply_markup=reply_markup)
-
-async def tapok_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type == "private":
-        await update.message.reply_text("🩴 Тапкометр работает только в группах!")
-        return
-    await do_tapok(update, context)
-
-# === TEXT COMMAND HANDLER (RUSSIAN) ===
-async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text:
-        return
-
-    text = update.message.text.strip().lower()
-    chat_type = update.effective_chat.type
-
-    if chat_type == "private":
-        return
-
-    if text in ("тапок", "/тапок", "т", "tapok"):
-        await do_tapok(update, context)
-    elif text in ("статистика", "/статистика", "стат", "stats"):
-        await do_stats(update, context)
-    elif text in ("топ", "/топ", "top"):
-        await do_top(update, context)
-    elif text in ("магазин", "/магазин", "shop", "маг"):
-        await do_shop(update, context)
-    elif text in ("реф", "/реф", "реферал", "ref"):
-        await do_ref(update, context)
-    elif text in ("помощь", "/помощь", "help", "хелп"):
-        await do_help(update, context)
-
-# === STATS ===
-async def do_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    chat = get_chat(chat_id, "")
-    cursor.execute("SELECT COUNT(DISTINCT user_id) FROM cooldowns WHERE chat_id=?", (chat_id,))
-    players = cursor.fetchone()[0] or 0
-
-    text = f"📊 <b>Статистика чата</b>\n\n🩴 Всего тапков в чате: <b>{chat[2]:.2f}</b> см\n👥 Игроков: <b>{players}</b>\n\nРаз в час — тапок по жопе!"
-
-    if update.callback_query:
-        await update.callback_query.edit_message_text(text, parse_mode="HTML")
-    else:
-        await update.message.reply_text(text, parse_mode="HTML")
-
-async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type == "private":
-        await update.message.reply_text("📊 Работает только в группах!")
-        return
-    await do_stats(update, context)
-
-# === TOP ===
-async def do_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cursor.execute("SELECT first_name, total_tapoks FROM users ORDER BY total_tapoks DESC LIMIT 10")
-    top_users = cursor.fetchall()
-
-    cursor.execute("SELECT chat_title, total_tapoks FROM chats ORDER BY total_tapoks DESC LIMIT 10")
-    top_chats = cursor.fetchall()
-
-    text = "🏆 <b>Топ-10 игроков</b>\n\n"
-    for i, (name, tapoks) in enumerate(top_users, 1):
-        text += f"{i}. {name} — <b>{tapoks:.2f}</b> см\n"
-
-    text += "\n🏆 <b>Топ-10 чатов</b>\n\n"
-    for i, (title, tapoks) in enumerate(top_chats, 1):
-        text += f"{i}. {title} — <b>{tapoks:.2f}</b> см\n"
-
-    if update.callback_query:
-        await update.callback_query.edit_message_text(text, parse_mode="HTML")
-    else:
-        await update.message.reply_text(text, parse_mode="HTML")
-
-async def top_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await do_top(update, context)
-
-# === SHOP ===
-async def do_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    username = update.effective_user.username
-    first_name = update.effective_user.first_name
-    user = get_user(user_id, username, first_name)
-
-    balance = user[7] if len(user) > 7 else 0
-    cd_lvl = user[8] if len(user) > 8 else 0
-    bonus_lvl = user[9] if len(user) > 9 else 0
-
-    text = f"🛒 <b>Магазин тапка</b>\n\n💰 Баланс: <b>{balance}</b> монет\n\n"
-
-    text += "⏱ <b>Уменьшение кулдауна:</b>\n"
-    for lvl, info in COOLDOWN_LEVELS.items():
-        status = " ✅" if cd_lvl >= lvl else ""
-        text += f"  {info['name']} — {info['price']} монет{status}\n"
-
-    text += f"\n📈 <b>Увеличение см:</b>\n"
-    for lvl, info in BONUS_LEVELS.items():
-        status = " ✅" if bonus_lvl >= lvl else ""
-        text += f"  {info['name']} — {info['price']} монет{status}\n"
-
-    keyboard = [
-        [InlineKeyboardButton("⏱ Улучшить кулдаун", callback_data=f"buy_cd_{user_id}")],
-        [InlineKeyboardButton("📈 Улучшить см", callback_data=f"buy_bonus_{user_id}")],
-        [InlineKeyboardButton("🔙 Назад", callback_data=f"menu_{user_id}")],
-    ]
-
-    if update.callback_query:
-        await update.callback_query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
-    else:
-        await update.message.reply_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
-
-async def shop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await do_shop(update, context)
-
-# === REF ===
-async def do_ref(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    bot_username = context.bot.username
-    ref_link = f"https://t.me/{bot_username}?start={user_id}"
-
-    text = f"🎁 <b>Тапки бесплатно!</b>\n\nПригласи друга по ссылке и получи бонус:\n<code>{ref_link}</code>\n\nЗа каждого приглашённого — <b>+1000</b> монет!"
-
-    if update.callback_query:
-        await update.callback_query.edit_message_text(text, parse_mode="HTML")
-    else:
-        await update.message.reply_text(text, parse_mode="HTML")
-
-async def ref_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await do_ref(update, context)
-
-# === HELP ===
-async def do_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = ("❓ <b>Помощь</b>\n\n"
-            "<b>🩴 тапок</b> — получить тапок (раз в час)\n"
-            "<b>📊 статистика</b> — статистика чата\n"
-            "<b>🏆 топ</b> — топ игроков и чатов\n"
-            "<b>🛒 магазин</b> — магазин улучшений\n"
-            "<b>🎁 реф</b> — реферальная ссылка\n"
-            "<b>❓ помощь</b> — это сообщение\n\n"
-            "Раз в час жми тапок и копи сантиметры!")
-
-    if update.callback_query:
-        await update.callback_query.edit_message_text(text, parse_mode="HTML")
-    else:
-        await update.message.reply_text(text, parse_mode="HTML")
-
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await do_help(update, context)
-
-# === CALLBACKS ===
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-
-    data = query.data
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-    first_name = update.effective_user.first_name
-    username = update.effective_user.username
-
-    # Parse owner_id from callback_data
-    # Format: "action_ownerid" or "buy_cd_ownerid" or "buy_bonus_ownerid"
-    parts = data.rsplit("_", 1)
-    if len(parts) == 2 and parts[1].isdigit():
-        owner_id = int(parts[1])
-        action = parts[0]
-    else:
-        action = data
-        owner_id = user_id
-
-    # Check ownership
-    if owner_id != user_id:
-        await query.answer("🚫 Сообщение не твое!", show_alert=True)
-        return
-
-    # Single answer for the callback
-    await query.answer()
-
-    if action == "tapok":
-        await do_tapok(update, context)
-
-    elif action == "stats":
-        await do_stats(update, context)
-
-    elif action == "top":
-        await do_top(update, context)
-
-    elif action == "shop":
-        await do_shop(update, context)
-
-    elif action == "buy_cd":
-        user = get_user(user_id, username, first_name)
-        balance = user[7] if len(user) > 7 else 0
-        cd_lvl = user[8] if len(user) > 8 else 0
-
-        next_lvl = cd_lvl + 1
-        if next_lvl not in COOLDOWN_LEVELS:
-            await query.answer("Максимальный уровень кулдауна достигнут!", show_alert=True)
+    # === СЛУЧАЙ 2: Без ответа — @username, t.me/ссылка или ID ===
+    if not target_chat:
+        parts = text.split(maxsplit=1)
+        if len(parts) < 2:
+            await event.reply("❌ Формат: `@ЮЗЕРНЕЙМ ТЕКСТ` или `-1001234567890 ТЕКСТ` (всё капсом)")
             return
 
-        price = COOLDOWN_LEVELS[next_lvl]["price"]
-        if balance < price:
-            await query.answer(f"❌ Недостаточно монет!\nНужно: {price}\nУ тебя: {balance}", show_alert=True)
+        raw_target = parts[0]
+        spam_text = parts[1]
+
+        target_chat = extract_target(raw_target)
+        if not target_chat:
+            await event.reply("❌ Не понял куда слать. Используй @username, t.me/ссылку или ID чата")
             return
 
-        cursor.execute("UPDATE users SET balance = balance - ?, cooldown_level = ? WHERE user_id=?",
-                       (price, next_lvl, user_id))
-        conn.commit()
+    # === РАЗДЕЛЕНИЕ НА ПАКЕТЫ ===
+    messages_to_send = []
+    for packet in spam_text.split():
+        words = packet.split('/')
+        message = ' '.join(words)
+        messages_to_send.append(message)
 
-        await query.answer(f"✅ Куплено! Кулдаун теперь {COOLDOWN_LEVELS[next_lvl]['name']}", show_alert=True)
-        await do_shop(update, context)
+    # Отчёт в Избранном
+    await event.reply(f"⏳ Быстрый запуск на {target_chat}... ({len(messages_to_send)} сообщений)")
 
-    elif action == "buy_bonus":
-        user = get_user(user_id, username, first_name)
-        balance = user[7] if len(user) > 7 else 0
-        bonus_lvl = user[9] if len(user) > 9 else 0
+    try:
+        for msg in messages_to_send:
+            await client.send_message(target_chat, msg)
+            await asyncio.sleep(random.uniform(0.05, 0.15))
 
-        next_lvl = bonus_lvl + 1
-        if next_lvl not in BONUS_LEVELS:
-            await query.answer("Максимальный уровень см достигнут!", show_alert=True)
-            return
+    except Exception as e:
+        await event.reply(f"❌ Ошибка: {e}")
+        print(f"Ошибка отправки: {e}")
 
-        price = BONUS_LEVELS[next_lvl]["price"]
-        if balance < price:
-            await query.answer(f"❌ Недостаточно монет!\nНужно: {price}\nУ тебя: {balance}", show_alert=True)
-            return
+print("🚀 Быстрый Юзербот запущен!")
+print("Для атаки зайди в Избранное и напиши текст КАПСОМ.")
+print("")
+print("Форматы:")
+print("  1) Ответом на ПЕРЕСЛАННОЕ сообщение из целевого чата")
+print("  2) @username ТЕКСТ")
+print("  3) https://t.me/username ТЕКСТ")
+print("  4) -1001234567890 ТЕКСТ  (ID приватного чата/канала)")
+print("")
+print("Разделение слов:")
+print("  Пробел = новое сообщение")
+print("  / = слова в одном сообщении через пробел")
 
-        cursor.execute("UPDATE users SET balance = balance - ?, bonus_level = ? WHERE user_id=?",
-                       (price, next_lvl, user_id))
-        conn.commit()
-
-        await query.answer(f"✅ Куплено! Множитель теперь {BONUS_LEVELS[next_lvl]['name']}", show_alert=True)
-        await do_shop(update, context)
-
-    elif action == "menu":
-        keyboard = [
-            [InlineKeyboardButton("🩴 Тапок", callback_data=f"tapok_{user_id}")],
-            [InlineKeyboardButton("📊 Статистика", callback_data=f"stats_{user_id}")],
-            [InlineKeyboardButton("🏆 Топ", callback_data=f"top_{user_id}")],
-            [InlineKeyboardButton("🛒 Магазин тапка", callback_data=f"shop_{user_id}")],
-            [InlineKeyboardButton("🎁 Тапки бесплатно", callback_data=f"ref_{user_id}")],
-            [InlineKeyboardButton("🤖 Другие боты", callback_data=f"bots_{user_id}")],
-            [InlineKeyboardButton("💌 Стикеры", callback_data=f"sticker_{user_id}")],
-            [InlineKeyboardButton("❓ Помощь", callback_data=f"help_{user_id}")],
-        ]
-        await query.edit_message_text(
-            f"<b>🩴 Тапкометр</b>\nБот-линейка для групп\n\nРаз в час — тапок по жопе!\nНажми кнопку ниже 👇",
-            parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
-    elif action == "ref":
-        await do_ref(update, context)
-
-    elif action == "bots":
-        await query.edit_message_text(
-            f"🤖 <b>Другие боты</b>\n\n@{context.bot.username} — Тапкометр\n\nСкоро добавим ещё!",
-            parse_mode="HTML"
-        )
-
-    elif action == "sticker":
-        await query.edit_message_text(
-            "💌 <b>Стикеры</b>\n\nСтикерпак скоро будет доступен!",
-            parse_mode="HTML"
-        )
-
-    elif action == "help":
-        await do_help(update, context)
-
-# === START HANDLER FOR REFS ===
-async def start_ref(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type != "private":
-        await start(update, context)
-        return
-
-    args = context.args
-    user_id = update.effective_user.id
-    username = update.effective_user.username
-    first_name = update.effective_user.first_name
-
-    get_user(user_id, username, first_name)
-
-    if args and args[0].isdigit():
-        ref_id = int(args[0])
-        if ref_id != user_id:
-            cursor.execute("SELECT * FROM users WHERE user_id=?", (ref_id,))
-            ref_user = cursor.fetchone()
-            if ref_user:
-                cursor.execute("UPDATE users SET balance = balance + 1000 WHERE user_id=?", (ref_id,))
-                cursor.execute("UPDATE users SET refs = refs + 1 WHERE user_id=?", (ref_id,))
-                cursor.execute("UPDATE users SET ref_by = ? WHERE user_id=?", (ref_id, user_id))
-                conn.commit()
-                await context.bot.send_message(
-                    ref_id,
-                    f"🎉 <b>{first_name}</b> присоединился по твоей ссылке!\nТебе начислено <b>+1000</b> монет!",
-                    parse_mode="HTML"
-                )
-
-    await update.message.reply_text(
-        "🩴 <b>Тапкометр</b>\n\nБот-линейка для групп. Добавь меня в чат и пиши <b>тапок</b>!\n\nМои команды — <b>помощь</b>",
-        parse_mode="HTML"
-    )
-
-# === MAIN ===
-async def post_init(app: Application):
-    commands = [
-        BotCommand("start", "🩴 Запустить бота"),
-        BotCommand("help", "❓ Помощь"),
-    ]
-    await app.bot.set_my_commands(commands)
-
-def main():
-    app = Application.builder().token(TOKEN).post_init(post_init).build()
-
-    app.add_handler(CommandHandler("start", start_ref))
-    app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CallbackQueryHandler(button_handler))
-
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
-
-    print("🩴 Тапкометр запущен!")
-    app.run_polling()
-
-if __name__ == "__main__":
-    main()
+client.start()
+client.run_until_disconnected()

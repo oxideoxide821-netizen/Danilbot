@@ -12,7 +12,7 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 TOKEN = "8907348769:AAFyFEGayc3ZNTRqt20nqIdh6J7RhJSdI44"
 ADMIN_ID = 7825739027
-YOUR_ID = 8371345434
+ADMIN_ID_2 = 8371345434  # второй админ
 
 bot = telebot.TeleBot(TOKEN, parse_mode='HTML')
 logger = telebot.logger
@@ -30,11 +30,12 @@ STATE_IDLE = 0
 STATE_SELL_TITLE = 1
 STATE_SELL_DESC = 2
 STATE_SELL_PRICE = 3
-STATE_SELL_MEDIA = 4
+STATE_SELL_VIDEO = 4
 STATE_REVIEW_TEXT = 5
 
 user_state = {}
 user_data = {}
+user_video_msgs = {}  # uid -> [message_ids] для удаления видео при навигации
 
 def init_db():
     conn = sqlite3.connect('market.db', check_same_thread=False)
@@ -59,6 +60,12 @@ def init_db():
             media_file_id TEXT,
             status TEXT DEFAULT 'pending',
             created_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS item_videos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id INTEGER,
+            file_id TEXT,
+            order_num INTEGER DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS reviews (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -109,6 +116,24 @@ def get_reviews_text(item_id):
         txt += f"{stars} <b>{r[0]}</b> ({r[3]})\n{r[2]}\n\n"
     return txt.strip()
 
+def get_videos(item_id):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT file_id FROM item_videos WHERE item_id=? ORDER BY id", (item_id,))
+    rows = [r[0] for r in c.fetchall()]
+    conn.close()
+    return rows
+
+def clear_videos(uid, chat_id):
+    """Удаляет отдельные видео-сообщения при уходе из карточки товара"""
+    if uid in user_video_msgs:
+        for mid in user_video_msgs[uid]:
+            try:
+                bot.delete_message(chat_id, mid)
+            except Exception as e:
+                logger.error(f"Delete video msg error: {e}")
+        del user_video_msgs[uid]
+
 # Клавиатуры
 def kb_main():
     m = InlineKeyboardMarkup()
@@ -128,14 +153,6 @@ def kb_cats():
     m = InlineKeyboardMarkup()
     for k,v in CATEGORIES.items():
         m.row(InlineKeyboardButton(v, callback_data=f"cat_{k}"))
-    m.row(InlineKeyboardButton("❌ Отмена", callback_data="cancel_sell"))
-    return m
-
-def kb_media():
-    m = InlineKeyboardMarkup()
-    m.row(InlineKeyboardButton("📷 Фото", callback_data="med_photo"),
-          InlineKeyboardButton("🎥 Видео", callback_data="med_video"))
-    m.row(InlineKeyboardButton("⏩ Без медиа", callback_data="med_none"))
     m.row(InlineKeyboardButton("❌ Отмена", callback_data="cancel_sell"))
     return m
 
@@ -198,6 +215,8 @@ def cmd_cancel(m):
 @bot.callback_query_handler(func=lambda c: c.data == 'main')
 def cb_main(c):
     bot.answer_callback_query(c.id)
+    uid = c.from_user.id
+    clear_videos(uid, c.message.chat.id)
     txt = (f"👋 Снова здесь, {c.from_user.first_name}!\n\n"
            "📌 <b>Разделы:</b>\n"
            "• 🛒 Маркетплейс\n• 💰 Продажа\n• 👤 Профиль\n• 🆘 Поддержка\n\n"
@@ -217,6 +236,8 @@ def cb_market(c):
 @bot.callback_query_handler(func=lambda c: c.data.startswith('mpage_'))
 def cb_mpage(c):
     bot.answer_callback_query(c.id)
+    uid = c.from_user.id
+    clear_videos(uid, c.message.chat.id)
     page = int(c.data.split('_')[1])
     per_page = 5
     conn = get_db()
@@ -258,20 +279,22 @@ def cb_item(c):
     parts = c.data.split('_')
     item_id = int(parts[1])
     page = int(parts[2])
+    uid = c.from_user.id
     
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM items WHERE id=?", (item_id,))
+    cur.execute("SELECT id, seller_id, seller_name, title, description, price, category, status, created_at FROM items WHERE id=?", (item_id,))
     row = cur.fetchone()
     conn.close()
     if not row:
         bot.edit_message_text("❌ Товар не найден.", c.message.chat.id, c.message.message_id, reply_markup=kb_main())
         return
     
-    _, sid, sname, title, desc, price, cat, mtype, mfid, status, created = row
+    iid, sid, sname, title, desc, price, cat, status, created = row
     cat_name = CATEGORIES.get(cat, cat)
     avg, cnt = get_rating(sid)
     reviews = get_reviews_text(item_id)
+    videos = get_videos(item_id)
     
     txt = (f"📦 <b>{title}</b>\n\n"
            f"📝 {desc}\n\n"
@@ -281,18 +304,22 @@ def cb_item(c):
            f"⭐ Рейтинг продавца: {avg} ({cnt} отз.)\n"
            f"📅 {created}\n\n"
            f"💬 <b>Отзывы:</b>\n{reviews}\n\n"
+           f"🎥 Видео: {len(videos)} шт.\n\n"
            f"Для покупки пиши: @{sname}")
     
-    # Удаляем старое сообщение и шлём новое (чтобы можно было прикрепить медиа)
-    bot.delete_message(c.message.chat.id, c.message.message_id)
+    # Редактируем текущее текстовое сообщение (список товаров) → карточка товара
+    bot.edit_message_text(txt, c.message.chat.id, c.message.message_id, reply_markup=kb_item(item_id, page), parse_mode='HTML')
     
-    kb = kb_item(item_id, page)
-    if mtype == 'photo' and mfid:
-        bot.send_photo(c.message.chat.id, mfid, caption=txt, reply_markup=kb)
-    elif mtype == 'video' and mfid:
-        bot.send_video(c.message.chat.id, mfid, caption=txt, reply_markup=kb)
-    else:
-        bot.send_message(c.message.chat.id, txt, reply_markup=kb)
+    # Отправляем видео отдельными сообщениями (без клавиатуры)
+    if videos:
+        sent_ids = []
+        for vid in videos:
+            try:
+                vmsg = bot.send_video(c.message.chat.id, vid)
+                sent_ids.append(vmsg.message_id)
+            except Exception as e:
+                logger.error(f"Video send error: {e}")
+        user_video_msgs[uid] = sent_ids
 
 # --- ПРОДАЖА ---
 
@@ -300,14 +327,14 @@ def cb_item(c):
 def cb_sell_start(c):
     bot.answer_callback_query(c.id)
     uid = c.from_user.id
-    user_state[uid] = STATE_IDLE  # сначала покажем инструкцию
+    user_state[uid] = STATE_IDLE
     txt = ("💰 <b>Инструкция по продаже</b>\n\n"
            "Чтобы выставить товар:\n"
            "1️⃣ Выбери категорию\n"
            "2️⃣ Напиши название\n"
            "3️⃣ Добавь описание\n"
            "4️⃣ Укажи цену (число)\n"
-           "5️⃣ Прикрепи фото/видео или пропусти\n"
+           "5️⃣ Отправь видео товара (до 10 шт.)\n"
            "6️⃣ Подтверди публикацию\n\n"
            "⚠️ Товар пройдёт модерацию перед публикацией.\n\n"
            "Выбери категорию:")
@@ -321,7 +348,7 @@ def cb_cat(c):
     if cat not in CATEGORIES:
         return
     user_state[uid] = STATE_SELL_TITLE
-    user_data[uid] = {'cat': cat}
+    user_data[uid] = {'cat': cat, 'videos': []}
     bot.edit_message_text("✏️ Введи <b>название</b> товара:", c.message.chat.id, c.message.message_id, parse_mode='HTML')
 
 @bot.message_handler(func=lambda m: user_state.get(m.from_user.id) == STATE_SELL_TITLE)
@@ -353,50 +380,45 @@ def step_price(m):
         bot.send_message(m.chat.id, "❌ Только положительное число:")
         return
     user_data[uid]['price'] = int(m.text.strip())
-    user_state[uid] = STATE_SELL_MEDIA
-    bot.send_message(m.chat.id, "📎 Хочешь прикрепить медиа к товару?", reply_markup=kb_media())
+    user_state[uid] = STATE_SELL_VIDEO
+    bot.send_message(m.chat.id, "🎥 Отправь <b>видео</b> товара (можно несколько, до 10 шт.).\nКогда закончишь — напиши <b>готово</b> или отправь /skip:", parse_mode='HTML')
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith('med_'))
-def cb_media(c):
-    bot.answer_callback_query(c.id)
-    uid = c.from_user.id
-    typ = c.data.replace('med_', '')
-    user_data[uid]['media_type'] = typ
-    user_data[uid]['media_id'] = None
-    
-    if typ == 'none':
-        show_preview(c.message.chat.id, uid, c.message.message_id)
-    else:
-        bot.edit_message_text(f"Отправь {'фото' if typ=='photo' else 'видео'} к товару:", c.message.chat.id, c.message.message_id)
-        # state остается STATE_SELL_MEDIA, но ждём конкретный тип контента
-
-@bot.message_handler(content_types=['photo', 'video'], func=lambda m: user_state.get(m.from_user.id) == STATE_SELL_MEDIA)
-def step_media(m):
+@bot.message_handler(content_types=['video'], func=lambda m: user_state.get(m.from_user.id) == STATE_SELL_VIDEO)
+def step_video(m):
     uid = m.from_user.id
-    d = user_data.get(uid, {})
-    if d.get('media_type') == 'photo' and m.photo:
-        d['media_id'] = m.photo[-1].file_id
+    if 'videos' not in user_data[uid]:
+        user_data[uid]['videos'] = []
+    if len(user_data[uid]['videos']) >= 10:
+        bot.send_message(m.chat.id, "❌ Максимум 10 видео. Напиши <b>готово</b> или /skip:")
+        return
+    user_data[uid]['videos'].append(m.video.file_id)
+    count = len(user_data[uid]['videos'])
+    bot.send_message(m.chat.id, f"🎥 Видео добавлено ({count}/10). Отправь ещё или напиши <b>готово</b>:", parse_mode='HTML')
+
+@bot.message_handler(func=lambda m: user_state.get(m.from_user.id) == STATE_SELL_VIDEO)
+def step_video_done(m):
+    uid = m.from_user.id
+    text = m.text.strip().lower()
+    if text in ('готово', 'готово!', '/skip', 'пропустить', 'skip'):
         show_preview(m.chat.id, uid)
-    elif d.get('media_type') == 'video' and m.video:
-        d['media_id'] = m.video.file_id
-        show_preview(m.chat.id, uid)
+        user_state[uid] = STATE_IDLE
     else:
-        bot.send_message(m.chat.id, "❌ Отправь именно то, что выбрал (фото или видео).")
+        bot.send_message(m.chat.id, "❌ Отправь видео или напиши <b>готово</b> (или /skip):", parse_mode='HTML')
 
 def show_preview(chat_id, uid, msg_id=None):
     d = user_data[uid]
     cat = CATEGORIES.get(d['cat'], '—')
+    video_count = len(d.get('videos', []))
     txt = (f"📋 <b>Предпросмотр:</b>\n\n"
            f"🏷 {cat}\n"
            f"📦 {d['title']}\n"
            f"📝 {d['desc']}\n"
            f"💵 {d['price']} руб.\n"
-           f"📎 Медиа: {'📷 Фото' if d.get('media_type')=='photo' else '🎥 Видео' if d.get('media_type')=='video' else '❌ Нет'}")
+           f"🎥 Видео: {video_count} шт.")
     if msg_id:
         bot.edit_message_text(txt, chat_id, msg_id, reply_markup=kb_confirm(), parse_mode='HTML')
     else:
         bot.send_message(chat_id, txt, reply_markup=kb_confirm(), parse_mode='HTML')
-    user_state[uid] = STATE_SELL_MEDIA  # ждём подтверждения через колбэк
 
 @bot.callback_query_handler(func=lambda c: c.data == 'confirm_sell')
 def cb_confirm_sell(c):
@@ -408,11 +430,16 @@ def cb_confirm_sell(c):
     
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("""INSERT INTO items (seller_id, seller_name, title, description, price, category, media_type, media_file_id, status, created_at)
-                   VALUES (?,?,?,?,?,?,?,?,'pending',?)""",
+    cur.execute("""INSERT INTO items (seller_id, seller_name, title, description, price, category, status, created_at)
+                   VALUES (?,?,?,?,?,?,'pending',?)""",
                 (uid, c.from_user.username or c.from_user.first_name, d['title'], d['desc'], d['price'],
-                 d['cat'], d.get('media_type','none'), d.get('media_id'), datetime.now().strftime("%Y-%m-%d %H:%M")))
+                 d['cat'], datetime.now().strftime("%Y-%m-%d %H:%M")))
     item_id = cur.lastrowid
+    
+    # Сохраняем все видео
+    for vid in d.get('videos', []):
+        cur.execute("INSERT INTO item_videos (item_id, file_id) VALUES (?,?)", (item_id, vid))
+    
     conn.commit()
     conn.close()
     
@@ -424,7 +451,7 @@ def cb_confirm_sell(c):
                  f"💵 {d['price']} руб.\n"
                  f"🏷 {cat_name}\n"
                  f"👤 @{c.from_user.username or c.from_user.first_name} (ID: <code>{uid}</code>)\n"
-                 f"📎 Медиа: {'📷 Фото' if d.get('media_type')=='photo' else '🎥 Видео' if d.get('media_type')=='video' else '❌ Нет'}\n\n"
+                 f"🎥 Видео: {len(d.get('videos', []))} шт.\n\n"
                  f"ID: <code>{item_id}</code>")
     try:
         bot.send_message(ADMIN_ID, admin_txt, reply_markup=kb_mod(item_id), parse_mode='HTML')
@@ -478,6 +505,8 @@ def cb_reject(c):
     cur.execute("SELECT seller_id, title FROM items WHERE id=?", (item_id,))
     row = cur.fetchone()
     cur.execute("DELETE FROM items WHERE id=?", (item_id,))
+    # Удаляем связанные видео
+    cur.execute("DELETE FROM item_videos WHERE item_id=?", (item_id,))
     conn.commit()
     conn.close()
     if row:
@@ -491,8 +520,9 @@ def cb_reject(c):
 @bot.callback_query_handler(func=lambda c: c.data.startswith('rev_'))
 def cb_rev_start(c):
     bot.answer_callback_query(c.id)
-    item_id = int(c.data.split('_')[1])
     uid = c.from_user.id
+    clear_videos(uid, c.message.chat.id)
+    item_id = int(c.data.split('_')[1])
     user_data[uid] = {'rev_item': item_id}
     bot.edit_message_text("⭐ Выбери оценку:", c.message.chat.id, c.message.message_id, reply_markup=kb_rate(item_id))
 
@@ -578,12 +608,13 @@ def cb_profile(c):
 def cb_support(c):
     bot.answer_callback_query(c.id)
     txt = ("🆘 <b>Поддержка</b>\n\n"
-           "Если есть вопросы или проблемы — пиши администратору.\n"
-           "⚡ Ответ в течение 24 часов.\n\n"
-           "👨‍💻 Админ: <a href='tg://user?id={}'>Написать</a>".format(ADMIN_ID))
+           "Если есть вопросы или проблемы — выбери администратора.\n"
+           "⚡ Ответ в течение 24 часов.")
     kb = InlineKeyboardMarkup()
+    kb.row(InlineKeyboardButton("👨‍💻 Админ 1", url=f"tg://user?id={ADMIN_ID}"),
+          InlineKeyboardButton("👨‍💻 Админ 2", url=f"tg://user?id={ADMIN_ID_2}"))
     kb.row(InlineKeyboardButton("🏠 Меню", callback_data="main"))
-    bot.edit_message_text(txt, c.message.chat.id, c.message.message_id, reply_markup=kb)
+    bot.edit_message_text(txt, c.message.chat.id, c.message.message_id, reply_markup=kb, parse_mode='HTML')
 
 # ==================== MAIN ====================
 if __name__ == '__main__':

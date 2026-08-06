@@ -1,1 +1,592 @@
+import os, sys
+if os.getcwd().startswith('/storage/emulated/0'):
+    try: os.chdir('/data/data/ru.iiec.pydroid3/app_HOME')
+    except: pass
+os.environ['PYTHONIOENCODING'] = 'utf-8'
 
+import logging
+import sqlite3
+from datetime import datetime
+import telebot
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+TOKEN = "8907348769:AAFyFEGayc3ZNTRqt20nqIdh6J7RhJSdI44"
+ADMIN_ID = 7825739027
+YOUR_ID = 8371345434
+
+bot = telebot.TeleBot(TOKEN, parse_mode='HTML')
+logger = telebot.logger
+logger.setLevel(logging.INFO)
+
+CATEGORIES = {
+    "games": "🎮 Игры",
+    "accounts": "👤 Аккаунты", 
+    "services": "🛠 Услуги",
+    "other": "📦 Прочее"
+}
+
+# Состояния
+STATE_IDLE = 0
+STATE_SELL_TITLE = 1
+STATE_SELL_DESC = 2
+STATE_SELL_PRICE = 3
+STATE_SELL_MEDIA = 4
+STATE_REVIEW_TEXT = 5
+
+user_state = {}
+user_data = {}
+
+def init_db():
+    conn = sqlite3.connect('market.db', check_same_thread=False)
+    c = conn.cursor()
+    c.executescript('''
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            balance INTEGER DEFAULT 0,
+            sales_count INTEGER DEFAULT 0,
+            reg_date TEXT
+        );
+        CREATE TABLE IF NOT EXISTS items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            seller_id INTEGER,
+            seller_name TEXT,
+            title TEXT,
+            description TEXT,
+            price INTEGER,
+            category TEXT,
+            media_type TEXT DEFAULT 'none',
+            media_file_id TEXT,
+            status TEXT DEFAULT 'pending',
+            created_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS reviews (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id INTEGER,
+            seller_id INTEGER,
+            buyer_id INTEGER,
+            buyer_name TEXT,
+            rating INTEGER,
+            text TEXT,
+            created_at TEXT
+        );
+    ''')
+    conn.commit()
+    conn.close()
+
+def get_db():
+    return sqlite3.connect('market.db', check_same_thread=False)
+
+def get_or_create_user(uid, uname):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT 1 FROM users WHERE user_id=?", (uid,))
+    if not c.fetchone():
+        c.execute("INSERT INTO users (user_id, username, reg_date) VALUES (?,?,?)",
+                  (uid, uname, datetime.now().strftime("%Y-%m-%d %H:%M")))
+        conn.commit()
+    conn.close()
+
+def get_rating(uid):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT AVG(rating), COUNT(*) FROM reviews WHERE seller_id=?", (uid,))
+    avg, cnt = c.fetchone()
+    conn.close()
+    if avg is None: avg = 0
+    return round(avg, 1), cnt
+
+def get_reviews_text(item_id):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT buyer_name, rating, text, created_at FROM reviews WHERE item_id=? ORDER BY id DESC LIMIT 5", (item_id,))
+    rows = c.fetchall()
+    conn.close()
+    if not rows: return "Отзывов пока нет."
+    txt = ""
+    for r in rows:
+        stars = "⭐" * r[1]
+        txt += f"{stars} <b>{r[0]}</b> ({r[3]})\n{r[2]}\n\n"
+    return txt.strip()
+
+# Клавиатуры
+def kb_main():
+    m = InlineKeyboardMarkup()
+    m.row(InlineKeyboardButton("🛒 Маркетплейс", callback_data="market"))
+    m.row(InlineKeyboardButton("👤 Профиль", callback_data="profile"),
+          InlineKeyboardButton("🆘 Поддержка", callback_data="support"))
+    return m
+
+def kb_market_entry():
+    m = InlineKeyboardMarkup()
+    m.row(InlineKeyboardButton("🛍 Купить", callback_data="mpage_0"))
+    m.row(InlineKeyboardButton("💰 Продать", callback_data="sell_start"))
+    m.row(InlineKeyboardButton("🔙 Назад в меню", callback_data="main"))
+    return m
+
+def kb_cats():
+    m = InlineKeyboardMarkup()
+    for k,v in CATEGORIES.items():
+        m.row(InlineKeyboardButton(v, callback_data=f"cat_{k}"))
+    m.row(InlineKeyboardButton("❌ Отмена", callback_data="cancel_sell"))
+    return m
+
+def kb_media():
+    m = InlineKeyboardMarkup()
+    m.row(InlineKeyboardButton("📷 Фото", callback_data="med_photo"),
+          InlineKeyboardButton("🎥 Видео", callback_data="med_video"))
+    m.row(InlineKeyboardButton("⏩ Без медиа", callback_data="med_none"))
+    m.row(InlineKeyboardButton("❌ Отмена", callback_data="cancel_sell"))
+    return m
+
+def kb_confirm():
+    m = InlineKeyboardMarkup()
+    m.row(InlineKeyboardButton("✅ Подтвердить", callback_data="confirm_sell"),
+          InlineKeyboardButton("❌ Отмена", callback_data="cancel_sell"))
+    return m
+
+def kb_mod(item_id):
+    m = InlineKeyboardMarkup()
+    m.row(InlineKeyboardButton("✅ Принять", callback_data=f"app_{item_id}"),
+          InlineKeyboardButton("❌ Отклонить", callback_data=f"rej_{item_id}"))
+    return m
+
+def kb_item(item_id, page):
+    m = InlineKeyboardMarkup()
+    m.row(InlineKeyboardButton("⭐ Оставить отзыв", callback_data=f"rev_{item_id}"))
+    m.row(InlineKeyboardButton("🔙 Назад", callback_data=f"mpage_{page}"))
+    m.row(InlineKeyboardButton("🏠 Меню", callback_data="main"))
+    return m
+
+def kb_rate(item_id):
+    m = InlineKeyboardMarkup()
+    m.row(InlineKeyboardButton("⭐", callback_data=f"rate_{item_id}_1"),
+          InlineKeyboardButton("⭐⭐", callback_data=f"rate_{item_id}_2"),
+          InlineKeyboardButton("⭐⭐⭐", callback_data=f"rate_{item_id}_3"),
+          InlineKeyboardButton("⭐⭐⭐⭐", callback_data=f"rate_{item_id}_4"),
+          InlineKeyboardButton("⭐⭐⭐⭐⭐", callback_data=f"rate_{item_id}_5"))
+    m.row(InlineKeyboardButton("❌ Отмена", callback_data="main"))
+    return m
+
+# ==================== ХЕНДЛЕРЫ ====================
+
+@bot.message_handler(commands=['start'])
+def cmd_start(m):
+    uid = m.from_user.id
+    uname = m.from_user.username or m.from_user.first_name
+    get_or_create_user(uid, uname)
+    user_state[uid] = STATE_IDLE
+    txt = (f"👋 Привет, {m.from_user.first_name}!\n\n"
+           "Добро пожаловать в <b>Маркетплейс Бот</b>!\n\n"
+           "📌 <b>Что здесь можно делать:</b>\n"
+           "• 🛒 <b>Маркетплейс</b> — покупать товары других игроков\n"
+           "• 💰 <b>Продажа</b> — выставлять свои товары и зарабатывать\n"
+           "• 👤 <b>Профиль</b> — баланс, рейтинг, история сделок\n"
+           "• 🆘 <b>Поддержка</b> — связь с администрацией\n\n"
+           "Все товары проходят модерацию. Выбирай раздел ниже! 🔥")
+    bot.send_message(m.chat.id, txt, reply_markup=kb_main())
+
+@bot.message_handler(commands=['cancel'])
+def cmd_cancel(m):
+    uid = m.from_user.id
+    user_state[uid] = STATE_IDLE
+    user_data.pop(uid, None)
+    bot.send_message(m.chat.id, "❌ Отменено.", reply_markup=kb_main())
+
+# --- Колбэки ---
+
+@bot.callback_query_handler(func=lambda c: c.data == 'main')
+def cb_main(c):
+    bot.answer_callback_query(c.id)
+    txt = (f"👋 Снова здесь, {c.from_user.first_name}!\n\n"
+           "📌 <b>Разделы:</b>\n"
+           "• 🛒 Маркетплейс\n• 💰 Продажа\n• 👤 Профиль\n• 🆘 Поддержка\n\n"
+           "Выбирай ниже! 🔥")
+    bot.edit_message_text(txt, c.message.chat.id, c.message.message_id, reply_markup=kb_main())
+
+@bot.callback_query_handler(func=lambda c: c.data == 'market')
+def cb_market(c):
+    bot.answer_callback_query(c.id)
+    txt = ("🛒 <b>Маркетплейс</b>\n\n"
+           "• <b>Купить</b> — найти товар среди объявлений\n"
+           "• <b>Продать</b> — выставить свой товар\n\n"
+           "Все товары проходят проверку модератором.\n"
+           "Выбери действие:")
+    bot.edit_message_text(txt, c.message.chat.id, c.message.message_id, reply_markup=kb_market_entry())
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith('mpage_'))
+def cb_mpage(c):
+    bot.answer_callback_query(c.id)
+    page = int(c.data.split('_')[1])
+    per_page = 5
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT id, seller_name, title, price, category FROM items WHERE status='approved' ORDER BY id DESC")
+    items = cur.fetchall()
+    conn.close()
+    
+    if not items:
+        kb = InlineKeyboardMarkup()
+        kb.row(InlineKeyboardButton("💰 Выставить товар", callback_data="sell_start"))
+        kb.row(InlineKeyboardButton("🔙 Назад", callback_data="market"))
+        bot.edit_message_text("😕 Пока нет товаров. Будь первым!", c.message.chat.id, c.message.message_id, reply_markup=kb)
+        return
+    
+    total = max(1, (len(items)+per_page-1)//per_page)
+    page = max(0, min(page, total-1))
+    start = page*per_page
+    page_items = items[start:start+per_page]
+    
+    txt = f"🛍 <b>Товары</b> (стр. {page+1}/{total})\n\n"
+    kb = InlineKeyboardMarkup()
+    for it in page_items:
+        iid, seller, title, price, cat = it
+        cat_name = CATEGORIES.get(cat, cat)
+        txt += f"📦 <b>{title}</b>\n   💵 {price} руб. | {cat_name}\n   👤 @{seller}\n\n"
+        kb.row(InlineKeyboardButton(f"Купить: {title[:25]}", callback_data=f"item_{iid}_{page}"))
+    
+    nav = []
+    if page > 0: nav.append(InlineKeyboardButton("⬅️", callback_data=f"mpage_{page-1}"))
+    if page < total-1: nav.append(InlineKeyboardButton("➡️", callback_data=f"mpage_{page+1}"))
+    if nav: kb.row(*nav)
+    kb.row(InlineKeyboardButton("🏠 Меню", callback_data="main"))
+    bot.edit_message_text(txt, c.message.chat.id, c.message.message_id, reply_markup=kb)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith('item_'))
+def cb_item(c):
+    bot.answer_callback_query(c.id)
+    parts = c.data.split('_')
+    item_id = int(parts[1])
+    page = int(parts[2])
+    
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM items WHERE id=?", (item_id,))
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        bot.edit_message_text("❌ Товар не найден.", c.message.chat.id, c.message.message_id, reply_markup=kb_main())
+        return
+    
+    _, sid, sname, title, desc, price, cat, mtype, mfid, status, created = row
+    cat_name = CATEGORIES.get(cat, cat)
+    avg, cnt = get_rating(sid)
+    reviews = get_reviews_text(item_id)
+    
+    txt = (f"📦 <b>{title}</b>\n\n"
+           f"📝 {desc}\n\n"
+           f"💵 Цена: <code>{price}</code> руб.\n"
+           f"🏷 Категория: {cat_name}\n"
+           f"👤 Продавец: @{sname}\n"
+           f"⭐ Рейтинг продавца: {avg} ({cnt} отз.)\n"
+           f"📅 {created}\n\n"
+           f"💬 <b>Отзывы:</b>\n{reviews}\n\n"
+           f"Для покупки пиши: @{sname}")
+    
+    # Удаляем старое сообщение и шлём новое (чтобы можно было прикрепить медиа)
+    bot.delete_message(c.message.chat.id, c.message.message_id)
+    
+    kb = kb_item(item_id, page)
+    if mtype == 'photo' and mfid:
+        bot.send_photo(c.message.chat.id, mfid, caption=txt, reply_markup=kb)
+    elif mtype == 'video' and mfid:
+        bot.send_video(c.message.chat.id, mfid, caption=txt, reply_markup=kb)
+    else:
+        bot.send_message(c.message.chat.id, txt, reply_markup=kb)
+
+# --- ПРОДАЖА ---
+
+@bot.callback_query_handler(func=lambda c: c.data == 'sell_start')
+def cb_sell_start(c):
+    bot.answer_callback_query(c.id)
+    uid = c.from_user.id
+    user_state[uid] = STATE_IDLE  # сначала покажем инструкцию
+    txt = ("💰 <b>Инструкция по продаже</b>\n\n"
+           "Чтобы выставить товар:\n"
+           "1️⃣ Выбери категорию\n"
+           "2️⃣ Напиши название\n"
+           "3️⃣ Добавь описание\n"
+           "4️⃣ Укажи цену (число)\n"
+           "5️⃣ Прикрепи фото/видео или пропусти\n"
+           "6️⃣ Подтверди публикацию\n\n"
+           "⚠️ Товар пройдёт модерацию перед публикацией.\n\n"
+           "Выбери категорию:")
+    bot.edit_message_text(txt, c.message.chat.id, c.message.message_id, reply_markup=kb_cats())
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith('cat_'))
+def cb_cat(c):
+    bot.answer_callback_query(c.id)
+    uid = c.from_user.id
+    cat = c.data.replace('cat_', '')
+    if cat not in CATEGORIES:
+        return
+    user_state[uid] = STATE_SELL_TITLE
+    user_data[uid] = {'cat': cat}
+    bot.edit_message_text("✏️ Введи <b>название</b> товара:", c.message.chat.id, c.message.message_id, parse_mode='HTML')
+
+@bot.message_handler(func=lambda m: user_state.get(m.from_user.id) == STATE_SELL_TITLE)
+def step_title(m):
+    uid = m.from_user.id
+    title = m.text.strip()
+    if len(title) < 3 or len(title) > 100:
+        bot.send_message(m.chat.id, "❌ От 3 до 100 символов. Попробуй ещё:")
+        return
+    user_data[uid]['title'] = title
+    user_state[uid] = STATE_SELL_DESC
+    bot.send_message(m.chat.id, "📝 Введи <b>описание</b> товара:", parse_mode='HTML')
+
+@bot.message_handler(func=lambda m: user_state.get(m.from_user.id) == STATE_SELL_DESC)
+def step_desc(m):
+    uid = m.from_user.id
+    desc = m.text.strip()
+    if len(desc) < 10:
+        bot.send_message(m.chat.id, "❌ Минимум 10 символов. Напиши подробнее:")
+        return
+    user_data[uid]['desc'] = desc
+    user_state[uid] = STATE_SELL_PRICE
+    bot.send_message(m.chat.id, "💵 Введи <b>цену</b> в рублях (только число):", parse_mode='HTML')
+
+@bot.message_handler(func=lambda m: user_state.get(m.from_user.id) == STATE_SELL_PRICE)
+def step_price(m):
+    uid = m.from_user.id
+    if not m.text.strip().isdigit() or int(m.text) <= 0:
+        bot.send_message(m.chat.id, "❌ Только положительное число:")
+        return
+    user_data[uid]['price'] = int(m.text.strip())
+    user_state[uid] = STATE_SELL_MEDIA
+    bot.send_message(m.chat.id, "📎 Хочешь прикрепить медиа к товару?", reply_markup=kb_media())
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith('med_'))
+def cb_media(c):
+    bot.answer_callback_query(c.id)
+    uid = c.from_user.id
+    typ = c.data.replace('med_', '')
+    user_data[uid]['media_type'] = typ
+    user_data[uid]['media_id'] = None
+    
+    if typ == 'none':
+        show_preview(c.message.chat.id, uid, c.message.message_id)
+    else:
+        bot.edit_message_text(f"Отправь {'фото' if typ=='photo' else 'видео'} к товару:", c.message.chat.id, c.message.message_id)
+        # state остается STATE_SELL_MEDIA, но ждём конкретный тип контента
+
+@bot.message_handler(content_types=['photo', 'video'], func=lambda m: user_state.get(m.from_user.id) == STATE_SELL_MEDIA)
+def step_media(m):
+    uid = m.from_user.id
+    d = user_data.get(uid, {})
+    if d.get('media_type') == 'photo' and m.photo:
+        d['media_id'] = m.photo[-1].file_id
+        show_preview(m.chat.id, uid)
+    elif d.get('media_type') == 'video' and m.video:
+        d['media_id'] = m.video.file_id
+        show_preview(m.chat.id, uid)
+    else:
+        bot.send_message(m.chat.id, "❌ Отправь именно то, что выбрал (фото или видео).")
+
+def show_preview(chat_id, uid, msg_id=None):
+    d = user_data[uid]
+    cat = CATEGORIES.get(d['cat'], '—')
+    txt = (f"📋 <b>Предпросмотр:</b>\n\n"
+           f"🏷 {cat}\n"
+           f"📦 {d['title']}\n"
+           f"📝 {d['desc']}\n"
+           f"💵 {d['price']} руб.\n"
+           f"📎 Медиа: {'📷 Фото' if d.get('media_type')=='photo' else '🎥 Видео' if d.get('media_type')=='video' else '❌ Нет'}")
+    if msg_id:
+        bot.edit_message_text(txt, chat_id, msg_id, reply_markup=kb_confirm(), parse_mode='HTML')
+    else:
+        bot.send_message(chat_id, txt, reply_markup=kb_confirm(), parse_mode='HTML')
+    user_state[uid] = STATE_SELL_MEDIA  # ждём подтверждения через колбэк
+
+@bot.callback_query_handler(func=lambda c: c.data == 'confirm_sell')
+def cb_confirm_sell(c):
+    bot.answer_callback_query(c.id)
+    uid = c.from_user.id
+    d = user_data.get(uid, {})
+    if not d:
+        return
+    
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""INSERT INTO items (seller_id, seller_name, title, description, price, category, media_type, media_file_id, status, created_at)
+                   VALUES (?,?,?,?,?,?,?,?,'pending',?)""",
+                (uid, c.from_user.username or c.from_user.first_name, d['title'], d['desc'], d['price'],
+                 d['cat'], d.get('media_type','none'), d.get('media_id'), datetime.now().strftime("%Y-%m-%d %H:%M")))
+    item_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    
+    # Уведомление админу
+    cat_name = CATEGORIES.get(d['cat'], d['cat'])
+    admin_txt = (f"🆕 <b>Новый товар на модерацию!</b>\n\n"
+                 f"📦 {d['title']}\n"
+                 f"📝 {d['desc'][:200]}...\n"
+                 f"💵 {d['price']} руб.\n"
+                 f"🏷 {cat_name}\n"
+                 f"👤 @{c.from_user.username or c.from_user.first_name} (ID: <code>{uid}</code>)\n"
+                 f"📎 Медиа: {'📷 Фото' if d.get('media_type')=='photo' else '🎥 Видео' if d.get('media_type')=='video' else '❌ Нет'}\n\n"
+                 f"ID: <code>{item_id}</code>")
+    try:
+        bot.send_message(ADMIN_ID, admin_txt, reply_markup=kb_mod(item_id), parse_mode='HTML')
+    except Exception as e:
+        logger.error(f"Admin notify failed: {e}")
+    
+    bot.edit_message_text("✅ Товар отправлен на модерацию! После проверки он появится в маркетплейсе.\n\nСпасибо! 🚀",
+                          c.message.chat.id, c.message.message_id, reply_markup=kb_main())
+    user_state.pop(uid, None)
+    user_data.pop(uid, None)
+
+@bot.callback_query_handler(func=lambda c: c.data == 'cancel_sell')
+def cb_cancel_sell(c):
+    bot.answer_callback_query(c.id)
+    uid = c.from_user.id
+    user_state.pop(uid, None)
+    user_data.pop(uid, None)
+    bot.edit_message_text("❌ Создание товара отменено.", c.message.chat.id, c.message.message_id, reply_markup=kb_main())
+
+# --- МОДЕРАЦИЯ ---
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith('app_'))
+def cb_approve(c):
+    bot.answer_callback_query(c.id)
+    if c.from_user.id != ADMIN_ID:
+        bot.answer_callback_query(c.id, "⛔ Нет доступа!", show_alert=True)
+        return
+    item_id = int(c.data.split('_')[1])
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("UPDATE items SET status='approved' WHERE id=?", (item_id,))
+    cur.execute("SELECT seller_id, title FROM items WHERE id=?", (item_id,))
+    row = cur.fetchone()
+    conn.commit()
+    conn.close()
+    if row:
+        try:
+            bot.send_message(row[0], f"✅ Твой товар <b>{row[1]}</b> одобрен!", parse_mode='HTML')
+        except: pass
+    bot.edit_message_text(f"✅ Товар ID <code>{item_id}</code> одобрен.", c.message.chat.id, c.message.message_id, parse_mode='HTML')
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith('rej_'))
+def cb_reject(c):
+    bot.answer_callback_query(c.id)
+    if c.from_user.id != ADMIN_ID:
+        bot.answer_callback_query(c.id, "⛔ Нет доступа!", show_alert=True)
+        return
+    item_id = int(c.data.split('_')[1])
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT seller_id, title FROM items WHERE id=?", (item_id,))
+    row = cur.fetchone()
+    cur.execute("DELETE FROM items WHERE id=?", (item_id,))
+    conn.commit()
+    conn.close()
+    if row:
+        try:
+            bot.send_message(row[0], f"❌ Твой товар <b>{row[1]}</b> отклонён модератором.", parse_mode='HTML')
+        except: pass
+    bot.edit_message_text(f"❌ Товар ID <code>{item_id}</code> отклонён.", c.message.chat.id, c.message.message_id, parse_mode='HTML')
+
+# --- ОТЗЫВЫ ---
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith('rev_'))
+def cb_rev_start(c):
+    bot.answer_callback_query(c.id)
+    item_id = int(c.data.split('_')[1])
+    uid = c.from_user.id
+    user_data[uid] = {'rev_item': item_id}
+    bot.edit_message_text("⭐ Выбери оценку:", c.message.chat.id, c.message.message_id, reply_markup=kb_rate(item_id))
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith('rate_'))
+def cb_rate(c):
+    bot.answer_callback_query(c.id)
+    parts = c.data.split('_')
+    item_id = int(parts[1])
+    rating = int(parts[2])
+    uid = c.from_user.id
+    user_data[uid] = {'rev_item': item_id, 'rev_rating': rating}
+    user_state[uid] = STATE_REVIEW_TEXT
+    bot.edit_message_text("📝 Напиши текст отзыва:", c.message.chat.id, c.message.message_id)
+
+@bot.message_handler(func=lambda m: user_state.get(m.from_user.id) == STATE_REVIEW_TEXT)
+def step_review(m):
+    uid = m.from_user.id
+    d = user_data.get(uid, {})
+    item_id = d.get('rev_item')
+    rating = d.get('rev_rating')
+    if not item_id:
+        return
+    
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT seller_id FROM items WHERE id=?", (item_id,))
+    row = cur.fetchone()
+    if not row:
+        bot.send_message(m.chat.id, "❌ Товар не найден.", reply_markup=kb_main())
+        return
+    seller_id = row[0]
+    
+    cur.execute("INSERT INTO reviews (item_id, seller_id, buyer_id, buyer_name, rating, text, created_at) VALUES (?,?,?,?,?,?,?)",
+                (item_id, seller_id, uid, m.from_user.username or m.from_user.first_name, rating, m.text.strip(),
+                 datetime.now().strftime("%Y-%m-%d %H:%M")))
+    conn.commit()
+    conn.close()
+    
+    bot.send_message(m.chat.id, "✅ Отзыв оставлен! Спасибо.", reply_markup=kb_main())
+    user_state.pop(uid, None)
+    user_data.pop(uid, None)
+
+# --- ПРОФИЛЬ ---
+
+@bot.callback_query_handler(func=lambda c: c.data == 'profile')
+def cb_profile(c):
+    bot.answer_callback_query(c.id)
+    uid = c.from_user.id
+    uname = c.from_user.username or c.from_user.first_name
+    get_or_create_user(uid, uname)
+    
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT balance, sales_count, reg_date FROM users WHERE user_id=?", (uid,))
+    row = cur.fetchone()
+    cur.execute("SELECT COUNT(*) FROM items WHERE seller_id=? AND status='approved'", (uid,))
+    active = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM items WHERE seller_id=? AND status='pending'", (uid,))
+    pending = cur.fetchone()[0]
+    conn.close()
+    
+    bal, sales, reg = row if row else (0,0,'—')
+    avg, cnt = get_rating(uid)
+    
+    txt = (f"👤 <b>Твой профиль</b>\n\n"
+           f"🆔 ID: <code>{uid}</code>\n"
+           f"👤 Имя: {c.from_user.first_name}\n"
+           f"📅 Регистрация: {reg}\n\n"
+           f"💰 Баланс: <code>{bal}</code> руб.\n"
+           f"✅ Продаж: {sales}\n"
+           f"⭐ Рейтинг: {avg} ({cnt} отз.)\n"
+           f"📦 Активных товаров: {active}\n"
+           f"⏳ На модерации: {pending}")
+    
+    kb = InlineKeyboardMarkup()
+    kb.row(InlineKeyboardButton("🛒 На маркетплейс", callback_data="market"))
+    kb.row(InlineKeyboardButton("🏠 Меню", callback_data="main"))
+    bot.edit_message_text(txt, c.message.chat.id, c.message.message_id, reply_markup=kb)
+
+# --- ПОДДЕРЖКА ---
+
+@bot.callback_query_handler(func=lambda c: c.data == 'support')
+def cb_support(c):
+    bot.answer_callback_query(c.id)
+    txt = ("🆘 <b>Поддержка</b>\n\n"
+           "Если есть вопросы или проблемы — пиши администратору.\n"
+           "⚡ Ответ в течение 24 часов.\n\n"
+           "👨‍💻 Админ: <a href='tg://user?id={}'>Написать</a>".format(ADMIN_ID))
+    kb = InlineKeyboardMarkup()
+    kb.row(InlineKeyboardButton("🏠 Меню", callback_data="main"))
+    bot.edit_message_text(txt, c.message.chat.id, c.message.message_id, reply_markup=kb)
+
+# ==================== MAIN ====================
+if __name__ == '__main__':
+    init_db()
+    print("🤖 Бот запущен!")
+    bot.infinity_polling()

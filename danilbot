@@ -10,9 +10,16 @@ from datetime import datetime
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
+# Пробуем импортировать middleware
+try:
+    from telebot.handler_backends import BaseMiddleware, CancelUpdate
+except ImportError:
+    from telebot.custom_filters import BaseMiddleware, CancelUpdate
+
 TOKEN = "8907348769:AAFyFEGayc3ZNTRqt20nqIdh6J7RhJSdI44"
 ADMIN_ID = 7825739027
-ADMIN_ID_2 = 8371345434  # второй админ
+ADMIN_ID_2 = 8371345434
+ADMINS = [ADMIN_ID, ADMIN_ID_2]
 
 bot = telebot.TeleBot(TOKEN, parse_mode='HTML')
 logger = telebot.logger
@@ -32,10 +39,18 @@ STATE_SELL_DESC = 2
 STATE_SELL_PRICE = 3
 STATE_SELL_VIDEO = 4
 STATE_REVIEW_TEXT = 5
+STATE_ADMIN_ADD = 10
+STATE_ADMIN_DEL = 11
+STATE_BAN_USER = 12
+STATE_BAN_REASON = 13
+STATE_UNBAN_USER = 14
 
 user_state = {}
 user_data = {}
-user_video_msgs = {}  # uid -> [message_ids] для удаления видео при навигации
+user_item_msg = {}      # uid -> message_id основного сообщения товара (видео + caption)
+user_video_msgs = {}    # uid -> [message_ids] дополнительных видео
+
+# ==================== БАЗА ====================
 
 def init_db():
     conn = sqlite3.connect('market.db', check_same_thread=False)
@@ -56,8 +71,6 @@ def init_db():
             description TEXT,
             price INTEGER,
             category TEXT,
-            media_type TEXT DEFAULT 'none',
-            media_file_id TEXT,
             status TEXT DEFAULT 'pending',
             created_at TEXT
         );
@@ -77,6 +90,27 @@ def init_db():
             text TEXT,
             created_at TEXT
         );
+        CREATE TABLE IF NOT EXISTS purchases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id INTEGER,
+            buyer_id INTEGER,
+            buyer_name TEXT,
+            seller_id INTEGER,
+            status TEXT DEFAULT 'pending',
+            created_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS admins (
+            user_id INTEGER PRIMARY KEY,
+            role TEXT DEFAULT 'moderator',
+            added_by INTEGER,
+            added_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS bans (
+            user_id INTEGER PRIMARY KEY,
+            reason TEXT,
+            banned_by INTEGER,
+            banned_at TEXT
+        );
     ''')
     conn.commit()
     conn.close()
@@ -93,6 +127,47 @@ def get_or_create_user(uid, uname):
                   (uid, uname, datetime.now().strftime("%Y-%m-%d %H:%M")))
         conn.commit()
     conn.close()
+
+def is_admin(uid):
+    if uid in ADMINS:
+        return True
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT 1 FROM admins WHERE user_id=?", (uid,))
+    res = c.fetchone()
+    conn.close()
+    return res is not None
+
+def is_banned(uid):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT 1 FROM bans WHERE user_id=?", (uid,))
+    res = c.fetchone()
+    conn.close()
+    return res is not None
+
+# ==================== MIDDLEWARE (БАН) ====================
+
+class BanMiddleware(BaseMiddleware):
+    def __init__(self):
+        self.update_types = ['message', 'callback_query']
+    
+    def pre_process(self, update, data):
+        if hasattr(update, 'from_user'):
+            uid = update.from_user.id
+        elif hasattr(update, 'message') and update.message:
+            uid = update.message.from_user.id
+        else:
+            return
+        if is_banned(uid):
+            return CancelUpdate()
+
+    def post_process(self, update, data, exception=None):
+        pass
+
+bot.setup_middleware(BanMiddleware())
+
+# ==================== HELPERS ====================
 
 def get_rating(uid):
     conn = get_db()
@@ -124,17 +199,26 @@ def get_videos(item_id):
     conn.close()
     return rows
 
-def clear_videos(uid, chat_id):
-    """Удаляет отдельные видео-сообщения при уходе из карточки товара"""
+def clear_item_messages(uid, chat_id):
+    if uid in user_item_msg:
+        try: bot.delete_message(chat_id, user_item_msg[uid])
+        except Exception as e: logger.error(f"Delete item msg error: {e}")
+        del user_item_msg[uid]
     if uid in user_video_msgs:
         for mid in user_video_msgs[uid]:
-            try:
-                bot.delete_message(chat_id, mid)
-            except Exception as e:
-                logger.error(f"Delete video msg error: {e}")
+            try: bot.delete_message(chat_id, mid)
+            except Exception as e: logger.error(f"Delete video msg error: {e}")
         del user_video_msgs[uid]
 
-# Клавиатуры
+def safe_edit_or_send(chat_id, current_msg_id, uid, text, reply_markup, parse_mode='HTML'):
+    if uid in user_item_msg:
+        clear_item_messages(uid, chat_id)
+        return bot.send_message(chat_id, text, reply_markup=reply_markup, parse_mode=parse_mode)
+    else:
+        return bot.edit_message_text(text, chat_id, current_msg_id, reply_markup=reply_markup, parse_mode=parse_mode)
+
+# ==================== КЛАВИАТУРЫ ====================
+
 def kb_main():
     m = InlineKeyboardMarkup()
     m.row(InlineKeyboardButton("🛒 Маркетплейс", callback_data="market"))
@@ -170,6 +254,7 @@ def kb_mod(item_id):
 
 def kb_item(item_id, page):
     m = InlineKeyboardMarkup()
+    m.row(InlineKeyboardButton("🛒 Купить", callback_data=f"buy_{item_id}"))
     m.row(InlineKeyboardButton("⭐ Оставить отзыв", callback_data=f"rev_{item_id}"))
     m.row(InlineKeyboardButton("🔙 Назад", callback_data=f"mpage_{page}"))
     m.row(InlineKeyboardButton("🏠 Меню", callback_data="main"))
@@ -183,6 +268,31 @@ def kb_rate(item_id):
           InlineKeyboardButton("⭐⭐⭐⭐", callback_data=f"rate_{item_id}_4"),
           InlineKeyboardButton("⭐⭐⭐⭐⭐", callback_data=f"rate_{item_id}_5"))
     m.row(InlineKeyboardButton("❌ Отмена", callback_data="main"))
+    return m
+
+# --- Админ клавиатуры ---
+def kb_admin():
+    m = InlineKeyboardMarkup()
+    m.row(InlineKeyboardButton("👥 Админы", callback_data="admins_menu"))
+    m.row(InlineKeyboardButton("🚫 Баны", callback_data="bans_menu"))
+    m.row(InlineKeyboardButton("📊 Статистика", callback_data="admin_stats"))
+    m.row(InlineKeyboardButton("🏠 Меню", callback_data="main"))
+    return m
+
+def kb_admins_sub():
+    m = InlineKeyboardMarkup()
+    m.row(InlineKeyboardButton("➕ Добавить", callback_data="admin_add"),
+          InlineKeyboardButton("➖ Удалить", callback_data="admin_del"))
+    m.row(InlineKeyboardButton("📋 Список", callback_data="admin_list"))
+    m.row(InlineKeyboardButton("🔙 Назад", callback_data="admin"))
+    return m
+
+def kb_bans_sub():
+    m = InlineKeyboardMarkup()
+    m.row(InlineKeyboardButton("➕ Забанить", callback_data="ban_add"),
+          InlineKeyboardButton("➖ Разбанить", callback_data="ban_del"))
+    m.row(InlineKeyboardButton("📋 Список банов", callback_data="ban_list"))
+    m.row(InlineKeyboardButton("🔙 Назад", callback_data="admin"))
     return m
 
 # ==================== ХЕНДЛЕРЫ ====================
@@ -210,34 +320,41 @@ def cmd_cancel(m):
     user_data.pop(uid, None)
     bot.send_message(m.chat.id, "❌ Отменено.", reply_markup=kb_main())
 
-# --- Колбэки ---
+@bot.message_handler(commands=['admin'])
+def cmd_admin(m):
+    uid = m.from_user.id
+    if not is_admin(uid):
+        bot.send_message(m.chat.id, "⛔ Нет доступа.")
+        return
+    bot.send_message(m.chat.id, "🔧 <b>Панель администратора</b>\n\nВыбери раздел:", reply_markup=kb_admin(), parse_mode='HTML')
+
+# --- Колбэки основные ---
 
 @bot.callback_query_handler(func=lambda c: c.data == 'main')
 def cb_main(c):
     bot.answer_callback_query(c.id)
     uid = c.from_user.id
-    clear_videos(uid, c.message.chat.id)
     txt = (f"👋 Снова здесь, {c.from_user.first_name}!\n\n"
            "📌 <b>Разделы:</b>\n"
            "• 🛒 Маркетплейс\n• 💰 Продажа\n• 👤 Профиль\n• 🆘 Поддержка\n\n"
            "Выбирай ниже! 🔥")
-    bot.edit_message_text(txt, c.message.chat.id, c.message.message_id, reply_markup=kb_main())
+    safe_edit_or_send(c.message.chat.id, c.message.message_id, uid, txt, kb_main())
 
 @bot.callback_query_handler(func=lambda c: c.data == 'market')
 def cb_market(c):
     bot.answer_callback_query(c.id)
+    uid = c.from_user.id
     txt = ("🛒 <b>Маркетплейс</b>\n\n"
            "• <b>Купить</b> — найти товар среди объявлений\n"
            "• <b>Продать</b> — выставить свой товар\n\n"
            "Все товары проходят проверку модератором.\n"
            "Выбери действие:")
-    bot.edit_message_text(txt, c.message.chat.id, c.message.message_id, reply_markup=kb_market_entry())
+    safe_edit_or_send(c.message.chat.id, c.message.message_id, uid, txt, kb_market_entry())
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith('mpage_'))
 def cb_mpage(c):
     bot.answer_callback_query(c.id)
     uid = c.from_user.id
-    clear_videos(uid, c.message.chat.id)
     page = int(c.data.split('_')[1])
     per_page = 5
     conn = get_db()
@@ -250,7 +367,7 @@ def cb_mpage(c):
         kb = InlineKeyboardMarkup()
         kb.row(InlineKeyboardButton("💰 Выставить товар", callback_data="sell_start"))
         kb.row(InlineKeyboardButton("🔙 Назад", callback_data="market"))
-        bot.edit_message_text("😕 Пока нет товаров. Будь первым!", c.message.chat.id, c.message.message_id, reply_markup=kb)
+        safe_edit_or_send(c.message.chat.id, c.message.message_id, uid, "😕 Пока нет товаров. Будь первым!", kb)
         return
     
     total = max(1, (len(items)+per_page-1)//per_page)
@@ -271,7 +388,7 @@ def cb_mpage(c):
     if page < total-1: nav.append(InlineKeyboardButton("➡️", callback_data=f"mpage_{page+1}"))
     if nav: kb.row(*nav)
     kb.row(InlineKeyboardButton("🏠 Меню", callback_data="main"))
-    bot.edit_message_text(txt, c.message.chat.id, c.message.message_id, reply_markup=kb)
+    safe_edit_or_send(c.message.chat.id, c.message.message_id, uid, txt, kb)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith('item_'))
 def cb_item(c):
@@ -287,7 +404,7 @@ def cb_item(c):
     row = cur.fetchone()
     conn.close()
     if not row:
-        bot.edit_message_text("❌ Товар не найден.", c.message.chat.id, c.message.message_id, reply_markup=kb_main())
+        safe_edit_or_send(c.message.chat.id, c.message.message_id, uid, "❌ Товар не найден.", kb_main())
         return
     
     iid, sid, sname, title, desc, price, cat, status, created = row
@@ -304,22 +421,144 @@ def cb_item(c):
            f"⭐ Рейтинг продавца: {avg} ({cnt} отз.)\n"
            f"📅 {created}\n\n"
            f"💬 <b>Отзывы:</b>\n{reviews}\n\n"
-           f"🎥 Видео: {len(videos)} шт.\n\n"
-           f"Для покупки пиши: @{sname}")
+           f"🎥 Видео: {len(videos)} шт.")
     
-    # Редактируем текущее текстовое сообщение (список товаров) → карточка товара
-    bot.edit_message_text(txt, c.message.chat.id, c.message.message_id, reply_markup=kb_item(item_id, page), parse_mode='HTML')
+    kb = kb_item(item_id, page)
     
-    # Отправляем видео отдельными сообщениями (без клавиатуры)
     if videos:
-        sent_ids = []
-        for vid in videos:
-            try:
-                vmsg = bot.send_video(c.message.chat.id, vid)
-                sent_ids.append(vmsg.message_id)
-            except Exception as e:
-                logger.error(f"Video send error: {e}")
-        user_video_msgs[uid] = sent_ids
+        clear_item_messages(uid, c.message.chat.id)
+        bot.delete_message(c.message.chat.id, c.message.message_id)
+        msg = bot.send_video(c.message.chat.id, videos[0], caption=txt, reply_markup=kb, parse_mode='HTML')
+        user_item_msg[uid] = msg.message_id
+        if len(videos) > 1:
+            sent_ids = []
+            for vid in videos[1:]:
+                try:
+                    vmsg = bot.send_video(c.message.chat.id, vid)
+                    sent_ids.append(vmsg.message_id)
+                except Exception as e:
+                    logger.error(f"Video send error: {e}")
+            if sent_ids:
+                user_video_msgs[uid] = sent_ids
+    else:
+        bot.edit_message_text(txt, c.message.chat.id, c.message.message_id, reply_markup=kb, parse_mode='HTML')
+
+# --- ПОКУПКА ---
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith('buy_'))
+def cb_buy(c):
+    bot.answer_callback_query(c.id)
+    uid = c.from_user.id
+    item_id = int(c.data.split('_')[1])
+    
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT seller_id, seller_name, title FROM items WHERE id=?", (item_id,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        bot.answer_callback_query(c.id, "❌ Товар не найден.", show_alert=True)
+        return
+    seller_id, seller_name, title = row
+    
+    if uid == seller_id:
+        conn.close()
+        bot.answer_callback_query(c.id, "❌ Это твой товар!", show_alert=True)
+        return
+    
+    cur.execute("SELECT status FROM purchases WHERE item_id=? AND buyer_id=?", (item_id, uid))
+    existing = cur.fetchone()
+    if existing:
+        conn.close()
+        bot.answer_callback_query(c.id, f"❌ У тебя уже есть заявка (статус: {existing[0]}).", show_alert=True)
+        return
+    
+    cur.execute("INSERT INTO purchases (item_id, buyer_id, buyer_name, seller_id, status, created_at) VALUES (?,?,?,?,?,?)",
+                (item_id, uid, c.from_user.username or c.from_user.first_name, seller_id, 'pending',
+                 datetime.now().strftime("%Y-%m-%d %H:%M")))
+    purchase_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    
+    kb = InlineKeyboardMarkup()
+    kb.row(InlineKeyboardButton("✅ Подтвердить", callback_data=f"confbuy_{purchase_id}"),
+           InlineKeyboardButton("❌ Отклонить", callback_data=f"rejbuy_{purchase_id}"))
+    try:
+        bot.send_message(seller_id, f"🛒 <b>Новая заявка на покупку!</b>\n\n"
+                         f"📦 Товар: <b>{title}</b>\n"
+                         f"👤 Покупатель: @{c.from_user.username or c.from_user.first_name} (ID: <code>{uid}</code>)\n\n"
+                         f"Подтверди или отклони:", reply_markup=kb, parse_mode='HTML')
+    except Exception as e:
+        logger.error(f"Notify seller failed: {e}")
+    
+    bot.answer_callback_query(c.id, "✅ Заявка отправлена продавцу! Жди подтверждения.", show_alert=True)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith('confbuy_'))
+def cb_confirm_buy(c):
+    bot.answer_callback_query(c.id)
+    purchase_id = int(c.data.split('_')[1])
+    
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT item_id, buyer_id, seller_id, status FROM purchases WHERE id=?", (purchase_id,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        bot.answer_callback_query(c.id, "❌ Заявка не найдена.", show_alert=True)
+        return
+    item_id, buyer_id, seller_id, status = row
+    
+    if c.from_user.id != seller_id:
+        conn.close()
+        bot.answer_callback_query(c.id, "⛔ Это не твоя заявка!", show_alert=True)
+        return
+    
+    if status != 'pending':
+        conn.close()
+        bot.answer_callback_query(c.id, f"❌ Заявка уже {status}.", show_alert=True)
+        return
+    
+    cur.execute("UPDATE purchases SET status='confirmed' WHERE id=?", (purchase_id,))
+    conn.commit()
+    conn.close()
+    
+    try:
+        bot.send_message(buyer_id, f"✅ <b>Покупка подтверждена!</b>\n\nТеперь ты можешь оставить отзыв на товар.", parse_mode='HTML')
+    except Exception as e:
+        logger.error(f"Notify buyer failed: {e}")
+    
+    bot.edit_message_text("✅ Покупка подтверждена.", c.message.chat.id, c.message.message_id)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith('rejbuy_'))
+def cb_reject_buy(c):
+    bot.answer_callback_query(c.id)
+    purchase_id = int(c.data.split('_')[1])
+    
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT item_id, buyer_id, seller_id, status FROM purchases WHERE id=?", (purchase_id,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        bot.answer_callback_query(c.id, "❌ Заявка не найдена.", show_alert=True)
+        return
+    item_id, buyer_id, seller_id, status = row
+    
+    if c.from_user.id != seller_id:
+        conn.close()
+        bot.answer_callback_query(c.id, "⛔ Это не твоя заявка!", show_alert=True)
+        return
+    
+    cur.execute("UPDATE purchases SET status='cancelled' WHERE id=?", (purchase_id,))
+    conn.commit()
+    conn.close()
+    
+    try:
+        bot.send_message(buyer_id, f"❌ <b>Продавец отклонил заявку</b> на покупку товара.", parse_mode='HTML')
+    except Exception as e:
+        logger.error(f"Notify buyer failed: {e}")
+    
+    bot.edit_message_text("❌ Заявка отклонена.", c.message.chat.id, c.message.message_id)
 
 # --- ПРОДАЖА ---
 
@@ -338,7 +577,7 @@ def cb_sell_start(c):
            "6️⃣ Подтверди публикацию\n\n"
            "⚠️ Товар пройдёт модерацию перед публикацией.\n\n"
            "Выбери категорию:")
-    bot.edit_message_text(txt, c.message.chat.id, c.message.message_id, reply_markup=kb_cats())
+    safe_edit_or_send(c.message.chat.id, c.message.message_id, uid, txt, kb_cats())
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith('cat_'))
 def cb_cat(c):
@@ -405,7 +644,7 @@ def step_video_done(m):
     else:
         bot.send_message(m.chat.id, "❌ Отправь видео или напиши <b>готово</b> (или /skip):", parse_mode='HTML')
 
-def show_preview(chat_id, uid, msg_id=None):
+def show_preview(chat_id, uid):
     d = user_data[uid]
     cat = CATEGORIES.get(d['cat'], '—')
     video_count = len(d.get('videos', []))
@@ -415,10 +654,7 @@ def show_preview(chat_id, uid, msg_id=None):
            f"📝 {d['desc']}\n"
            f"💵 {d['price']} руб.\n"
            f"🎥 Видео: {video_count} шт.")
-    if msg_id:
-        bot.edit_message_text(txt, chat_id, msg_id, reply_markup=kb_confirm(), parse_mode='HTML')
-    else:
-        bot.send_message(chat_id, txt, reply_markup=kb_confirm(), parse_mode='HTML')
+    bot.send_message(chat_id, txt, reply_markup=kb_confirm(), parse_mode='HTML')
 
 @bot.callback_query_handler(func=lambda c: c.data == 'confirm_sell')
 def cb_confirm_sell(c):
@@ -436,14 +672,12 @@ def cb_confirm_sell(c):
                  d['cat'], datetime.now().strftime("%Y-%m-%d %H:%M")))
     item_id = cur.lastrowid
     
-    # Сохраняем все видео
     for vid in d.get('videos', []):
         cur.execute("INSERT INTO item_videos (item_id, file_id) VALUES (?,?)", (item_id, vid))
     
     conn.commit()
     conn.close()
     
-    # Уведомление админу
     cat_name = CATEGORIES.get(d['cat'], d['cat'])
     admin_txt = (f"🆕 <b>Новый товар на модерацию!</b>\n\n"
                  f"📦 {d['title']}\n"
@@ -453,10 +687,11 @@ def cb_confirm_sell(c):
                  f"👤 @{c.from_user.username or c.from_user.first_name} (ID: <code>{uid}</code>)\n"
                  f"🎥 Видео: {len(d.get('videos', []))} шт.\n\n"
                  f"ID: <code>{item_id}</code>")
-    try:
-        bot.send_message(ADMIN_ID, admin_txt, reply_markup=kb_mod(item_id), parse_mode='HTML')
-    except Exception as e:
-        logger.error(f"Admin notify failed: {e}")
+    for admin in ADMINS:
+        try:
+            bot.send_message(admin, admin_txt, reply_markup=kb_mod(item_id), parse_mode='HTML')
+        except Exception as e:
+            logger.error(f"Admin {admin} notify failed: {e}")
     
     bot.edit_message_text("✅ Товар отправлен на модерацию! После проверки он появится в маркетплейсе.\n\nСпасибо! 🚀",
                           c.message.chat.id, c.message.message_id, reply_markup=kb_main())
@@ -476,7 +711,7 @@ def cb_cancel_sell(c):
 @bot.callback_query_handler(func=lambda c: c.data.startswith('app_'))
 def cb_approve(c):
     bot.answer_callback_query(c.id)
-    if c.from_user.id != ADMIN_ID:
+    if not is_admin(c.from_user.id):
         bot.answer_callback_query(c.id, "⛔ Нет доступа!", show_alert=True)
         return
     item_id = int(c.data.split('_')[1])
@@ -496,7 +731,7 @@ def cb_approve(c):
 @bot.callback_query_handler(func=lambda c: c.data.startswith('rej_'))
 def cb_reject(c):
     bot.answer_callback_query(c.id)
-    if c.from_user.id != ADMIN_ID:
+    if not is_admin(c.from_user.id):
         bot.answer_callback_query(c.id, "⛔ Нет доступа!", show_alert=True)
         return
     item_id = int(c.data.split('_')[1])
@@ -505,7 +740,6 @@ def cb_reject(c):
     cur.execute("SELECT seller_id, title FROM items WHERE id=?", (item_id,))
     row = cur.fetchone()
     cur.execute("DELETE FROM items WHERE id=?", (item_id,))
-    # Удаляем связанные видео
     cur.execute("DELETE FROM item_videos WHERE item_id=?", (item_id,))
     conn.commit()
     conn.close()
@@ -521,10 +755,37 @@ def cb_reject(c):
 def cb_rev_start(c):
     bot.answer_callback_query(c.id)
     uid = c.from_user.id
-    clear_videos(uid, c.message.chat.id)
     item_id = int(c.data.split('_')[1])
+    
+    conn = get_db()
+    cur = conn.cursor()
+    
+    # Нельзя себе
+    cur.execute("SELECT seller_id FROM items WHERE id=?", (item_id,))
+    row = cur.fetchone()
+    if row and row[0] == uid:
+        conn.close()
+        bot.answer_callback_query(c.id, "❌ Нельзя оставить отзыв самому себе!", show_alert=True)
+        return
+    
+    # Уже оставлял?
+    cur.execute("SELECT 1 FROM reviews WHERE item_id=? AND buyer_id=?", (item_id, uid))
+    if cur.fetchone():
+        conn.close()
+        bot.answer_callback_query(c.id, "❌ Ты уже оставлял отзыв на этот товар!", show_alert=True)
+        return
+    
+    # Покупал ли?
+    cur.execute("SELECT 1 FROM purchases WHERE item_id=? AND buyer_id=? AND status='confirmed'", (item_id, uid))
+    if not cur.fetchone():
+        conn.close()
+        bot.answer_callback_query(c.id, "❌ Ты не покупал этот товар! Нажми «Купить» и дождись подтверждения продавца.", show_alert=True)
+        return
+    
+    conn.close()
+    clear_item_messages(uid, c.message.chat.id)
     user_data[uid] = {'rev_item': item_id}
-    bot.edit_message_text("⭐ Выбери оценку:", c.message.chat.id, c.message.message_id, reply_markup=kb_rate(item_id))
+    bot.send_message(c.message.chat.id, "⭐ Выбери оценку:", reply_markup=kb_rate(item_id))
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith('rate_'))
 def cb_rate(c):
@@ -600,13 +861,14 @@ def cb_profile(c):
     kb = InlineKeyboardMarkup()
     kb.row(InlineKeyboardButton("🛒 На маркетплейс", callback_data="market"))
     kb.row(InlineKeyboardButton("🏠 Меню", callback_data="main"))
-    bot.edit_message_text(txt, c.message.chat.id, c.message.message_id, reply_markup=kb)
+    safe_edit_or_send(c.message.chat.id, c.message.message_id, uid, txt, kb)
 
 # --- ПОДДЕРЖКА ---
 
 @bot.callback_query_handler(func=lambda c: c.data == 'support')
 def cb_support(c):
     bot.answer_callback_query(c.id)
+    uid = c.from_user.id
     txt = ("🆘 <b>Поддержка</b>\n\n"
            "Если есть вопросы или проблемы — выбери администратора.\n"
            "⚡ Ответ в течение 24 часов.")
@@ -614,7 +876,217 @@ def cb_support(c):
     kb.row(InlineKeyboardButton("👨‍💻 Админ 1", url=f"tg://user?id={ADMIN_ID}"),
           InlineKeyboardButton("👨‍💻 Админ 2", url=f"tg://user?id={ADMIN_ID_2}"))
     kb.row(InlineKeyboardButton("🏠 Меню", callback_data="main"))
-    bot.edit_message_text(txt, c.message.chat.id, c.message.message_id, reply_markup=kb, parse_mode='HTML')
+    safe_edit_or_send(c.message.chat.id, c.message.message_id, uid, txt, kb)
+
+# ==================== АДМИН-ПАНЕЛЬ ====================
+
+@bot.callback_query_handler(func=lambda c: c.data == 'admin')
+def cb_admin(c):
+    bot.answer_callback_query(c.id)
+    if not is_admin(c.from_user.id):
+        bot.answer_callback_query(c.id, "⛔ Нет доступа!", show_alert=True)
+        return
+    bot.edit_message_text("🔧 <b>Панель администратора</b>\n\nВыбери раздел:", c.message.chat.id, c.message.message_id,
+                          reply_markup=kb_admin(), parse_mode='HTML')
+
+@bot.callback_query_handler(func=lambda c: c.data == 'admins_menu')
+def cb_admins_menu(c):
+    bot.answer_callback_query(c.id)
+    if not is_admin(c.from_user.id):
+        return
+    bot.edit_message_text("👥 <b>Управление админами</b>", c.message.chat.id, c.message.message_id,
+                          reply_markup=kb_admins_sub(), parse_mode='HTML')
+
+@bot.callback_query_handler(func=lambda c: c.data == 'admin_add')
+def cb_admin_add(c):
+    bot.answer_callback_query(c.id)
+    uid = c.from_user.id
+    user_state[uid] = STATE_ADMIN_ADD
+    bot.edit_message_text("➕ Введи <b>ID</b> пользователя для добавления в админы:", c.message.chat.id, c.message.message_id, parse_mode='HTML')
+
+@bot.message_handler(func=lambda m: user_state.get(m.from_user.id) == STATE_ADMIN_ADD)
+def step_admin_add(m):
+    uid = m.from_user.id
+    text = m.text.strip()
+    if not text.isdigit():
+        bot.send_message(m.chat.id, "❌ Введи числовой ID:")
+        return
+    new_admin = int(text)
+    if is_admin(new_admin):
+        bot.send_message(m.chat.id, "❌ Этот пользователь уже админ.", reply_markup=kb_admins_sub())
+        user_state.pop(uid, None)
+        return
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("INSERT INTO admins (user_id, role, added_by, added_at) VALUES (?,?,?,?)",
+                (new_admin, 'moderator', uid, datetime.now().strftime("%Y-%m-%d %H:%M")))
+    conn.commit()
+    conn.close()
+    bot.send_message(m.chat.id, f"✅ Пользователь <code>{new_admin}</code> добавлен как модератор.", reply_markup=kb_admins_sub(), parse_mode='HTML')
+    user_state.pop(uid, None)
+
+@bot.callback_query_handler(func=lambda c: c.data == 'admin_del')
+def cb_admin_del(c):
+    bot.answer_callback_query(c.id)
+    uid = c.from_user.id
+    user_state[uid] = STATE_ADMIN_DEL
+    bot.edit_message_text("➖ Введи <b>ID</b> админа для удаления:", c.message.chat.id, c.message.message_id, parse_mode='HTML')
+
+@bot.message_handler(func=lambda m: user_state.get(m.from_user.id) == STATE_ADMIN_DEL)
+def step_admin_del(m):
+    uid = m.from_user.id
+    text = m.text.strip()
+    if not text.isdigit():
+        bot.send_message(m.chat.id, "❌ Введи числовой ID:")
+        return
+    rem_id = int(text)
+    if rem_id in ADMINS:
+        bot.send_message(m.chat.id, "❌ Нельзя удалить основного админа.", reply_markup=kb_admins_sub())
+        user_state.pop(uid, None)
+        return
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM admins WHERE user_id=?", (rem_id,))
+    conn.commit()
+    conn.close()
+    bot.send_message(m.chat.id, f"✅ Админ <code>{rem_id}</code> удалён.", reply_markup=kb_admins_sub(), parse_mode='HTML')
+    user_state.pop(uid, None)
+
+@bot.callback_query_handler(func=lambda c: c.data == 'admin_list')
+def cb_admin_list(c):
+    bot.answer_callback_query(c.id)
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT user_id, role, added_at FROM admins")
+    rows = cur.fetchall()
+    conn.close()
+    txt = "👥 <b>Список админов</b>\n\n"
+    for aid in ADMINS:
+        txt += f"• <code>{aid}</code> — <b>superadmin</b> (основной)\n"
+    for r in rows:
+        txt += f"• <code>{r[0]}</code> — {r[1]} (добавлен: {r[2]})\n"
+    bot.edit_message_text(txt, c.message.chat.id, c.message.message_id, reply_markup=kb_admins_sub(), parse_mode='HTML')
+
+# --- Баны ---
+
+@bot.callback_query_handler(func=lambda c: c.data == 'bans_menu')
+def cb_bans_menu(c):
+    bot.answer_callback_query(c.id)
+    if not is_admin(c.from_user.id):
+        return
+    bot.edit_message_text("🚫 <b>Управление банами</b>", c.message.chat.id, c.message.message_id,
+                          reply_markup=kb_bans_sub(), parse_mode='HTML')
+
+@bot.callback_query_handler(func=lambda c: c.data == 'ban_add')
+def cb_ban_add(c):
+    bot.answer_callback_query(c.id)
+    uid = c.from_user.id
+    user_state[uid] = STATE_BAN_USER
+    bot.edit_message_text("🚫 Введи <b>ID</b> пользователя для бана:", c.message.chat.id, c.message.message_id, parse_mode='HTML')
+
+@bot.message_handler(func=lambda m: user_state.get(m.from_user.id) == STATE_BAN_USER)
+def step_ban_user(m):
+    uid = m.from_user.id
+    text = m.text.strip()
+    if not text.isdigit():
+        bot.send_message(m.chat.id, "❌ Введи числовой ID:")
+        return
+    ban_uid = int(text)
+    if is_admin(ban_uid):
+        bot.send_message(m.chat.id, "❌ Нельзя забанить админа.", reply_markup=kb_bans_sub())
+        user_state.pop(uid, None)
+        return
+    user_data[uid] = {'ban_uid': ban_uid}
+    user_state[uid] = STATE_BAN_REASON
+    bot.send_message(m.chat.id, "📝 Введи <b>причину</b> бана (или отправь /skip):")
+
+@bot.message_handler(func=lambda m: user_state.get(m.from_user.id) == STATE_BAN_REASON)
+def step_ban_reason(m):
+    uid = m.from_user.id
+    reason = m.text.strip()
+    if reason == '/skip':
+        reason = 'Не указана'
+    ban_uid = user_data[uid].get('ban_uid')
+    
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("INSERT OR REPLACE INTO bans (user_id, reason, banned_by, banned_at) VALUES (?,?,?,?)",
+                (ban_uid, reason, uid, datetime.now().strftime("%Y-%m-%d %H:%M")))
+    conn.commit()
+    conn.close()
+    
+    bot.send_message(m.chat.id, f"🚫 Пользователь <code>{ban_uid}</code> забанен.\nПричина: {reason}", reply_markup=kb_bans_sub(), parse_mode='HTML')
+    user_state.pop(uid, None)
+    user_data.pop(uid, None)
+
+@bot.callback_query_handler(func=lambda c: c.data == 'ban_del')
+def cb_ban_del(c):
+    bot.answer_callback_query(c.id)
+    uid = c.from_user.id
+    user_state[uid] = STATE_UNBAN_USER
+    bot.edit_message_text("✅ Введи <b>ID</b> пользователя для разбана:", c.message.chat.id, c.message.message_id, parse_mode='HTML')
+
+@bot.message_handler(func=lambda m: user_state.get(m.from_user.id) == STATE_UNBAN_USER)
+def step_unban_user(m):
+    uid = m.from_user.id
+    text = m.text.strip()
+    if not text.isdigit():
+        bot.send_message(m.chat.id, "❌ Введи числовой ID:")
+        return
+    unban_uid = int(text)
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM bans WHERE user_id=?", (unban_uid,))
+    conn.commit()
+    conn.close()
+    bot.send_message(m.chat.id, f"✅ Пользователь <code>{unban_uid}</code> разбанен.", reply_markup=kb_bans_sub(), parse_mode='HTML')
+    user_state.pop(uid, None)
+
+@bot.callback_query_handler(func=lambda c: c.data == 'ban_list')
+def cb_ban_list(c):
+    bot.answer_callback_query(c.id)
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT user_id, reason, banned_at FROM bans")
+    rows = cur.fetchall()
+    conn.close()
+    if not rows:
+        bot.edit_message_text("🚫 <b>Банов нет.</b>", c.message.chat.id, c.message.message_id, reply_markup=kb_bans_sub(), parse_mode='HTML')
+        return
+    txt = "🚫 <b>Список забаненных:</b>\n\n"
+    for r in rows:
+        txt += f"• <code>{r[0]}</code> — {r[1]} ({r[2]})\n"
+    bot.edit_message_text(txt, c.message.chat.id, c.message.message_id, reply_markup=kb_bans_sub(), parse_mode='HTML')
+
+# --- Статистика ---
+
+@bot.callback_query_handler(func=lambda c: c.data == 'admin_stats')
+def cb_admin_stats(c):
+    bot.answer_callback_query(c.id)
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM users")
+    users = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM items WHERE status='approved'")
+    items = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM items WHERE status='pending'")
+    pending = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM purchases WHERE status='confirmed'")
+    sales = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM reviews")
+    reviews = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM bans")
+    bans = cur.fetchone()[0]
+    conn.close()
+    
+    txt = (f"📊 <b>Статистика бота</b>\n\n"
+           f"👤 Пользователей: {users}\n"
+           f"📦 Товаров одобрено: {items}\n"
+           f"⏳ На модерации: {pending}\n"
+           f"🛒 Продаж: {sales}\n"
+           f"💬 Отзывов: {reviews}\n"
+           f"🚫 Банов: {bans}")
+    bot.edit_message_text(txt, c.message.chat.id, c.message.message_id, reply_markup=kb_admin(), parse_mode='HTML')
 
 # ==================== MAIN ====================
 if __name__ == '__main__':

@@ -1,1095 +1,1099 @@
-import os, sys
-if os.getcwd().startswith('/storage/emulated/0'):
-    try: os.chdir('/data/data/ru.iiec.pydroid3/app_HOME')
-    except: pass
-os.environ['PYTHONIOENCODING'] = 'utf-8'
-
-import logging
+import os
 import sqlite3
-from datetime import datetime
+import asyncio
+import threading
+import time
+import io
+import re
+
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+from telethon import TelegramClient, events
+from telethon.sessions import StringSession
+from telethon.errors import FloodWaitError, SessionPasswordNeededError
 
-# Пробуем импортировать middleware
 try:
-    from telebot.handler_backends import BaseMiddleware, CancelUpdate
+    import qrcode
+    from PIL import Image
+    HAS_QR = True
 except ImportError:
-    from telebot.custom_filters import BaseMiddleware, CancelUpdate
+    HAS_QR = False
 
-TOKEN = "8907348769:AAFyFEGayc3ZNTRqt20nqIdh6J7RhJSdI44"
-ADMIN_ID = 7825739027
-ADMIN_ID_2 = 8371345434
-ADMINS = [ADMIN_ID, ADMIN_ID_2]
+# ================== CONFIG ==================
+BOT_TOKEN = "8930332596:AAGfvGzcN_mUeNASRYKwyD1PwzEorhGq-MM"
+API_ID = 36403406
+API_HASH = "ecdc945d831f24eee69eae668c6c4ad1"
+DB_PATH = "number_shop.db"
 
-bot = telebot.TeleBot(TOKEN, parse_mode='HTML')
-logger = telebot.logger
-logger.setLevel(logging.INFO)
+# ДВА АДМИНА
+ADMIN_IDS = [8722112728, 8371345434]
 
-CATEGORIES = {
-    "games": "🎮 Игры",
-    "accounts": "👤 Аккаунты", 
-    "services": "🛠 Услуги",
-    "other": "📦 Прочее"
+COUNTRIES = {
+    "ru": "🇷🇺 Россия",
+    "kz": "🇰🇿 Казахстан",
+    "by": "🇧🇾 Беларусь",
+    "ua": "🇺🇦 Украина",
+    "uz": "🇺🇿 Узбекистан",
+    "kg": "🇰🇬 Кыргызстан",
+    "tj": "🇹🇯 Таджикистан",
+    "am": "🇦🇲 Армения",
+    "ge": "🇬🇪 Грузия",
+    "md": "🇲🇩 Молдова",
+    "az": "🇦🇿 Азербайджан",
+    "tm": "🇹🇲 Туркменистан",
+    "other": "🌍 Другая",
 }
 
-# Состояния
-STATE_IDLE = 0
-STATE_SELL_TITLE = 1
-STATE_SELL_DESC = 2
-STATE_SELL_PRICE = 3
-STATE_SELL_VIDEO = 4
-STATE_REVIEW_TEXT = 5
-STATE_ADMIN_ADD = 10
-STATE_ADMIN_DEL = 11
-STATE_BAN_USER = 12
-STATE_BAN_REASON = 13
-STATE_UNBAN_USER = 14
+user_states = {}
 
-user_state = {}
-user_data = {}
-user_item_msg = {}      # uid -> message_id основного сообщения товара (видео + caption)
-user_video_msgs = {}    # uid -> [message_ids] дополнительных видео
-
-# ==================== БАЗА ====================
-
+# ================== DATABASE ==================
 def init_db():
-    conn = sqlite3.connect('market.db', check_same_thread=False)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     c = conn.cursor()
-    c.executescript('''
+    
+    c.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
             username TEXT,
-            balance INTEGER DEFAULT 0,
-            sales_count INTEGER DEFAULT 0,
-            reg_date TEXT
-        );
-        CREATE TABLE IF NOT EXISTS items (
+            first_name TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS accounts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            seller_id INTEGER,
-            seller_name TEXT,
-            title TEXT,
-            description TEXT,
-            price INTEGER,
-            category TEXT,
-            status TEXT DEFAULT 'pending',
-            created_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS item_videos (
+            phone TEXT UNIQUE,
+            session_string TEXT,
+            price REAL,
+            country_code TEXT DEFAULT 'other',
+            status TEXT DEFAULT 'available',
+            buyer_id INTEGER DEFAULT NULL,
+            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS orders (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            item_id INTEGER,
-            file_id TEXT,
-            order_num INTEGER DEFAULT 0
-        );
-        CREATE TABLE IF NOT EXISTS reviews (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            item_id INTEGER,
-            seller_id INTEGER,
             buyer_id INTEGER,
-            buyer_name TEXT,
-            rating INTEGER,
-            text TEXT,
-            created_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS purchases (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            item_id INTEGER,
-            buyer_id INTEGER,
-            buyer_name TEXT,
-            seller_id INTEGER,
+            account_id INTEGER,
             status TEXT DEFAULT 'pending',
-            created_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS admins (
-            user_id INTEGER PRIMARY KEY,
-            role TEXT DEFAULT 'moderator',
-            added_by INTEGER,
-            added_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS bans (
-            user_id INTEGER PRIMARY KEY,
-            reason TEXT,
-            banned_by INTEGER,
-            banned_at TEXT
-        );
-    ''')
+            receipt_file_id TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    
     conn.commit()
     conn.close()
 
-def get_db():
-    return sqlite3.connect('market.db', check_same_thread=False)
-
-def get_or_create_user(uid, uname):
-    conn = get_db()
+def db_query(query, params=(), fetchone=False):
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     c = conn.cursor()
-    c.execute("SELECT 1 FROM users WHERE user_id=?", (uid,))
-    if not c.fetchone():
-        c.execute("INSERT INTO users (user_id, username, reg_date) VALUES (?,?,?)",
-                  (uid, uname, datetime.now().strftime("%Y-%m-%d %H:%M")))
-        conn.commit()
+    c.execute(query, params)
+    conn.commit()
+    result = c.fetchone() if fetchone else c.fetchall()
     conn.close()
+    return result
 
-def is_admin(uid):
-    if uid in ADMINS:
-        return True
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT 1 FROM admins WHERE user_id=?", (uid,))
-    res = c.fetchone()
-    conn.close()
-    return res is not None
-
-def is_banned(uid):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT 1 FROM bans WHERE user_id=?", (uid,))
-    res = c.fetchone()
-    conn.close()
-    return res is not None
-
-# ==================== MIDDLEWARE (БАН) ====================
-
-class BanMiddleware(BaseMiddleware):
+# ================== TELETHON MANAGER (для проданных аккаунтов — перехват кода) ==================
+class TelethonManager:
     def __init__(self):
-        self.update_types = ['message', 'callback_query']
-    
-    def pre_process(self, update, data):
-        if hasattr(update, 'from_user'):
-            uid = update.from_user.id
-        elif hasattr(update, 'message') and update.message:
-            uid = update.message.from_user.id
-        else:
+        self.clients = {}
+        self.loops = {}
+        self.threads = {}
+
+    def start_account(self, phone, session_string):
+        key = f"acc_{phone}"
+        if key in self.threads and self.threads[key].is_alive():
+            return True
+        t = threading.Thread(target=self._account_loop, args=(phone, session_string), daemon=True)
+        t.start()
+        self.threads[key] = t
+        for _ in range(100):
+            if key in self.clients:
+                return True
+            time.sleep(0.1)
+        return False
+
+    def _account_loop(self, phone, session_string):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        client = TelegramClient(StringSession(session_string), API_ID, API_HASH, loop=loop)
+        
+        @client.on(events.NewMessage)
+        async def code_handler(event):
+            try:
+                sender = await event.get_sender()
+                if not sender or sender.id != 777000:
+                    return
+                text = event.message.text or ""
+                if not any(k in text.lower() for k in ['код', 'code', 'login', 'вход']):
+                    return
+                match = re.search(r'\b\d{5}\b', text)
+                if not match:
+                    return
+                code = match.group()
+                
+                account = db_query(
+                    "SELECT * FROM accounts WHERE phone=? AND status='sold' ORDER BY id DESC LIMIT 1",
+                    (phone,), fetchone=True
+                )
+                if not account:
+                    return
+                order = db_query(
+                    "SELECT * FROM orders WHERE account_id=? AND status='confirmed' ORDER BY id DESC LIMIT 1",
+                    (account[0],), fetchone=True
+                )
+                if not order:
+                    return
+                buyer_id = order[1]
+                country_name = COUNTRIES.get(account[4], "🌍 Другая")
+                bot.send_message(
+                    buyer_id,
+                    f"🔐 <b>Код подтверждения получен!</b>\n\n"
+                    f"📱 Аккаунт: <code>{phone}</code>\n"
+                    f"🌍 Страна: {country_name}\n"
+                    f"🔑 Код: <code>{code}</code>\n\n"
+                    f"Введите этот код в Telegram для завершения входа.",
+                    parse_mode='HTML'
+                )
+            except Exception as e:
+                print(f"[CODE HANDLER ERROR] {e}")
+
+        async def init():
+            await client.connect()
+            if not await client.is_user_authorized():
+                print(f"[AUTH ERROR] Account {phone} not authorized")
+                return False
+            self.clients[f"acc_{phone}"] = client
+            self.loops[f"acc_{phone}"] = loop
+            return True
+        
+        if loop.run_until_complete(init()):
+            loop.run_forever()
+
+    def disconnect_account(self, phone):
+        key = f"acc_{phone}"
+        if key in self.clients:
+            try:
+                self.clients[key].disconnect()
+            except:
+                pass
+            del self.clients[key]
+        if key in self.loops:
+            try:
+                self.loops[key].stop()
+            except:
+                pass
+            del self.loops[key]
+
+manager = TelethonManager()
+
+# ================== PHONE AUTH MANAGER (только для админов — вход по номеру) ==================
+class PhoneAuthManager:
+    def __init__(self):
+        self.pending = {}
+
+    def start_auth(self, user_id, chat_id, bot_instance):
+        if user_id in self.pending:
+            bot_instance.send_message(chat_id, "⏳ Авторизация уже идёт.")
             return
-        if is_banned(uid):
-            return CancelUpdate()
+        
+        self.pending[user_id] = {
+            'chat_id': chat_id,
+            'phone': None,
+            'client': None,
+            'loop': None,
+            'code_event': threading.Event(),
+            'code_value': None,
+            'password_event': threading.Event(),
+            'password_value': None,
+            'cancelled': False
+        }
+        
+        bot_instance.send_message(
+            chat_id,
+            "📱 <b>Добавление аккаунта по номеру</b>\n\n"
+            "Введите номер телефона в формате <code>+79991234567</code>:",
+            reply_markup=cancel_auth_keyboard()
+        )
+        user_states[user_id] = 'admin_phone_input'
 
-    def post_process(self, update, data, exception=None):
-        pass
+    def submit_phone(self, user_id, phone):
+        if user_id not in self.pending or self.pending[user_id].get('cancelled'):
+            return False
+        self.pending[user_id]['phone'] = phone
+        t = threading.Thread(target=self._auth_thread, args=(user_id,), daemon=True)
+        t.start()
+        return True
 
-bot.setup_middleware(BanMiddleware())
+    def submit_code(self, user_id, code):
+        if user_id in self.pending and not self.pending[user_id].get('cancelled'):
+            self.pending[user_id]['code_value'] = code
+            self.pending[user_id]['code_event'].set()
+            return True
+        return False
 
-# ==================== HELPERS ====================
+    def submit_password(self, user_id, password):
+        if user_id in self.pending and not self.pending[user_id].get('cancelled'):
+            self.pending[user_id]['password_value'] = password
+            self.pending[user_id]['password_event'].set()
+            return True
+        return False
 
-def get_rating(uid):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT AVG(rating), COUNT(*) FROM reviews WHERE seller_id=?", (uid,))
-    avg, cnt = c.fetchone()
-    conn.close()
-    if avg is None: avg = 0
-    return round(avg, 1), cnt
-
-def get_reviews_text(item_id):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT buyer_name, rating, text, created_at FROM reviews WHERE item_id=? ORDER BY id DESC LIMIT 5", (item_id,))
-    rows = c.fetchall()
-    conn.close()
-    if not rows: return "Отзывов пока нет."
-    txt = ""
-    for r in rows:
-        stars = "⭐" * r[1]
-        txt += f"{stars} <b>{r[0]}</b> ({r[3]})\n{r[2]}\n\n"
-    return txt.strip()
-
-def get_videos(item_id):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT file_id FROM item_videos WHERE item_id=? ORDER BY id", (item_id,))
-    rows = [r[0] for r in c.fetchall()]
-    conn.close()
-    return rows
-
-def clear_item_messages(uid, chat_id):
-    if uid in user_item_msg:
-        try: bot.delete_message(chat_id, user_item_msg[uid])
-        except Exception as e: logger.error(f"Delete item msg error: {e}")
-        del user_item_msg[uid]
-    if uid in user_video_msgs:
-        for mid in user_video_msgs[uid]:
-            try: bot.delete_message(chat_id, mid)
-            except Exception as e: logger.error(f"Delete video msg error: {e}")
-        del user_video_msgs[uid]
-
-def safe_edit_or_send(chat_id, current_msg_id, uid, text, reply_markup, parse_mode='HTML'):
-    if uid in user_item_msg:
-        clear_item_messages(uid, chat_id)
-        return bot.send_message(chat_id, text, reply_markup=reply_markup, parse_mode=parse_mode)
-    else:
-        return bot.edit_message_text(text, chat_id, current_msg_id, reply_markup=reply_markup, parse_mode=parse_mode)
-
-# ==================== КЛАВИАТУРЫ ====================
-
-def kb_main():
-    m = InlineKeyboardMarkup()
-    m.row(InlineKeyboardButton("🛒 Маркетплейс", callback_data="market"))
-    m.row(InlineKeyboardButton("👤 Профиль", callback_data="profile"),
-          InlineKeyboardButton("🆘 Поддержка", callback_data="support"))
-    return m
-
-def kb_market_entry():
-    m = InlineKeyboardMarkup()
-    m.row(InlineKeyboardButton("🛍 Купить", callback_data="mpage_0"))
-    m.row(InlineKeyboardButton("💰 Продать", callback_data="sell_start"))
-    m.row(InlineKeyboardButton("🔙 Назад в меню", callback_data="main"))
-    return m
-
-def kb_cats():
-    m = InlineKeyboardMarkup()
-    for k,v in CATEGORIES.items():
-        m.row(InlineKeyboardButton(v, callback_data=f"cat_{k}"))
-    m.row(InlineKeyboardButton("❌ Отмена", callback_data="cancel_sell"))
-    return m
-
-def kb_confirm():
-    m = InlineKeyboardMarkup()
-    m.row(InlineKeyboardButton("✅ Подтвердить", callback_data="confirm_sell"),
-          InlineKeyboardButton("❌ Отмена", callback_data="cancel_sell"))
-    return m
-
-def kb_mod(item_id):
-    m = InlineKeyboardMarkup()
-    m.row(InlineKeyboardButton("✅ Принять", callback_data=f"app_{item_id}"),
-          InlineKeyboardButton("❌ Отклонить", callback_data=f"rej_{item_id}"))
-    return m
-
-def kb_item(item_id, page):
-    m = InlineKeyboardMarkup()
-    m.row(InlineKeyboardButton("🛒 Купить", callback_data=f"buy_{item_id}"))
-    m.row(InlineKeyboardButton("⭐ Оставить отзыв", callback_data=f"rev_{item_id}"))
-    m.row(InlineKeyboardButton("🔙 Назад", callback_data=f"mpage_{page}"))
-    m.row(InlineKeyboardButton("🏠 Меню", callback_data="main"))
-    return m
-
-def kb_rate(item_id):
-    m = InlineKeyboardMarkup()
-    m.row(InlineKeyboardButton("⭐", callback_data=f"rate_{item_id}_1"),
-          InlineKeyboardButton("⭐⭐", callback_data=f"rate_{item_id}_2"),
-          InlineKeyboardButton("⭐⭐⭐", callback_data=f"rate_{item_id}_3"),
-          InlineKeyboardButton("⭐⭐⭐⭐", callback_data=f"rate_{item_id}_4"),
-          InlineKeyboardButton("⭐⭐⭐⭐⭐", callback_data=f"rate_{item_id}_5"))
-    m.row(InlineKeyboardButton("❌ Отмена", callback_data="main"))
-    return m
-
-# --- Админ клавиатуры ---
-def kb_admin():
-    m = InlineKeyboardMarkup()
-    m.row(InlineKeyboardButton("👥 Админы", callback_data="admins_menu"))
-    m.row(InlineKeyboardButton("🚫 Баны", callback_data="bans_menu"))
-    m.row(InlineKeyboardButton("📊 Статистика", callback_data="admin_stats"))
-    m.row(InlineKeyboardButton("🏠 Меню", callback_data="main"))
-    return m
-
-def kb_admins_sub():
-    m = InlineKeyboardMarkup()
-    m.row(InlineKeyboardButton("➕ Добавить", callback_data="admin_add"),
-          InlineKeyboardButton("➖ Удалить", callback_data="admin_del"))
-    m.row(InlineKeyboardButton("📋 Список", callback_data="admin_list"))
-    m.row(InlineKeyboardButton("🔙 Назад", callback_data="admin"))
-    return m
-
-def kb_bans_sub():
-    m = InlineKeyboardMarkup()
-    m.row(InlineKeyboardButton("➕ Забанить", callback_data="ban_add"),
-          InlineKeyboardButton("➖ Разбанить", callback_data="ban_del"))
-    m.row(InlineKeyboardButton("📋 Список банов", callback_data="ban_list"))
-    m.row(InlineKeyboardButton("🔙 Назад", callback_data="admin"))
-    return m
-
-# ==================== ХЕНДЛЕРЫ ====================
-
-@bot.message_handler(commands=['start'])
-def cmd_start(m):
-    uid = m.from_user.id
-    uname = m.from_user.username or m.from_user.first_name
-    get_or_create_user(uid, uname)
-    user_state[uid] = STATE_IDLE
-    txt = (f"👋 Привет, {m.from_user.first_name}!\n\n"
-           "Добро пожаловать в <b>Маркетплейс Бот</b>!\n\n"
-           "📌 <b>Что здесь можно делать:</b>\n"
-           "• 🛒 <b>Маркетплейс</b> — покупать товары других игроков\n"
-           "• 💰 <b>Продажа</b> — выставлять свои товары и зарабатывать\n"
-           "• 👤 <b>Профиль</b> — баланс, рейтинг, история сделок\n"
-           "• 🆘 <b>Поддержка</b> — связь с администрацией\n\n"
-           "Все товары проходят модерацию. Выбирай раздел ниже! 🔥")
-    bot.send_message(m.chat.id, txt, reply_markup=kb_main())
-
-@bot.message_handler(commands=['cancel'])
-def cmd_cancel(m):
-    uid = m.from_user.id
-    user_state[uid] = STATE_IDLE
-    user_data.pop(uid, None)
-    bot.send_message(m.chat.id, "❌ Отменено.", reply_markup=kb_main())
-
-@bot.message_handler(commands=['admin'])
-def cmd_admin(m):
-    uid = m.from_user.id
-    if not is_admin(uid):
-        bot.send_message(m.chat.id, "⛔ Нет доступа.")
-        return
-    bot.send_message(m.chat.id, "🔧 <b>Панель администратора</b>\n\nВыбери раздел:", reply_markup=kb_admin(), parse_mode='HTML')
-
-# --- Колбэки основные ---
-
-@bot.callback_query_handler(func=lambda c: c.data == 'main')
-def cb_main(c):
-    bot.answer_callback_query(c.id)
-    uid = c.from_user.id
-    txt = (f"👋 Снова здесь, {c.from_user.first_name}!\n\n"
-           "📌 <b>Разделы:</b>\n"
-           "• 🛒 Маркетплейс\n• 💰 Продажа\n• 👤 Профиль\n• 🆘 Поддержка\n\n"
-           "Выбирай ниже! 🔥")
-    safe_edit_or_send(c.message.chat.id, c.message.message_id, uid, txt, kb_main())
-
-@bot.callback_query_handler(func=lambda c: c.data == 'market')
-def cb_market(c):
-    bot.answer_callback_query(c.id)
-    uid = c.from_user.id
-    txt = ("🛒 <b>Маркетплейс</b>\n\n"
-           "• <b>Купить</b> — найти товар среди объявлений\n"
-           "• <b>Продать</b> — выставить свой товар\n\n"
-           "Все товары проходят проверку модератором.\n"
-           "Выбери действие:")
-    safe_edit_or_send(c.message.chat.id, c.message.message_id, uid, txt, kb_market_entry())
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith('mpage_'))
-def cb_mpage(c):
-    bot.answer_callback_query(c.id)
-    uid = c.from_user.id
-    page = int(c.data.split('_')[1])
-    per_page = 5
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT id, seller_name, title, price, category FROM items WHERE status='approved' ORDER BY id DESC")
-    items = cur.fetchall()
-    conn.close()
-    
-    if not items:
-        kb = InlineKeyboardMarkup()
-        kb.row(InlineKeyboardButton("💰 Выставить товар", callback_data="sell_start"))
-        kb.row(InlineKeyboardButton("🔙 Назад", callback_data="market"))
-        safe_edit_or_send(c.message.chat.id, c.message.message_id, uid, "😕 Пока нет товаров. Будь первым!", kb)
-        return
-    
-    total = max(1, (len(items)+per_page-1)//per_page)
-    page = max(0, min(page, total-1))
-    start = page*per_page
-    page_items = items[start:start+per_page]
-    
-    txt = f"🛍 <b>Товары</b> (стр. {page+1}/{total})\n\n"
-    kb = InlineKeyboardMarkup()
-    for it in page_items:
-        iid, seller, title, price, cat = it
-        cat_name = CATEGORIES.get(cat, cat)
-        txt += f"📦 <b>{title}</b>\n   💵 {price} руб. | {cat_name}\n   👤 @{seller}\n\n"
-        kb.row(InlineKeyboardButton(f"Купить: {title[:25]}", callback_data=f"item_{iid}_{page}"))
-    
-    nav = []
-    if page > 0: nav.append(InlineKeyboardButton("⬅️", callback_data=f"mpage_{page-1}"))
-    if page < total-1: nav.append(InlineKeyboardButton("➡️", callback_data=f"mpage_{page+1}"))
-    if nav: kb.row(*nav)
-    kb.row(InlineKeyboardButton("🏠 Меню", callback_data="main"))
-    safe_edit_or_send(c.message.chat.id, c.message.message_id, uid, txt, kb)
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith('item_'))
-def cb_item(c):
-    bot.answer_callback_query(c.id)
-    parts = c.data.split('_')
-    item_id = int(parts[1])
-    page = int(parts[2])
-    uid = c.from_user.id
-    
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT id, seller_id, seller_name, title, description, price, category, status, created_at FROM items WHERE id=?", (item_id,))
-    row = cur.fetchone()
-    conn.close()
-    if not row:
-        safe_edit_or_send(c.message.chat.id, c.message.message_id, uid, "❌ Товар не найден.", kb_main())
-        return
-    
-    iid, sid, sname, title, desc, price, cat, status, created = row
-    cat_name = CATEGORIES.get(cat, cat)
-    avg, cnt = get_rating(sid)
-    reviews = get_reviews_text(item_id)
-    videos = get_videos(item_id)
-    
-    txt = (f"📦 <b>{title}</b>\n\n"
-           f"📝 {desc}\n\n"
-           f"💵 Цена: <code>{price}</code> руб.\n"
-           f"🏷 Категория: {cat_name}\n"
-           f"👤 Продавец: @{sname}\n"
-           f"⭐ Рейтинг продавца: {avg} ({cnt} отз.)\n"
-           f"📅 {created}\n\n"
-           f"💬 <b>Отзывы:</b>\n{reviews}\n\n"
-           f"🎥 Видео: {len(videos)} шт.")
-    
-    kb = kb_item(item_id, page)
-    
-    if videos:
-        clear_item_messages(uid, c.message.chat.id)
-        bot.delete_message(c.message.chat.id, c.message.message_id)
-        msg = bot.send_video(c.message.chat.id, videos[0], caption=txt, reply_markup=kb, parse_mode='HTML')
-        user_item_msg[uid] = msg.message_id
-        if len(videos) > 1:
-            sent_ids = []
-            for vid in videos[1:]:
+    def cancel(self, user_id):
+        if user_id in self.pending:
+            self.pending[user_id]['cancelled'] = True
+            self.pending[user_id]['code_event'].set()
+            self.pending[user_id]['password_event'].set()
+            p = self.pending[user_id]
+            if p.get('client') and p.get('loop'):
                 try:
-                    vmsg = bot.send_video(c.message.chat.id, vid)
-                    sent_ids.append(vmsg.message_id)
+                    asyncio.run_coroutine_threadsafe(p['client'].disconnect(), p['loop']).result(timeout=5)
+                except:
+                    pass
+            del self.pending[user_id]
+            return True
+        return False
+
+    def _auth_thread(self, user_id):
+        p = self.pending[user_id]
+        phone = p['phone']
+        chat_id = p['chat_id']
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        session = StringSession()
+        client = TelegramClient(session, API_ID, API_HASH, loop=loop)
+        p['client'] = client
+        p['loop'] = loop
+
+        async def do_auth():
+            try:
+                await client.connect()
+                await client.send_code_request(phone)
+                
+                bot.send_message(
+                    chat_id,
+                    f"📩 Код отправлен на номер <code>{phone}</code>\n\n"
+                    f"⚠️ <b>ВАЖНО</b>\n"
+                    f"Введите код с <b>точкой</b> внутри:\n"
+                    f"• Если код <code>56785</code> → введите <code>56.785</code>\n"
+                    f"• Если код <code>12345</code> → введите <code>12.345</code>\n\n"
+                    f"💡 Это нужно, чтобы Telegram не отклонил вход из-за подозрительной активности.\n\n"
+                    f"Введите код:",
+                    reply_markup=cancel_auth_keyboard()
+                )
+                user_states[user_id] = 'admin_code_input'
+                
+                # Ждём код
+                p['code_event'].wait()
+                if p['cancelled']:
+                    return
+                
+                raw_code = p['code_value']
+                clean_code = raw_code.replace('.', '').replace(' ', '').replace('-', '')
+                
+                try:
+                    await client.sign_in(phone, clean_code)
+                except SessionPasswordNeededError:
+                    bot.send_message(
+                        chat_id,
+                        "🔒 <b>Требуется пароль двухфакторной аутентификации</b>\n\nВведите пароль от аккаунта:",
+                        reply_markup=cancel_auth_keyboard()
+                    )
+                    user_states[user_id] = 'admin_2fa_input'
+                    p['password_event'].wait()
+                    if p['cancelled']:
+                        return
+                    password = p['password_value']
+                    await client.sign_in(password=password)
+                
+                if await client.is_user_authorized():
+                    me = await client.get_me()
+                    ss = client.session.save()
+                    user_states[user_id] = 'waiting_price'
+                    user_states[f'{user_id}_temp_session'] = ss
+                    user_states[f'{user_id}_temp_phone'] = me.phone or phone
+                    bot.send_message(
+                        chat_id,
+                        f"✅ <b>Аккаунт авторизован!</b>\n\n"
+                        f"📱 Номер: <code>{me.phone or phone}</code>\n\n"
+                        f"Введите цену продажи (только число, например 500):",
+                        reply_markup=cancel_auth_keyboard()
+                    )
+                else:
+                    bot.send_message(chat_id, "❌ Авторизация не удалась.", reply_markup=admin_menu_keyboard())
+                    
+            except Exception as e:
+                bot.send_message(chat_id, f"❌ Ошибка: {str(e)}", reply_markup=admin_menu_keyboard())
+            finally:
+                try:
+                    await client.disconnect()
+                except:
+                    pass
+                if user_id in self.pending:
+                    del self.pending[user_id]
+
+        loop.run_until_complete(do_auth())
+
+phone_auth_manager = PhoneAuthManager()
+
+# ================== QR AUTH MANAGER (только для админов) ==================
+class QRAuthManager:
+    def __init__(self):
+        self.pending = {}
+
+    def start_auth(self, user_id, chat_id, bot_instance, mode='account'):
+        if user_id in self.pending:
+            bot_instance.send_message(chat_id, "⏳ Авторизация уже идёт.")
+            return
+        if not HAS_QR:
+            bot_instance.send_message(chat_id, "❌ Установи: pip install qrcode[pil]")
+            return
+
+        self.pending[user_id] = {
+            'mode': mode,
+            'chat_id': chat_id,
+            'password_event': threading.Event(),
+            'password_value': None,
+            'email_event': threading.Event(),
+            'email_value': None,
+            'cancelled': False,
+            'needs_email': False
+        }
+
+        def auth_thread():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            session = StringSession()
+            client = TelegramClient(session, API_ID, API_HASH, loop=loop)
+
+            async def do_auth():
+                try:
+                    await client.connect()
+                    if await client.is_user_authorized():
+                        me = await client.get_me()
+                        ss = client.session.save()
+                        await handle_success(ss, me)
+                        return
+
+                    qr_login = await client.qr_login()
+                    url = qr_login.url
+
+                    qr = qrcode.QRCode(version=1, box_size=10, border=2)
+                    qr.add_data(url)
+                    qr.make(fit=True)
+                    img = qr.make_image(fill_color="black", back_color="white")
+                    buf = io.BytesIO()
+                    img.save(buf, format='PNG')
+                    buf.seek(0)
+
+                    bot_instance.send_photo(
+                        chat_id, buf,
+                        caption="🔐 <b>Авторизация аккаунта через QR</b>\n\n"
+                                "1. Откройте Telegram на телефоне\n"
+                                "2. Настройки → Устройства → Подключить десктопное устройство\n"
+                                "3. Отсканируйте этот QR-код\n\n"
+                                "⏳ Ожидание сканирования (до 2 минут)...",
+                        reply_markup=cancel_auth_keyboard()
+                    )
+
+                    try:
+                        await asyncio.wait_for(qr_login.wait(), timeout=120)
+                    except asyncio.TimeoutError:
+                        bot_instance.send_message(
+                            chat_id,
+                            "❌ <b>Время ожидания истекло</b>\n\nQR-код был активен 2 минуты.",
+                            reply_markup=admin_menu_keyboard()
+                        )
+                        return
+
+                except SessionPasswordNeededError:
+                    bot_instance.send_message(
+                        chat_id,
+                        "🔒 <b>Требуется пароль 2FA</b>\n\nВведите пароль от аккаунта:",
+                        reply_markup=cancel_auth_keyboard()
+                    )
+                    self.pending[user_id]['password_event'].wait()
+                    if self.pending[user_id].get('cancelled'):
+                        return
+                    password = self.pending[user_id]['password_value']
+                    try:
+                        await client.sign_in(password=password)
+                    except Exception as e:
+                        error_text = str(e).lower()
+                        if 'email' in error_text or 'e-mail' in error_text or 'код' in error_text:
+                            bot_instance.send_message(
+                                chat_id,
+                                "📧 <b>Требуется код из Email</b>\n\nВведите код:",
+                                reply_markup=cancel_auth_keyboard()
+                            )
+                            self.pending[user_id]['needs_email'] = True
+                            self.pending[user_id]['email_event'].wait()
+                            if self.pending[user_id].get('cancelled'):
+                                return
+                            email_code = self.pending[user_id]['email_value']
+                            try:
+                                await client.sign_in(code=email_code)
+                            except Exception as e2:
+                                bot_instance.send_message(
+                                    chat_id,
+                                    f"❌ Ошибка: {str(e2)}",
+                                    reply_markup=admin_menu_keyboard()
+                                )
+                                return
+                        else:
+                            bot_instance.send_message(
+                                chat_id,
+                                f"❌ Ошибка пароля: {str(e)}",
+                                reply_markup=admin_menu_keyboard()
+                            )
+                            return
                 except Exception as e:
-                    logger.error(f"Video send error: {e}")
-            if sent_ids:
-                user_video_msgs[uid] = sent_ids
-    else:
-        bot.edit_message_text(txt, c.message.chat.id, c.message.message_id, reply_markup=kb, parse_mode='HTML')
+                    bot_instance.send_message(
+                        chat_id,
+                        f"❌ Ошибка: {str(e)}",
+                        reply_markup=admin_menu_keyboard()
+                    )
+                    return
 
-# --- ПОКУПКА ---
+                if await client.is_user_authorized():
+                    me = await client.get_me()
+                    ss = client.session.save()
+                    await handle_success(ss, me)
+                else:
+                    bot_instance.send_message(
+                        chat_id,
+                        "❌ Авторизация не удалась.",
+                        reply_markup=admin_menu_keyboard()
+                    )
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith('buy_'))
-def cb_buy(c):
-    bot.answer_callback_query(c.id)
-    uid = c.from_user.id
-    item_id = int(c.data.split('_')[1])
-    
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT seller_id, seller_name, title FROM items WHERE id=?", (item_id,))
-    row = cur.fetchone()
-    if not row:
-        conn.close()
-        bot.answer_callback_query(c.id, "❌ Товар не найден.", show_alert=True)
-        return
-    seller_id, seller_name, title = row
-    
-    if uid == seller_id:
-        conn.close()
-        bot.answer_callback_query(c.id, "❌ Это твой товар!", show_alert=True)
-        return
-    
-    cur.execute("SELECT status FROM purchases WHERE item_id=? AND buyer_id=?", (item_id, uid))
-    existing = cur.fetchone()
-    if existing:
-        conn.close()
-        bot.answer_callback_query(c.id, f"❌ У тебя уже есть заявка (статус: {existing[0]}).", show_alert=True)
-        return
-    
-    cur.execute("INSERT INTO purchases (item_id, buyer_id, buyer_name, seller_id, status, created_at) VALUES (?,?,?,?,?,?)",
-                (item_id, uid, c.from_user.username or c.from_user.first_name, seller_id, 'pending',
-                 datetime.now().strftime("%Y-%m-%d %H:%M")))
-    purchase_id = cur.lastrowid
-    conn.commit()
-    conn.close()
-    
+                await client.disconnect()
+
+            async def handle_success(ss, me):
+                phone = me.phone or "unknown"
+                mode = self.pending[user_id]['mode']
+                if mode == 'account':
+                    user_states[user_id] = 'waiting_price'
+                    user_states[f'{user_id}_temp_session'] = ss
+                    user_states[f'{user_id}_temp_phone'] = phone
+                    bot_instance.send_message(
+                        chat_id,
+                        f"✅ <b>Аккаунт авторизован!</b>\n\n"
+                        f"📱 Номер: <code>{phone}</code>\n\n"
+                        f"Введите цену продажи (только число, например 500):",
+                        reply_markup=cancel_auth_keyboard()
+                    )
+                else:
+                    bot_instance.send_message(
+                        chat_id,
+                        f"✅ Авторизация успешна!",
+                        reply_markup=main_menu_keyboard()
+                    )
+
+            try:
+                loop.run_until_complete(do_auth())
+            finally:
+                try:
+                    loop.run_until_complete(client.disconnect())
+                except:
+                    pass
+            if user_id in self.pending:
+                del self.pending[user_id]
+
+        t = threading.Thread(target=auth_thread, daemon=True)
+        t.start()
+
+    def submit_password(self, user_id, password):
+        if user_id in self.pending:
+            self.pending[user_id]['password_value'] = password
+            self.pending[user_id]['password_event'].set()
+            return True
+        return False
+
+    def submit_email(self, user_id, code):
+        if user_id in self.pending:
+            self.pending[user_id]['email_value'] = code
+            self.pending[user_id]['email_event'].set()
+            return True
+        return False
+
+    def cancel(self, user_id):
+        if user_id in self.pending:
+            self.pending[user_id]['cancelled'] = True
+            self.pending[user_id]['password_event'].set()
+            self.pending[user_id]['email_event'].set()
+            del self.pending[user_id]
+            return True
+        return False
+
+qr_manager = QRAuthManager()
+
+# ================== BOT ==================
+bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
+
+# ================== KEYBOARDS ==================
+def main_menu_keyboard():
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        InlineKeyboardButton("🛒 Каталог", callback_data="catalog"),
+        InlineKeyboardButton("📋 Мои заказы", callback_data="my_orders")
+    )
+    kb.add(InlineKeyboardButton("💬 Поддержка", callback_data="support"))
+    return kb
+
+def admin_menu_keyboard():
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        InlineKeyboardButton("🛒 Каталог", callback_data="catalog"),
+        InlineKeyboardButton("📋 Заявки", callback_data="admin_orders")
+    )
+    kb.add(
+        InlineKeyboardButton("➕ Добавить аккаунт", callback_data="add_account"),
+        InlineKeyboardButton("📦 Все аккаунты", callback_data="admin_accounts")
+    )
+    kb.add(InlineKeyboardButton("💬 Поддержка", callback_data="support"))
+    return kb
+
+def add_account_method_keyboard():
+    kb = InlineKeyboardMarkup(row_width=1)
+    kb.add(
+        InlineKeyboardButton("🔐 QR-код", callback_data="auth_start"),
+        InlineKeyboardButton("📱 По номеру", callback_data="phone_auth_start")
+    )
+    kb.add(InlineKeyboardButton("◀️ Назад", callback_data="main_menu"))
+    return kb
+
+def country_keyboard():
+    kb = InlineKeyboardMarkup(row_width=2)
+    buttons = []
+    for code, name in COUNTRIES.items():
+        buttons.append(InlineKeyboardButton(name, callback_data=f"country:{code}"))
+    kb.add(*buttons)
+    return kb
+
+def cancel_auth_keyboard():
     kb = InlineKeyboardMarkup()
-    kb.row(InlineKeyboardButton("✅ Подтвердить", callback_data=f"confbuy_{purchase_id}"),
-           InlineKeyboardButton("❌ Отклонить", callback_data=f"rejbuy_{purchase_id}"))
-    try:
-        bot.send_message(seller_id, f"🛒 <b>Новая заявка на покупку!</b>\n\n"
-                         f"📦 Товар: <b>{title}</b>\n"
-                         f"👤 Покупатель: @{c.from_user.username or c.from_user.first_name} (ID: <code>{uid}</code>)\n\n"
-                         f"Подтверди или отклони:", reply_markup=kb, parse_mode='HTML')
-    except Exception as e:
-        logger.error(f"Notify seller failed: {e}")
-    
-    bot.answer_callback_query(c.id, "✅ Заявка отправлена продавцу! Жди подтверждения.", show_alert=True)
+    kb.add(InlineKeyboardButton("❌ Отменить", callback_data="auth_cancel"))
+    return kb
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith('confbuy_'))
-def cb_confirm_buy(c):
-    bot.answer_callback_query(c.id)
-    purchase_id = int(c.data.split('_')[1])
-    
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT item_id, buyer_id, seller_id, status FROM purchases WHERE id=?", (purchase_id,))
-    row = cur.fetchone()
+def back_keyboard(callback="main_menu"):
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("◀️ Назад", callback_data=callback))
+    return kb
+
+# ================== HELPERS ==================
+def ensure_user(user_id, username=None, first_name=None):
+    row = db_query("SELECT 1 FROM users WHERE user_id=?", (user_id,), fetchone=True)
     if not row:
-        conn.close()
-        bot.answer_callback_query(c.id, "❌ Заявка не найдена.", show_alert=True)
-        return
-    item_id, buyer_id, seller_id, status = row
-    
-    if c.from_user.id != seller_id:
-        conn.close()
-        bot.answer_callback_query(c.id, "⛔ Это не твоя заявка!", show_alert=True)
-        return
-    
-    if status != 'pending':
-        conn.close()
-        bot.answer_callback_query(c.id, f"❌ Заявка уже {status}.", show_alert=True)
-        return
-    
-    cur.execute("UPDATE purchases SET status='confirmed' WHERE id=?", (purchase_id,))
-    conn.commit()
-    conn.close()
-    
-    try:
-        bot.send_message(buyer_id, f"✅ <b>Покупка подтверждена!</b>\n\nТеперь ты можешь оставить отзыв на товар.", parse_mode='HTML')
-    except Exception as e:
-        logger.error(f"Notify buyer failed: {e}")
-    
-    bot.edit_message_text("✅ Покупка подтверждена.", c.message.chat.id, c.message.message_id)
+        db_query("INSERT INTO users (user_id, username, first_name) VALUES (?,?,?)", 
+                 (user_id, username, first_name))
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith('rejbuy_'))
-def cb_reject_buy(c):
-    bot.answer_callback_query(c.id)
-    purchase_id = int(c.data.split('_')[1])
+def is_admin(user_id):
+    return user_id in ADMIN_IDS
+
+def get_available_accounts():
+    return db_query("SELECT id, phone, price, country_code FROM accounts WHERE status='available' ORDER BY id DESC")
+
+def mask_phone(phone):
+    if len(phone) >= 10:
+        return phone[:3] + " ••• " + phone[-3:]
+    return phone
+
+# ================== HANDLERS ==================
+@bot.message_handler(commands=['start'])
+def cmd_start(message):
+    user_id = message.from_user.id
+    ensure_user(user_id, message.from_user.username, message.from_user.first_name)
+    user_states.pop(user_id, None)
     
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT item_id, buyer_id, seller_id, status FROM purchases WHERE id=?", (purchase_id,))
-    row = cur.fetchone()
-    if not row:
-        conn.close()
-        bot.answer_callback_query(c.id, "❌ Заявка не найдена.", show_alert=True)
-        return
-    item_id, buyer_id, seller_id, status = row
-    
-    if c.from_user.id != seller_id:
-        conn.close()
-        bot.answer_callback_query(c.id, "⛔ Это не твоя заявка!", show_alert=True)
-        return
-    
-    cur.execute("UPDATE purchases SET status='cancelled' WHERE id=?", (purchase_id,))
-    conn.commit()
-    conn.close()
-    
-    try:
-        bot.send_message(buyer_id, f"❌ <b>Продавец отклонил заявку</b> на покупку товара.", parse_mode='HTML')
-    except Exception as e:
-        logger.error(f"Notify buyer failed: {e}")
-    
-    bot.edit_message_text("❌ Заявка отклонена.", c.message.chat.id, c.message.message_id)
-
-# --- ПРОДАЖА ---
-
-@bot.callback_query_handler(func=lambda c: c.data == 'sell_start')
-def cb_sell_start(c):
-    bot.answer_callback_query(c.id)
-    uid = c.from_user.id
-    user_state[uid] = STATE_IDLE
-    txt = ("💰 <b>Инструкция по продаже</b>\n\n"
-           "Чтобы выставить товар:\n"
-           "1️⃣ Выбери категорию\n"
-           "2️⃣ Напиши название\n"
-           "3️⃣ Добавь описание\n"
-           "4️⃣ Укажи цену (число)\n"
-           "5️⃣ Отправь видео товара (до 10 шт.)\n"
-           "6️⃣ Подтверди публикацию\n\n"
-           "⚠️ Товар пройдёт модерацию перед публикацией.\n\n"
-           "Выбери категорию:")
-    safe_edit_or_send(c.message.chat.id, c.message.message_id, uid, txt, kb_cats())
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith('cat_'))
-def cb_cat(c):
-    bot.answer_callback_query(c.id)
-    uid = c.from_user.id
-    cat = c.data.replace('cat_', '')
-    if cat not in CATEGORIES:
-        return
-    user_state[uid] = STATE_SELL_TITLE
-    user_data[uid] = {'cat': cat, 'videos': []}
-    bot.edit_message_text("✏️ Введи <b>название</b> товара:", c.message.chat.id, c.message.message_id, parse_mode='HTML')
-
-@bot.message_handler(func=lambda m: user_state.get(m.from_user.id) == STATE_SELL_TITLE)
-def step_title(m):
-    uid = m.from_user.id
-    title = m.text.strip()
-    if len(title) < 3 or len(title) > 100:
-        bot.send_message(m.chat.id, "❌ От 3 до 100 символов. Попробуй ещё:")
-        return
-    user_data[uid]['title'] = title
-    user_state[uid] = STATE_SELL_DESC
-    bot.send_message(m.chat.id, "📝 Введи <b>описание</b> товара:", parse_mode='HTML')
-
-@bot.message_handler(func=lambda m: user_state.get(m.from_user.id) == STATE_SELL_DESC)
-def step_desc(m):
-    uid = m.from_user.id
-    desc = m.text.strip()
-    if len(desc) < 10:
-        bot.send_message(m.chat.id, "❌ Минимум 10 символов. Напиши подробнее:")
-        return
-    user_data[uid]['desc'] = desc
-    user_state[uid] = STATE_SELL_PRICE
-    bot.send_message(m.chat.id, "💵 Введи <b>цену</b> в рублях (только число):", parse_mode='HTML')
-
-@bot.message_handler(func=lambda m: user_state.get(m.from_user.id) == STATE_SELL_PRICE)
-def step_price(m):
-    uid = m.from_user.id
-    if not m.text.strip().isdigit() or int(m.text) <= 0:
-        bot.send_message(m.chat.id, "❌ Только положительное число:")
-        return
-    user_data[uid]['price'] = int(m.text.strip())
-    user_state[uid] = STATE_SELL_VIDEO
-    bot.send_message(m.chat.id, "🎥 Отправь <b>видео</b> товара (можно несколько, до 10 шт.).\nКогда закончишь — напиши <b>готово</b> или отправь /skip:", parse_mode='HTML')
-
-@bot.message_handler(content_types=['video'], func=lambda m: user_state.get(m.from_user.id) == STATE_SELL_VIDEO)
-def step_video(m):
-    uid = m.from_user.id
-    if 'videos' not in user_data[uid]:
-        user_data[uid]['videos'] = []
-    if len(user_data[uid]['videos']) >= 10:
-        bot.send_message(m.chat.id, "❌ Максимум 10 видео. Напиши <b>готово</b> или /skip:")
-        return
-    user_data[uid]['videos'].append(m.video.file_id)
-    count = len(user_data[uid]['videos'])
-    bot.send_message(m.chat.id, f"🎥 Видео добавлено ({count}/10). Отправь ещё или напиши <b>готово</b>:", parse_mode='HTML')
-
-@bot.message_handler(func=lambda m: user_state.get(m.from_user.id) == STATE_SELL_VIDEO)
-def step_video_done(m):
-    uid = m.from_user.id
-    text = m.text.strip().lower()
-    if text in ('готово', 'готово!', '/skip', 'пропустить', 'skip'):
-        show_preview(m.chat.id, uid)
-        user_state[uid] = STATE_IDLE
+    if is_admin(user_id):
+        bot.send_message(
+            user_id,
+            "👋 <b>Админ-панель Number Shop</b>\n\nВыберите действие:",
+            reply_markup=admin_menu_keyboard()
+        )
     else:
-        bot.send_message(m.chat.id, "❌ Отправь видео или напиши <b>готово</b> (или /skip):", parse_mode='HTML')
+        bot.send_message(
+            user_id,
+            "👋 <b>Добро пожаловать в Number Shop</b>\n\n"
+            "Здесь вы можете купить Telegram-аккаунты.\n"
+            "Выберите действие:",
+            reply_markup=main_menu_keyboard()
+        )
 
-def show_preview(chat_id, uid):
-    d = user_data[uid]
-    cat = CATEGORIES.get(d['cat'], '—')
-    video_count = len(d.get('videos', []))
-    txt = (f"📋 <b>Предпросмотр:</b>\n\n"
-           f"🏷 {cat}\n"
-           f"📦 {d['title']}\n"
-           f"📝 {d['desc']}\n"
-           f"💵 {d['price']} руб.\n"
-           f"🎥 Видео: {video_count} шт.")
-    bot.send_message(chat_id, txt, reply_markup=kb_confirm(), parse_mode='HTML')
+@bot.callback_query_handler(func=lambda call: call.data == "main_menu")
+def cb_main_menu(call):
+    bot.answer_callback_query(call.id)
+    user_id = call.from_user.id
+    user_states.pop(user_id, None)
+    if is_admin(user_id):
+        bot.edit_message_text("👋 <b>Админ-панель</b>", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=admin_menu_keyboard())
+    else:
+        bot.edit_message_text("👋 <b>Главное меню</b>", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=main_menu_keyboard())
 
-@bot.callback_query_handler(func=lambda c: c.data == 'confirm_sell')
-def cb_confirm_sell(c):
-    bot.answer_callback_query(c.id)
-    uid = c.from_user.id
-    d = user_data.get(uid, {})
-    if not d:
+# ---------- CATALOG ----------
+@bot.callback_query_handler(func=lambda call: call.data == "catalog")
+def cb_catalog(call):
+    bot.answer_callback_query(call.id)
+    user_id = call.from_user.id
+    accounts = get_available_accounts()
+    
+    if not accounts:
+        bot.edit_message_text(
+            "🛒 <b>Каталог</b>\n\nНет доступных аккаунтов.",
+            chat_id=call.message.chat.id, message_id=call.message.message_id,
+            reply_markup=back_keyboard()
+        )
         return
     
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("""INSERT INTO items (seller_id, seller_name, title, description, price, category, status, created_at)
-                   VALUES (?,?,?,?,?,?,'pending',?)""",
-                (uid, c.from_user.username or c.from_user.first_name, d['title'], d['desc'], d['price'],
-                 d['cat'], datetime.now().strftime("%Y-%m-%d %H:%M")))
-    item_id = cur.lastrowid
+    kb = InlineKeyboardMarkup(row_width=1)
+    for acc in accounts:
+        acc_id, phone, price, country = acc
+        masked = mask_phone(phone)
+        country_name = COUNTRIES.get(country, "🌍 Другая")
+        kb.add(InlineKeyboardButton(f"{country_name} | {masked} — {price}₽", callback_data=f"buy:{acc_id}"))
+    kb.add(InlineKeyboardButton("◀️ Назад", callback_data="main_menu"))
     
-    for vid in d.get('videos', []):
-        cur.execute("INSERT INTO item_videos (item_id, file_id) VALUES (?,?)", (item_id, vid))
+    bot.edit_message_text(
+        "🛒 <b>Каталог аккаунтов</b>\n\nВыберите аккаунт для покупки:",
+        chat_id=call.message.chat.id, message_id=call.message.message_id,
+        reply_markup=kb
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("buy:"))
+def cb_buy(call):
+    bot.answer_callback_query(call.id)
+    user_id = call.from_user.id
+    acc_id = int(call.data.split(":")[1])
     
-    conn.commit()
-    conn.close()
+    account = db_query("SELECT * FROM accounts WHERE id=? AND status='available'", (acc_id,), fetchone=True)
+    if not account:
+        bot.send_message(user_id, "❌ Аккаунт уже продан или недоступен.", reply_markup=back_keyboard("catalog"))
+        return
     
-    cat_name = CATEGORIES.get(d['cat'], d['cat'])
-    admin_txt = (f"🆕 <b>Новый товар на модерацию!</b>\n\n"
-                 f"📦 {d['title']}\n"
-                 f"📝 {d['desc'][:200]}...\n"
-                 f"💵 {d['price']} руб.\n"
-                 f"🏷 {cat_name}\n"
-                 f"👤 @{c.from_user.username or c.from_user.first_name} (ID: <code>{uid}</code>)\n"
-                 f"🎥 Видео: {len(d.get('videos', []))} шт.\n\n"
-                 f"ID: <code>{item_id}</code>")
-    for admin in ADMINS:
+    db_query("INSERT INTO orders (buyer_id, account_id, status) VALUES (?,?,'pending')", (user_id, acc_id))
+    db_query("UPDATE accounts SET status='reserved' WHERE id=?", (acc_id,))
+    
+    order_id = db_query("SELECT last_insert_rowid()", fetchone=True)[0]
+    country_name = COUNTRIES.get(account[4], "🌍 Другая")
+    
+    user_states[user_id] = f"waiting_receipt:{order_id}"
+    bot.edit_message_text(
+        f"🛒 <b>Оформление покупки #{order_id}</b>\n\n"
+        f"🌍 Страна: {country_name}\n"
+        f"📱 Аккаунт: <code>{mask_phone(account[1])}</code>\n"
+        f"💰 Цена: <b>{account[3]}₽</b>\n\n"
+        f"💳 Для завершения покупки отправьте скриншот чека об оплате одним сообщением (фото).\n\n"
+        f"После проверки администратором вы получите номер и код подтверждения.",
+        chat_id=call.message.chat.id, message_id=call.message.message_id,
+        reply_markup=cancel_auth_keyboard()
+    )
+
+@bot.message_handler(content_types=['photo'], func=lambda m: isinstance(user_states.get(m.from_user.id), str) and user_states.get(m.from_user.id).startswith("waiting_receipt:"))
+def handle_receipt(message):
+    user_id = message.from_user.id
+    order_id = int(user_states[user_id].split(":")[1])
+    file_id = message.photo[-1].file_id
+    
+    db_query("UPDATE orders SET receipt_file_id=?, status='paid' WHERE id=?", (file_id, order_id))
+    user_states.pop(user_id, None)
+    
+    order = db_query("SELECT * FROM orders WHERE id=?", (order_id,), fetchone=True)
+    account = db_query("SELECT * FROM accounts WHERE id=?", (order[2],), fetchone=True)
+    user = db_query("SELECT * FROM users WHERE user_id=?", (user_id,), fetchone=True)
+    country_name = COUNTRIES.get(account[4], "🌍 Другая")
+    
+    for admin_id in ADMIN_IDS:
         try:
-            bot.send_message(admin, admin_txt, reply_markup=kb_mod(item_id), parse_mode='HTML')
+            kb = InlineKeyboardMarkup(row_width=2)
+            kb.add(
+                InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm_order:{order_id}"),
+                InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_order:{order_id}")
+            )
+            bot.send_photo(
+                admin_id, file_id,
+                caption=f"🛒 <b>Новая заявка #{order_id}</b>\n\n"
+                        f"🌍 Страна: {country_name}\n"
+                        f"👤 Покупатель: @{user[1] or 'нет'} (ID: <code>{user_id}</code>)\n"
+                        f"📱 Аккаунт: <code>{mask_phone(account[1])}</code>\n"
+                        f"💰 Цена: {account[3]}₽\n"
+                        f"⏳ Статус: Ожидает проверки",
+                reply_markup=kb
+            )
         except Exception as e:
-            logger.error(f"Admin {admin} notify failed: {e}")
+            print(f"Failed to notify admin {admin_id}: {e}")
     
-    bot.edit_message_text("✅ Товар отправлен на модерацию! После проверки он появится в маркетплейсе.\n\nСпасибо! 🚀",
-                          c.message.chat.id, c.message.message_id, reply_markup=kb_main())
-    user_state.pop(uid, None)
-    user_data.pop(uid, None)
+    bot.send_message(
+        user_id,
+        "✅ Чек получен! Заявка отправлена администратору на проверку.\n"
+        "Вы получите уведомление после подтверждения.",
+        reply_markup=back_keyboard("main_menu")
+    )
 
-@bot.callback_query_handler(func=lambda c: c.data == 'cancel_sell')
-def cb_cancel_sell(c):
-    bot.answer_callback_query(c.id)
-    uid = c.from_user.id
-    user_state.pop(uid, None)
-    user_data.pop(uid, None)
-    bot.edit_message_text("❌ Создание товара отменено.", c.message.chat.id, c.message.message_id, reply_markup=kb_main())
-
-# --- МОДЕРАЦИЯ ---
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith('app_'))
-def cb_approve(c):
-    bot.answer_callback_query(c.id)
-    if not is_admin(c.from_user.id):
-        bot.answer_callback_query(c.id, "⛔ Нет доступа!", show_alert=True)
+# ---------- ADMIN ORDERS ----------
+@bot.callback_query_handler(func=lambda call: call.data == "admin_orders")
+def cb_admin_orders(call):
+    bot.answer_callback_query(call.id)
+    user_id = call.from_user.id
+    if not is_admin(user_id):
         return
-    item_id = int(c.data.split('_')[1])
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("UPDATE items SET status='approved' WHERE id=?", (item_id,))
-    cur.execute("SELECT seller_id, title FROM items WHERE id=?", (item_id,))
-    row = cur.fetchone()
-    conn.commit()
-    conn.close()
-    if row:
+    
+    orders = db_query("SELECT * FROM orders WHERE status IN ('paid','confirmed') ORDER BY id DESC LIMIT 20")
+    if not orders:
+        bot.edit_message_text("📋 Нет активных заявок.", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=back_keyboard())
+        return
+    
+    text = "📋 <b>Последние заявки:</b>\n\n"
+    kb = InlineKeyboardMarkup(row_width=1)
+    for o in orders:
+        acc = db_query("SELECT phone, country_code FROM accounts WHERE id=?", (o[2],), fetchone=True)
+        country_name = COUNTRIES.get(acc[1], "🌍") if acc else "🌍"
+        status_emoji = "⏳" if o[3] == 'paid' else "✅" if o[3] == 'confirmed' else "❌"
+        text += f"{status_emoji} #{o[0]} — {country_name} {mask_phone(acc[0])} — {o[3]}\n"
+        if o[3] == 'paid':
+            kb.add(InlineKeyboardButton(f"Заявка #{o[0]}", callback_data=f"view_order:{o[0]}"))
+    kb.add(InlineKeyboardButton("◀️ Назад", callback_data="main_menu"))
+    
+    bot.edit_message_text(text, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=kb)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("view_order:"))
+def cb_view_order(call):
+    bot.answer_callback_query(call.id)
+    user_id = call.from_user.id
+    if not is_admin(user_id):
+        return
+    order_id = int(call.data.split(":")[1])
+    order = db_query("SELECT * FROM orders WHERE id=?", (order_id,), fetchone=True)
+    if not order:
+        return
+    
+    account = db_query("SELECT * FROM accounts WHERE id=?", (order[2],), fetchone=True)
+    buyer = db_query("SELECT * FROM users WHERE user_id=?", (order[1],), fetchone=True)
+    country_name = COUNTRIES.get(account[4], "🌍 Другая")
+    
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm_order:{order_id}"),
+        InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_order:{order_id}")
+    )
+    kb.add(InlineKeyboardButton("◀️ Назад", callback_data="admin_orders"))
+    
+    if order[4]:
+        bot.send_photo(
+            user_id, order[4],
+            caption=f"🛒 <b>Заявка #{order_id}</b>\n\n"
+                    f"🌍 Страна: {country_name}\n"
+                    f"👤 Покупатель: @{buyer[1] or 'нет'} (<code>{order[1]}</code>)\n"
+                    f"📱 Аккаунт: <code>{account[1]}</code>\n"
+                    f"💰 Цена: {account[3]}₽\n"
+                    f"📅 Дата: {order[5]}",
+            reply_markup=kb
+        )
+    else:
+        bot.send_message(
+            user_id,
+            f"🛒 <b>Заявка #{order_id}</b>\n\n"
+            f"🌍 Страна: {country_name}\n"
+            f"👤 Покупатель: @{buyer[1] or 'нет'} (<code>{order[1]}</code>)\n"
+            f"📱 Аккаунт: <code>{account[1]}</code>\n"
+            f"💰 Цена: {account[3]}₽",
+            reply_markup=kb
+        )
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("confirm_order:"))
+def cb_confirm_order(call):
+    user_id = call.from_user.id
+    if not is_admin(user_id):
+        bot.answer_callback_query(call.id, "❌ Нет доступа")
+        return
+    order_id = int(call.data.split(":")[1])
+    order = db_query("SELECT * FROM orders WHERE id=?", (order_id,), fetchone=True)
+    if not order or order[3] != 'paid':
+        bot.answer_callback_query(call.id, "❌ Заявка не найдена или уже обработана")
+        return
+    
+    db_query("UPDATE orders SET status='confirmed' WHERE id=?", (order_id,))
+    db_query("UPDATE accounts SET status='sold', buyer_id=? WHERE id=?", (order[1], order[2]))
+    
+    account = db_query("SELECT * FROM accounts WHERE id=?", (order[2],), fetchone=True)
+    buyer_id = order[1]
+    country_name = COUNTRIES.get(account[4], "🌍 Другая")
+    
+    manager.start_account(account[1], account[2])
+    
+    bot.answer_callback_query(call.id, "✅ Подтверждено")
+    bot.edit_message_text(
+        f"✅ Заявка #{order_id} подтверждена.",
+        chat_id=call.message.chat.id, message_id=call.message.message_id
+    )
+    
+    bot.send_message(
+        buyer_id,
+        f"🎉 <b>Ваша заявка #{order_id} подтверждена!</b>\n\n"
+        f"🌍 Страна: {country_name}\n"
+        f"📱 <b>Номер аккаунта:</b> <code>{account[1]}</code>\n\n"
+        f"Введите этот номер в Telegram для входа.\n"
+        f"Код подтверждения придёт сюда автоматически.",
+        reply_markup=back_keyboard("main_menu")
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("reject_order:"))
+def cb_reject_order(call):
+    user_id = call.from_user.id
+    if not is_admin(user_id):
+        bot.answer_callback_query(call.id, "❌ Нет доступа")
+        return
+    order_id = int(call.data.split(":")[1])
+    order = db_query("SELECT * FROM orders WHERE id=?", (order_id,), fetchone=True)
+    if not order:
+        return
+    
+    db_query("UPDATE orders SET status='rejected' WHERE id=?", (order_id,))
+    db_query("UPDATE accounts SET status='available', buyer_id=NULL WHERE id=?", (order[2],))
+    
+    bot.answer_callback_query(call.id, "❌ Отклонено")
+    bot.edit_message_text(f"❌ Заявка #{order_id} отклонена.", chat_id=call.message.chat.id, message_id=call.message.message_id)
+    bot.send_message(order[1], f"❌ Ваша заявка #{order_id} отклонена.\n\nОбратитесь в поддержку.", reply_markup=back_keyboard("main_menu"))
+
+# ---------- ADD ACCOUNT (ADMIN ONLY) ----------
+@bot.callback_query_handler(func=lambda call: call.data == "add_account")
+def cb_add_account(call):
+    bot.answer_callback_query(call.id)
+    user_id = call.from_user.id
+    if not is_admin(user_id):
+        bot.answer_callback_query(call.id, "❌ Нет доступа")
+        return
+    bot.edit_message_text(
+        "➕ <b>Добавить аккаунт</b>\n\nВыберите способ авторизации:",
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        reply_markup=add_account_method_keyboard()
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data == "auth_start")
+def cb_auth_start(call):
+    try:
+        bot.answer_callback_query(call.id, "Начинаем авторизацию...")
+    except:
+        pass
+    user_id = call.from_user.id
+    if not is_admin(user_id):
+        bot.answer_callback_query(call.id, "❌ Нет доступа")
+        return
+    user_states.pop(user_id, None)
+    try:
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    except Exception:
+        pass
+    qr_manager.start_auth(user_id, call.message.chat.id, bot, mode='account')
+
+@bot.callback_query_handler(func=lambda call: call.data == "phone_auth_start")
+def cb_phone_auth_start(call):
+    bot.answer_callback_query(call.id)
+    user_id = call.from_user.id
+    if not is_admin(user_id):
+        bot.answer_callback_query(call.id, "❌ Нет доступа")
+        return
+    user_states.pop(user_id, None)
+    phone_auth_manager.start_auth(user_id, call.message.chat.id, bot)
+
+# ---------- PHONE AUTH INPUTS ----------
+@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == 'admin_phone_input')
+def handle_admin_phone(message):
+    user_id = message.from_user.id
+    if not is_admin(user_id):
+        return
+    phone = message.text.strip()
+    if not phone.startswith('+'):
+        bot.send_message(user_id, "❌ Номер должен начинаться с +. Пример: <code>+79991234567</code>")
+        return
+    if phone_auth_manager.submit_phone(user_id, phone):
+        bot.send_message(user_id, "⏳ Отправка кода...")
+    else:
+        bot.send_message(user_id, "❌ Ошибка. Начните заново.", reply_markup=admin_menu_keyboard())
+
+@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == 'admin_code_input')
+def handle_admin_code(message):
+    user_id = message.from_user.id
+    if not is_admin(user_id):
+        return
+    code = message.text.strip()
+    if phone_auth_manager.submit_code(user_id, code):
+        bot.send_message(user_id, "⏳ Проверка кода...")
+    else:
+        bot.send_message(user_id, "❌ Ошибка. Начните заново.", reply_markup=admin_menu_keyboard())
+
+@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == 'admin_2fa_input')
+def handle_admin_2fa(message):
+    user_id = message.from_user.id
+    if not is_admin(user_id):
+        return
+    password = message.text.strip()
+    if phone_auth_manager.submit_password(user_id, password):
+        bot.send_message(user_id, "⏳ Проверка пароля...")
+    else:
+        bot.send_message(user_id, "❌ Ошибка.", reply_markup=admin_menu_keyboard())
+
+# ---------- PRICE & COUNTRY ----------
+@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == 'waiting_price')
+def handle_price(message):
+    user_id = message.from_user.id
+    if not is_admin(user_id):
+        return
+    try:
+        price = float(message.text.strip())
+        user_states[f'{user_id}_temp_price'] = price
+        user_states[user_id] = 'waiting_country'
+        bot.send_message(
+            user_id,
+            f"✅ Цена: <b>{price}₽</b>\n\nВыберите страну номера:",
+            reply_markup=country_keyboard()
+        )
+    except ValueError:
+        bot.send_message(user_id, "❌ Введите число (например 500):", reply_markup=cancel_auth_keyboard())
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("country:"))
+def cb_country(call):
+    bot.answer_callback_query(call.id)
+    user_id = call.from_user.id
+    if not is_admin(user_id):
+        return
+    if user_states.get(user_id) != 'waiting_country':
+        return
+    
+    country_code = call.data.split(":")[1]
+    session = user_states.pop(f'{user_id}_temp_session', None)
+    phone = user_states.pop(f'{user_id}_temp_phone', None)
+    price = user_states.pop(f'{user_id}_temp_price', None)
+    user_states.pop(user_id, None)
+    
+    if not session or not phone:
+        bot.send_message(user_id, "❌ Ошибка сессии. Начните заново.", reply_markup=admin_menu_keyboard())
+        return
+    
+    db_query("INSERT INTO accounts (phone, session_string, price, country_code, status) VALUES (?,?,?,?,'available')",
+             (phone, session, price, country_code))
+    country_name = COUNTRIES.get(country_code, "🌍 Другая")
+    bot.send_message(
+        user_id,
+        f"✅ <b>Аккаунт добавлен!</b>\n\n"
+        f"🌍 {country_name}\n"
+        f"📱 {phone}\n"
+        f"💰 {price}₽",
+        reply_markup=admin_menu_keyboard()
+    )
+
+# ---------- AUTH CANCEL (универсальная отмена) ----------
+@bot.callback_query_handler(func=lambda call: call.data == "auth_cancel")
+def cb_auth_cancel(call):
+    user_id = call.from_user.id
+    
+    # Если админ вводил цену/страну/номер/код/2фа
+    if user_states.get(user_id) in ('waiting_price', 'waiting_country', 'admin_phone_input', 'admin_code_input', 'admin_2fa_input'):
+        user_states.pop(f'{user_id}_temp_session', None)
+        user_states.pop(f'{user_id}_temp_phone', None)
+        user_states.pop(f'{user_id}_temp_price', None)
+        user_states.pop(user_id, None)
+        phone_auth_manager.cancel(user_id)
+        qr_manager.cancel(user_id)
+        bot.answer_callback_query(call.id, "Отменено")
         try:
-            bot.send_message(row[0], f"✅ Твой товар <b>{row[1]}</b> одобрен!", parse_mode='HTML')
-        except: pass
-    bot.edit_message_text(f"✅ Товар ID <code>{item_id}</code> одобрен.", c.message.chat.id, c.message.message_id, parse_mode='HTML')
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith('rej_'))
-def cb_reject(c):
-    bot.answer_callback_query(c.id)
-    if not is_admin(c.from_user.id):
-        bot.answer_callback_query(c.id, "⛔ Нет доступа!", show_alert=True)
+            bot.edit_message_text("❌ Добавление отменено.", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=admin_menu_keyboard())
+        except:
+            bot.send_message(call.message.chat.id, "❌ Добавление отменено.", reply_markup=admin_menu_keyboard())
         return
-    item_id = int(c.data.split('_')[1])
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT seller_id, title FROM items WHERE id=?", (item_id,))
-    row = cur.fetchone()
-    cur.execute("DELETE FROM items WHERE id=?", (item_id,))
-    cur.execute("DELETE FROM item_videos WHERE item_id=?", (item_id,))
-    conn.commit()
-    conn.close()
-    if row:
+    
+    cancelled = False
+    if qr_manager.cancel(user_id):
+        cancelled = True
+    if phone_auth_manager.cancel(user_id):
+        cancelled = True
+    
+    if cancelled:
+        bot.answer_callback_query(call.id, "Отменено")
+        user_states.pop(user_id, None)
+        kb = admin_menu_keyboard() if is_admin(user_id) else main_menu_keyboard()
         try:
-            bot.send_message(row[0], f"❌ Твой товар <b>{row[1]}</b> отклонён модератором.", parse_mode='HTML')
-        except: pass
-    bot.edit_message_text(f"❌ Товар ID <code>{item_id}</code> отклонён.", c.message.chat.id, c.message.message_id, parse_mode='HTML')
+            bot.edit_message_text("❌ Отменено.", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=kb)
+        except:
+            bot.send_message(call.message.chat.id, "❌ Отменено.", reply_markup=kb)
+    else:
+        bot.answer_callback_query(call.id, "Нет активной операции.")
 
-# --- ОТЗЫВЫ ---
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith('rev_'))
-def cb_rev_start(c):
-    bot.answer_callback_query(c.id)
-    uid = c.from_user.id
-    item_id = int(c.data.split('_')[1])
-    
-    conn = get_db()
-    cur = conn.cursor()
-    
-    # Нельзя себе
-    cur.execute("SELECT seller_id FROM items WHERE id=?", (item_id,))
-    row = cur.fetchone()
-    if row and row[0] == uid:
-        conn.close()
-        bot.answer_callback_query(c.id, "❌ Нельзя оставить отзыв самому себе!", show_alert=True)
+# ---------- QR 2FA INPUT ----------
+@bot.message_handler(func=lambda m: m.from_user.id in qr_manager.pending)
+def handle_qr_2fa_input(message):
+    user_id = message.from_user.id
+    pending = qr_manager.pending.get(user_id)
+    if not pending:
         return
-    
-    # Уже оставлял?
-    cur.execute("SELECT 1 FROM reviews WHERE item_id=? AND buyer_id=?", (item_id, uid))
-    if cur.fetchone():
-        conn.close()
-        bot.answer_callback_query(c.id, "❌ Ты уже оставлял отзыв на этот товар!", show_alert=True)
-        return
-    
-    # Покупал ли?
-    cur.execute("SELECT 1 FROM purchases WHERE item_id=? AND buyer_id=? AND status='confirmed'", (item_id, uid))
-    if not cur.fetchone():
-        conn.close()
-        bot.answer_callback_query(c.id, "❌ Ты не покупал этот товар! Нажми «Купить» и дождись подтверждения продавца.", show_alert=True)
-        return
-    
-    conn.close()
-    clear_item_messages(uid, c.message.chat.id)
-    user_data[uid] = {'rev_item': item_id}
-    bot.send_message(c.message.chat.id, "⭐ Выбери оценку:", reply_markup=kb_rate(item_id))
+    text = message.text.strip()
+    if pending.get('needs_email') and pending.get('email_value') is None:
+        if qr_manager.submit_email(user_id, text):
+            bot.send_message(user_id, "⏳ Проверка email-кода...")
+        else:
+            bot.send_message(user_id, "❌ Ошибка.")
+    elif pending.get('password_value') is None:
+        if qr_manager.submit_password(user_id, text):
+            bot.send_message(user_id, "⏳ Проверка пароля...")
+        else:
+            bot.send_message(user_id, "❌ Ошибка.")
+    else:
+        bot.send_message(user_id, "⏳ Проверяется...")
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith('rate_'))
-def cb_rate(c):
-    bot.answer_callback_query(c.id)
-    parts = c.data.split('_')
-    item_id = int(parts[1])
-    rating = int(parts[2])
-    uid = c.from_user.id
-    user_data[uid] = {'rev_item': item_id, 'rev_rating': rating}
-    user_state[uid] = STATE_REVIEW_TEXT
-    bot.edit_message_text("📝 Напиши текст отзыва:", c.message.chat.id, c.message.message_id)
-
-@bot.message_handler(func=lambda m: user_state.get(m.from_user.id) == STATE_REVIEW_TEXT)
-def step_review(m):
-    uid = m.from_user.id
-    d = user_data.get(uid, {})
-    item_id = d.get('rev_item')
-    rating = d.get('rev_rating')
-    if not item_id:
+# ---------- MY ORDERS ----------
+@bot.callback_query_handler(func=lambda call: call.data == "my_orders")
+def cb_my_orders(call):
+    bot.answer_callback_query(call.id)
+    user_id = call.from_user.id
+    orders = db_query("SELECT * FROM orders WHERE buyer_id=? ORDER BY id DESC LIMIT 10", (user_id,))
+    
+    if not orders:
+        bot.edit_message_text("📋 У вас нет заказов.", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=back_keyboard())
         return
     
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT seller_id FROM items WHERE id=?", (item_id,))
-    row = cur.fetchone()
-    if not row:
-        bot.send_message(m.chat.id, "❌ Товар не найден.", reply_markup=kb_main())
-        return
-    seller_id = row[0]
+    text = "📋 <b>Ваши заказы:</b>\n\n"
+    for o in orders:
+        acc = db_query("SELECT phone, country_code FROM accounts WHERE id=?", (o[2],), fetchone=True)
+        country_name = COUNTRIES.get(acc[1], "🌍") if acc else "🌍"
+        status = {"pending":"⏳ Ожидание", "paid":"💳 Оплачен", "confirmed":"✅ Подтверждён", "rejected":"❌ Отклонён"}.get(o[3], o[3])
+        text += f"#{o[0]} — {country_name} {mask_phone(acc[0])} — {status}\n"
     
-    cur.execute("INSERT INTO reviews (item_id, seller_id, buyer_id, buyer_name, rating, text, created_at) VALUES (?,?,?,?,?,?,?)",
-                (item_id, seller_id, uid, m.from_user.username or m.from_user.first_name, rating, m.text.strip(),
-                 datetime.now().strftime("%Y-%m-%d %H:%M")))
-    conn.commit()
-    conn.close()
-    
-    bot.send_message(m.chat.id, "✅ Отзыв оставлен! Спасибо.", reply_markup=kb_main())
-    user_state.pop(uid, None)
-    user_data.pop(uid, None)
+    bot.edit_message_text(text, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=back_keyboard())
 
-# --- ПРОФИЛЬ ---
+# ---------- SUPPORT ----------
+@bot.callback_query_handler(func=lambda call: call.data == "support")
+def cb_support(call):
+    bot.answer_callback_query(call.id)
+    bot.edit_message_text(
+        "💬 <b>Поддержка</b>\n\nПо всем вопросам обращайтесь к администратору.",
+        chat_id=call.message.chat.id, message_id=call.message.message_id,
+        reply_markup=back_keyboard()
+    )
 
-@bot.callback_query_handler(func=lambda c: c.data == 'profile')
-def cb_profile(c):
-    bot.answer_callback_query(c.id)
-    uid = c.from_user.id
-    uname = c.from_user.username or c.from_user.first_name
-    get_or_create_user(uid, uname)
-    
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT balance, sales_count, reg_date FROM users WHERE user_id=?", (uid,))
-    row = cur.fetchone()
-    cur.execute("SELECT COUNT(*) FROM items WHERE seller_id=? AND status='approved'", (uid,))
-    active = cur.fetchone()[0]
-    cur.execute("SELECT COUNT(*) FROM items WHERE seller_id=? AND status='pending'", (uid,))
-    pending = cur.fetchone()[0]
-    conn.close()
-    
-    bal, sales, reg = row if row else (0,0,'—')
-    avg, cnt = get_rating(uid)
-    
-    txt = (f"👤 <b>Твой профиль</b>\n\n"
-           f"🆔 ID: <code>{uid}</code>\n"
-           f"👤 Имя: {c.from_user.first_name}\n"
-           f"📅 Регистрация: {reg}\n\n"
-           f"💰 Баланс: <code>{bal}</code> руб.\n"
-           f"✅ Продаж: {sales}\n"
-           f"⭐ Рейтинг: {avg} ({cnt} отз.)\n"
-           f"📦 Активных товаров: {active}\n"
-           f"⏳ На модерации: {pending}")
-    
-    kb = InlineKeyboardMarkup()
-    kb.row(InlineKeyboardButton("🛒 На маркетплейс", callback_data="market"))
-    kb.row(InlineKeyboardButton("🏠 Меню", callback_data="main"))
-    safe_edit_or_send(c.message.chat.id, c.message.message_id, uid, txt, kb)
-
-# --- ПОДДЕРЖКА ---
-
-@bot.callback_query_handler(func=lambda c: c.data == 'support')
-def cb_support(c):
-    bot.answer_callback_query(c.id)
-    uid = c.from_user.id
-    txt = ("🆘 <b>Поддержка</b>\n\n"
-           "Если есть вопросы или проблемы — выбери администратора.\n"
-           "⚡ Ответ в течение 24 часов.")
-    kb = InlineKeyboardMarkup()
-    kb.row(InlineKeyboardButton("👨‍💻 Админ 1", url=f"tg://user?id={ADMIN_ID}"),
-          InlineKeyboardButton("👨‍💻 Админ 2", url=f"tg://user?id={ADMIN_ID_2}"))
-    kb.row(InlineKeyboardButton("🏠 Меню", callback_data="main"))
-    safe_edit_or_send(c.message.chat.id, c.message.message_id, uid, txt, kb)
-
-# ==================== АДМИН-ПАНЕЛЬ ====================
-
-@bot.callback_query_handler(func=lambda c: c.data == 'admin')
-def cb_admin(c):
-    bot.answer_callback_query(c.id)
-    if not is_admin(c.from_user.id):
-        bot.answer_callback_query(c.id, "⛔ Нет доступа!", show_alert=True)
+# ---------- ADMIN ACCOUNTS ----------
+@bot.callback_query_handler(func=lambda call: call.data == "admin_accounts")
+def cb_admin_accounts(call):
+    bot.answer_callback_query(call.id)
+    user_id = call.from_user.id
+    if not is_admin(user_id):
         return
-    bot.edit_message_text("🔧 <b>Панель администратора</b>\n\nВыбери раздел:", c.message.chat.id, c.message.message_id,
-                          reply_markup=kb_admin(), parse_mode='HTML')
+    accounts = db_query("SELECT phone, price, status, country_code FROM accounts ORDER BY id DESC")
+    text = "📦 <b>Все аккаунты:</b>\n\n"
+    for a in accounts:
+        emoji = "🟢" if a[2] == 'available' else "🔴" if a[2] == 'sold' else "🟡"
+        country_name = COUNTRIES.get(a[3], "🌍")
+        text += f"{emoji} {country_name} {mask_phone(a[0])} — {a[1]}₽ — {a[2]}\n"
+    bot.edit_message_text(text, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=back_keyboard())
 
-@bot.callback_query_handler(func=lambda c: c.data == 'admins_menu')
-def cb_admins_menu(c):
-    bot.answer_callback_query(c.id)
-    if not is_admin(c.from_user.id):
-        return
-    bot.edit_message_text("👥 <b>Управление админами</b>", c.message.chat.id, c.message.message_id,
-                          reply_markup=kb_admins_sub(), parse_mode='HTML')
-
-@bot.callback_query_handler(func=lambda c: c.data == 'admin_add')
-def cb_admin_add(c):
-    bot.answer_callback_query(c.id)
-    uid = c.from_user.id
-    user_state[uid] = STATE_ADMIN_ADD
-    bot.edit_message_text("➕ Введи <b>ID</b> пользователя для добавления в админы:", c.message.chat.id, c.message.message_id, parse_mode='HTML')
-
-@bot.message_handler(func=lambda m: user_state.get(m.from_user.id) == STATE_ADMIN_ADD)
-def step_admin_add(m):
-    uid = m.from_user.id
-    text = m.text.strip()
-    if not text.isdigit():
-        bot.send_message(m.chat.id, "❌ Введи числовой ID:")
-        return
-    new_admin = int(text)
-    if is_admin(new_admin):
-        bot.send_message(m.chat.id, "❌ Этот пользователь уже админ.", reply_markup=kb_admins_sub())
-        user_state.pop(uid, None)
-        return
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("INSERT INTO admins (user_id, role, added_by, added_at) VALUES (?,?,?,?)",
-                (new_admin, 'moderator', uid, datetime.now().strftime("%Y-%m-%d %H:%M")))
-    conn.commit()
-    conn.close()
-    bot.send_message(m.chat.id, f"✅ Пользователь <code>{new_admin}</code> добавлен как модератор.", reply_markup=kb_admins_sub(), parse_mode='HTML')
-    user_state.pop(uid, None)
-
-@bot.callback_query_handler(func=lambda c: c.data == 'admin_del')
-def cb_admin_del(c):
-    bot.answer_callback_query(c.id)
-    uid = c.from_user.id
-    user_state[uid] = STATE_ADMIN_DEL
-    bot.edit_message_text("➖ Введи <b>ID</b> админа для удаления:", c.message.chat.id, c.message.message_id, parse_mode='HTML')
-
-@bot.message_handler(func=lambda m: user_state.get(m.from_user.id) == STATE_ADMIN_DEL)
-def step_admin_del(m):
-    uid = m.from_user.id
-    text = m.text.strip()
-    if not text.isdigit():
-        bot.send_message(m.chat.id, "❌ Введи числовой ID:")
-        return
-    rem_id = int(text)
-    if rem_id in ADMINS:
-        bot.send_message(m.chat.id, "❌ Нельзя удалить основного админа.", reply_markup=kb_admins_sub())
-        user_state.pop(uid, None)
-        return
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM admins WHERE user_id=?", (rem_id,))
-    conn.commit()
-    conn.close()
-    bot.send_message(m.chat.id, f"✅ Админ <code>{rem_id}</code> удалён.", reply_markup=kb_admins_sub(), parse_mode='HTML')
-    user_state.pop(uid, None)
-
-@bot.callback_query_handler(func=lambda c: c.data == 'admin_list')
-def cb_admin_list(c):
-    bot.answer_callback_query(c.id)
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT user_id, role, added_at FROM admins")
-    rows = cur.fetchall()
-    conn.close()
-    txt = "👥 <b>Список админов</b>\n\n"
-    for aid in ADMINS:
-        txt += f"• <code>{aid}</code> — <b>superadmin</b> (основной)\n"
-    for r in rows:
-        txt += f"• <code>{r[0]}</code> — {r[1]} (добавлен: {r[2]})\n"
-    bot.edit_message_text(txt, c.message.chat.id, c.message.message_id, reply_markup=kb_admins_sub(), parse_mode='HTML')
-
-# --- Баны ---
-
-@bot.callback_query_handler(func=lambda c: c.data == 'bans_menu')
-def cb_bans_menu(c):
-    bot.answer_callback_query(c.id)
-    if not is_admin(c.from_user.id):
-        return
-    bot.edit_message_text("🚫 <b>Управление банами</b>", c.message.chat.id, c.message.message_id,
-                          reply_markup=kb_bans_sub(), parse_mode='HTML')
-
-@bot.callback_query_handler(func=lambda c: c.data == 'ban_add')
-def cb_ban_add(c):
-    bot.answer_callback_query(c.id)
-    uid = c.from_user.id
-    user_state[uid] = STATE_BAN_USER
-    bot.edit_message_text("🚫 Введи <b>ID</b> пользователя для бана:", c.message.chat.id, c.message.message_id, parse_mode='HTML')
-
-@bot.message_handler(func=lambda m: user_state.get(m.from_user.id) == STATE_BAN_USER)
-def step_ban_user(m):
-    uid = m.from_user.id
-    text = m.text.strip()
-    if not text.isdigit():
-        bot.send_message(m.chat.id, "❌ Введи числовой ID:")
-        return
-    ban_uid = int(text)
-    if is_admin(ban_uid):
-        bot.send_message(m.chat.id, "❌ Нельзя забанить админа.", reply_markup=kb_bans_sub())
-        user_state.pop(uid, None)
-        return
-    user_data[uid] = {'ban_uid': ban_uid}
-    user_state[uid] = STATE_BAN_REASON
-    bot.send_message(m.chat.id, "📝 Введи <b>причину</b> бана (или отправь /skip):")
-
-@bot.message_handler(func=lambda m: user_state.get(m.from_user.id) == STATE_BAN_REASON)
-def step_ban_reason(m):
-    uid = m.from_user.id
-    reason = m.text.strip()
-    if reason == '/skip':
-        reason = 'Не указана'
-    ban_uid = user_data[uid].get('ban_uid')
-    
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("INSERT OR REPLACE INTO bans (user_id, reason, banned_by, banned_at) VALUES (?,?,?,?)",
-                (ban_uid, reason, uid, datetime.now().strftime("%Y-%m-%d %H:%M")))
-    conn.commit()
-    conn.close()
-    
-    bot.send_message(m.chat.id, f"🚫 Пользователь <code>{ban_uid}</code> забанен.\nПричина: {reason}", reply_markup=kb_bans_sub(), parse_mode='HTML')
-    user_state.pop(uid, None)
-    user_data.pop(uid, None)
-
-@bot.callback_query_handler(func=lambda c: c.data == 'ban_del')
-def cb_ban_del(c):
-    bot.answer_callback_query(c.id)
-    uid = c.from_user.id
-    user_state[uid] = STATE_UNBAN_USER
-    bot.edit_message_text("✅ Введи <b>ID</b> пользователя для разбана:", c.message.chat.id, c.message.message_id, parse_mode='HTML')
-
-@bot.message_handler(func=lambda m: user_state.get(m.from_user.id) == STATE_UNBAN_USER)
-def step_unban_user(m):
-    uid = m.from_user.id
-    text = m.text.strip()
-    if not text.isdigit():
-        bot.send_message(m.chat.id, "❌ Введи числовой ID:")
-        return
-    unban_uid = int(text)
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM bans WHERE user_id=?", (unban_uid,))
-    conn.commit()
-    conn.close()
-    bot.send_message(m.chat.id, f"✅ Пользователь <code>{unban_uid}</code> разбанен.", reply_markup=kb_bans_sub(), parse_mode='HTML')
-    user_state.pop(uid, None)
-
-@bot.callback_query_handler(func=lambda c: c.data == 'ban_list')
-def cb_ban_list(c):
-    bot.answer_callback_query(c.id)
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT user_id, reason, banned_at FROM bans")
-    rows = cur.fetchall()
-    conn.close()
-    if not rows:
-        bot.edit_message_text("🚫 <b>Банов нет.</b>", c.message.chat.id, c.message.message_id, reply_markup=kb_bans_sub(), parse_mode='HTML')
-        return
-    txt = "🚫 <b>Список забаненных:</b>\n\n"
-    for r in rows:
-        txt += f"• <code>{r[0]}</code> — {r[1]} ({r[2]})\n"
-    bot.edit_message_text(txt, c.message.chat.id, c.message.message_id, reply_markup=kb_bans_sub(), parse_mode='HTML')
-
-# --- Статистика ---
-
-@bot.callback_query_handler(func=lambda c: c.data == 'admin_stats')
-def cb_admin_stats(c):
-    bot.answer_callback_query(c.id)
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) FROM users")
-    users = cur.fetchone()[0]
-    cur.execute("SELECT COUNT(*) FROM items WHERE status='approved'")
-    items = cur.fetchone()[0]
-    cur.execute("SELECT COUNT(*) FROM items WHERE status='pending'")
-    pending = cur.fetchone()[0]
-    cur.execute("SELECT COUNT(*) FROM purchases WHERE status='confirmed'")
-    sales = cur.fetchone()[0]
-    cur.execute("SELECT COUNT(*) FROM reviews")
-    reviews = cur.fetchone()[0]
-    cur.execute("SELECT COUNT(*) FROM bans")
-    bans = cur.fetchone()[0]
-    conn.close()
-    
-    txt = (f"📊 <b>Статистика бота</b>\n\n"
-           f"👤 Пользователей: {users}\n"
-           f"📦 Товаров одобрено: {items}\n"
-           f"⏳ На модерации: {pending}\n"
-           f"🛒 Продаж: {sales}\n"
-           f"💬 Отзывов: {reviews}\n"
-           f"🚫 Банов: {bans}")
-    bot.edit_message_text(txt, c.message.chat.id, c.message.message_id, reply_markup=kb_admin(), parse_mode='HTML')
-
-# ==================== MAIN ====================
-if __name__ == '__main__':
+# ================== MAIN ==================
+if __name__ == "__main__":
     init_db()
-    print("🤖 Бот запущен!")
+    sold_accounts = db_query("SELECT phone, session_string FROM accounts WHERE status='sold'")
+    for acc in sold_accounts:
+        if acc[0] and acc[1]:
+            manager.start_account(acc[0], acc[1])
+    print("Bot started...")
     bot.infinity_polling()

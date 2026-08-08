@@ -8,6 +8,7 @@ import re
 
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+from telebot.apihelper import ApiTelegramException
 from telethon import TelegramClient, types
 from telethon.sessions import StringSession
 from telethon.errors import FloodWaitError, SessionPasswordNeededError
@@ -27,6 +28,38 @@ DB_PATH = "broadcast_bot.db"
 FOOTER_TEXT = "\n\n— Рассылка с помощью бота @Rasslink_bot"
 
 user_states = {}
+
+# ================== SAFE EDIT HELPER ==================
+def safe_edit_message_text(text, chat_id, message_id, reply_markup=None, parse_mode="HTML", **kwargs):
+    """Редактирует сообщение, игнорируя 'message is not modified'."""
+    try:
+        return bot.edit_message_text(
+            text, chat_id=chat_id, message_id=message_id,
+            reply_markup=reply_markup, parse_mode=parse_mode, **kwargs
+        )
+    except ApiTelegramException as e:
+        if "message is not modified" in str(e).lower():
+            return None
+        raise
+    except Exception as e:
+        if "message is not modified" in str(e).lower():
+            return None
+        raise
+
+def safe_edit_message_caption(caption, chat_id, message_id, reply_markup=None, **kwargs):
+    try:
+        return bot.edit_message_caption(
+            chat_id=chat_id, message_id=message_id,
+            caption=caption, reply_markup=reply_markup, **kwargs
+        )
+    except ApiTelegramException as e:
+        if "message is not modified" in str(e).lower():
+            return None
+        raise
+    except Exception as e:
+        if "message is not modified" in str(e).lower():
+            return None
+        raise
 
 # ================== DATABASE ==================
 def init_db():
@@ -220,11 +253,18 @@ class PhoneAuthManager:
             try:
                 await client.connect()
                 await client.send_code_request(phone)
+
                 bot.send_message(
                     chat_id,
-                    f"📩 Код отправлен на <code>{phone}</code>\n\nВведите код подтверждения:",
+                    f"✅ Код подтверждения отправлен!\n\n"
+                    f"📱 Номер: <code>{phone}</code>\n\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"⚠️ ВАЖНО\n"
+                    f"✏️ Введите код так:\n"
+                    f"• Поставьте точку внутри: 56.785",
                     reply_markup=cancel_auth_keyboard()
                 )
+
                 user_states[user_id] = 'phone_code_input'
                 p['code_event'].wait()
                 if p['cancelled']:
@@ -562,7 +602,7 @@ def show_broadcast_settings(chat_id, message_id, user_id):
            f"👥 <b>Упоминания:</b> {mentions_status}\n"
            f"📋 <b>Режим:</b> {mode_status}\n\n"
            f"Выберите параметр для изменения:")
-    bot.edit_message_text(txt, chat_id=chat_id, message_id=message_id, reply_markup=broadcast_settings_keyboard())
+    safe_edit_message_text(txt, chat_id=chat_id, message_id=message_id, reply_markup=broadcast_settings_keyboard())
 
 def show_mentions_settings(chat_id, message_id, user_id):
     user = get_user(user_id)
@@ -571,7 +611,7 @@ def show_mentions_settings(chat_id, message_id, user_id):
     txt = (f"👥 <b>Упоминания участников</b>\n\n"
            f"Статус: {status}\n\n"
            f"📌 При включении бот добавляет скрытые упоминания в конец сообщения.")
-    bot.edit_message_text(txt, chat_id=chat_id, message_id=message_id, reply_markup=mentions_keyboard(enabled))
+    safe_edit_message_text(txt, chat_id=chat_id, message_id=message_id, reply_markup=mentions_keyboard(enabled))
 
 def show_chat_selection(chat_id, message_id, user_id, page=0):
     try:
@@ -579,7 +619,7 @@ def show_chat_selection(chat_id, message_id, user_id, page=0):
         client = manager.get_client(user_id)
         if not client:
             try:
-                bot.edit_message_text(
+                safe_edit_message_text(
                     "❌ <b>Не удалось подключиться к аккаунту</b>\n\nПопробуйте выйти и авторизоваться заново.",
                     chat_id=chat_id, message_id=message_id, reply_markup=back_keyboard("main_menu")
                 )
@@ -589,7 +629,7 @@ def show_chat_selection(chat_id, message_id, user_id, page=0):
         me = manager.run_sync(user_id, client.get_me(), timeout=30)
         dialogs = manager.run_sync(user_id, fetch_all_group_dialogs(client, me.id), timeout=600)
         if not dialogs:
-            bot.edit_message_text(
+            safe_edit_message_text(
                 "📋 <b>Чаты для рассылки</b>\n\nУ вас нет доступных групп.",
                 chat_id=chat_id, message_id=message_id, reply_markup=back_keyboard("main_menu")
             )
@@ -628,10 +668,10 @@ def show_chat_selection(chat_id, message_id, user_id, page=0):
                 f"📊 Всего групп: {len(dialogs)}\n"
                 f"☑️ Выбрано: {len(selected)}\n\n"
                 f"Нажмите на чат, чтобы выбрать или убрать его из списка.")
-        bot.edit_message_text(text, chat_id=chat_id, message_id=message_id, reply_markup=kb)
+        safe_edit_message_text(text, chat_id=chat_id, message_id=message_id, reply_markup=kb)
     except Exception as e:
         try:
-            bot.edit_message_text(
+            safe_edit_message_text(
                 f"❌ <b>Ошибка загрузки чатов</b>\n\n{str(e)[:200]}",
                 chat_id=chat_id, message_id=message_id, reply_markup=back_keyboard("main_menu")
             )
@@ -667,9 +707,9 @@ def cb_main_menu(call):
     user_states.pop(user_id, None)
     auth = is_authorized(user_id)
     if auth:
-        bot.edit_message_text("📢 <b>Broadcast Bot — Главное меню</b>\n\n✅ Вы авторизованы.\n📨 Настройте параметры рассылки и запустите процесс.", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=main_menu_keyboard(auth))
+        safe_edit_message_text("📢 <b>Broadcast Bot — Главное меню</b>\n\n✅ Вы авторизованы.\n📨 Настройте параметры рассылки и запустите процесс.", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=main_menu_keyboard(auth))
     else:
-        bot.edit_message_text("📢 <b>Broadcast Bot</b>\n\n🔐 Для начала работы необходимо авторизоваться.", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=main_menu_keyboard(auth))
+        safe_edit_message_text("📢 <b>Broadcast Bot</b>\n\n🔐 Для начала работы необходимо авторизоваться.", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=main_menu_keyboard(auth))
 
 # ---------- AUTH ----------
 @bot.callback_query_handler(func=lambda call: call.data == "auth_start")
@@ -738,7 +778,7 @@ def cb_auth_cancel(call):
             pass
         user_states.pop(user_id, None)
         try:
-            bot.edit_message_text("❌ <b>Авторизация отменена</b>\n\nВы можете начать заново в любое время.", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=main_menu_keyboard(False))
+            safe_edit_message_text("❌ <b>Авторизация отменена</b>\n\nВы можете начать заново в любое время.", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=main_menu_keyboard(False))
         except:
             bot.send_message(call.message.chat.id, "❌ <b>Авторизация отменена</b>\n\nВы можете начать заново в любое время.", reply_markup=main_menu_keyboard(False))
     else:
@@ -784,7 +824,7 @@ def cb_set_text(call):
         pass
     user_id = call.from_user.id
     user_states[user_id] = "waiting_text"
-    bot.edit_message_text("📝 <b>Изменение текста рассылки</b>\n\nВведите новый текст для рассылки.\n\n💡 Поддерживается HTML-разметка:\n&lt;b&gt;жирный&lt;/b&gt;, &lt;i&gt;курсив&lt;/i&gt;, &lt;code&gt;код&lt;/code&gt;\n\nОтправьте текст в следующем сообщении:", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=back_keyboard("broadcast_settings"))
+    safe_edit_message_text("📝 <b>Изменение текста рассылки</b>\n\nВведите новый текст для рассылки.\n\n💡 Поддерживается HTML-разметка:\n&lt;b&gt;жирный&lt;/b&gt;, &lt;i&gt;курсив&lt;/i&gt;, &lt;code&gt;код&lt;/code&gt;\n\nОтправьте текст в следующем сообщении:", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=back_keyboard("broadcast_settings"))
 
 @bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == "waiting_text")
 def handle_text(message):
@@ -802,7 +842,7 @@ def cb_set_interval(call):
         pass
     user_id = call.from_user.id
     user_states[user_id] = "waiting_interval"
-    bot.edit_message_text("⏱ <b>Изменение интервала</b>\n\nВведите интервал между отправками сообщений (в секундах).\n\n💡 Примеры: <code>1.5</code> (полторы секунды), <code>3</code> (3 секунды), <code>0.5</code> (полсекунды).\n\n⚠️ Слишком частая отправка может вызвать FloodWait. Рекомендуется: 1–3 сек.", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=back_keyboard("broadcast_settings"))
+    safe_edit_message_text("⏱ <b>Изменение интервала</b>\n\nВведите интервал между отправками сообщений (в секундах).\n\n💡 Примеры: <code>1.5</code> (полторы секунды), <code>3</code> (3 секунды), <code>0.5</code> (полсекунды).\n\n⚠️ Слишком частая отправка может вызвать FloodWait. Рекомендуется: 1–3 сек.", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=back_keyboard("broadcast_settings"))
 
 @bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == "waiting_interval")
 def handle_interval(message):
@@ -946,7 +986,7 @@ def cb_broadcast_start(call):
         pass
     mode_str = "📨 Во все чаты" if send_mode == 'all' else f"📋 Выбранные чаты ({len(get_selected_chats(user_id))})"
     mentions_str = "✅ Включены" if mentions else "❌ Выключены"
-    bot.edit_message_text(f"▶️ <b>Рассылка запущена</b>\n\n⏱ Интервал: {interval} сек.\n👥 Упоминания: {mentions_str}\n📋 Режим: {mode_str}\n\n⏳ Ожидание первых результатов...", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=stop_keyboard())
+    safe_edit_message_text(f"▶️ <b>Рассылка запущена</b>\n\n⏱ Интервал: {interval} сек.\n👥 Упоминания: {mentions_str}\n📋 Режим: {mode_str}\n\n⏳ Ожидание первых результатов...", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=stop_keyboard())
     db_query("UPDATE users SET is_running=1 WHERE user_id=?", (user_id,))
     threading.Thread(target=broadcast_worker, args=(user_id, call.message.chat.id, call.message.message_id), daemon=True).start()
 
@@ -960,7 +1000,7 @@ def cb_broadcast_stop(call):
     db_query("UPDATE users SET is_running=0 WHERE user_id=?", (user_id,))
     user_states.pop(user_id, None)
     try:
-        bot.edit_message_text("⏹ <b>Рассылка остановлена</b>\n\nОжидайте завершения текущей операции...", chat_id=call.message.chat.id, message_id=call.message.message_id)
+        safe_edit_message_text("⏹ <b>Рассылка остановлена</b>\n\nОжидайте завершения текущей операции...", chat_id=call.message.chat.id, message_id=call.message.message_id)
     except:
         pass
 
@@ -975,7 +1015,7 @@ def broadcast_worker(user_id, chat_id, message_id):
     client = manager.get_client(user_id)
     if not client:
         try:
-            bot.edit_message_text("❌ <b>Клиент не найден</b>\n\nНе удалось подключиться к аккаунту.", chat_id=chat_id, message_id=message_id)
+            safe_edit_message_text("❌ <b>Клиент не найден</b>\n\nНе удалось подключиться к аккаунту.", chat_id=chat_id, message_id=message_id)
         except:
             pass
         db_query("UPDATE users SET is_running=0 WHERE user_id=?", (user_id,))
@@ -992,7 +1032,7 @@ def broadcast_worker(user_id, chat_id, message_id):
 
         if not dialogs:
             try:
-                bot.edit_message_text("❌ <b>Нет чатов для рассылки</b>\n\nДля режима «Выбранные чаты» необходимо выбрать хотя бы один чат в разделе 📋 Чаты для рассылки.", chat_id=chat_id, message_id=message_id, reply_markup=main_menu_keyboard(True))
+                safe_edit_message_text("❌ <b>Нет чатов для рассылки</b>\n\nДля режима «Выбранные чаты» необходимо выбрать хотя бы один чат в разделе 📋 Чаты для рассылки.", chat_id=chat_id, message_id=message_id, reply_markup=main_menu_keyboard(True))
             except:
                 pass
             db_query("UPDATE users SET is_running=0 WHERE user_id=?", (user_id,))
@@ -1007,7 +1047,7 @@ def broadcast_worker(user_id, chat_id, message_id):
             if not user[6]:
                 remaining = total - idx
                 try:
-                    bot.edit_message_text(f"⏹ <b>Рассылка остановлена пользователем</b>\n\n📋 Всего чатов: {total}\n✅ Успешно отправлено: {sent}\n❌ Ошибок: {failed}\n📋 Не обработано: {remaining}\n\n⏱ Интервал: {interval} сек.", chat_id=chat_id, message_id=message_id, reply_markup=main_menu_keyboard(True))
+                    safe_edit_message_text(f"⏹ <b>Рассылка остановлена пользователем</b>\n\n📋 Всего чатов: {total}\n✅ Успешно отправлено: {sent}\n❌ Ошибок: {failed}\n📋 Не обработано: {remaining}\n\n⏱ Интервал: {interval} сек.", chat_id=chat_id, message_id=message_id, reply_markup=main_menu_keyboard(True))
                 except:
                     pass
                 db_query("UPDATE users SET is_running=0 WHERE user_id=?", (user_id,))
@@ -1048,7 +1088,7 @@ def broadcast_worker(user_id, chat_id, message_id):
                 remaining = total - idx - 1
                 try:
                     status_text = f"📊 <b>Статус рассылки</b>\n\n📋 Всего чатов: {total}\n✅ Успешно отправлено: {sent}\n❌ Ошибок: {failed}\n📋 Осталось: {remaining}\n⏳ Обработано: {idx+1}/{total}\n\n⏱ Интервал: {interval} сек."
-                    bot.edit_message_text(status_text, chat_id=chat_id, message_id=message_id, reply_markup=stop_keyboard())
+                    safe_edit_message_text(status_text, chat_id=chat_id, message_id=message_id, reply_markup=stop_keyboard())
                 except:
                     pass
 
@@ -1057,13 +1097,13 @@ def broadcast_worker(user_id, chat_id, message_id):
         db_query("UPDATE users SET is_running=0 WHERE user_id=?", (user_id,))
         final_text = f"✅ <b>Рассылка завершена</b>\n\n📋 Всего чатов обработано: {total}\n✅ Успешно отправлено: {sent}\n❌ Ошибок: {failed}\n\n📨 Ваше сообщение доставлено по указанным чатам."
         try:
-            bot.edit_message_text(final_text, chat_id=chat_id, message_id=message_id, reply_markup=main_menu_keyboard(True))
+            safe_edit_message_text(final_text, chat_id=chat_id, message_id=message_id, reply_markup=main_menu_keyboard(True))
         except:
             pass
     except Exception as e:
         db_query("UPDATE users SET is_running=0 WHERE user_id=?", (user_id,))
         try:
-            bot.edit_message_text(f"❌ <b>Критическая ошибка рассылки</b>\n\n{str(e)}\n\nПопробуйте перезапустить.", chat_id=chat_id, message_id=message_id, reply_markup=main_menu_keyboard(True))
+            safe_edit_message_text(f"❌ <b>Критическая ошибка рассылки</b>\n\n{str(e)}\n\nПопробуйте перезапустить.", chat_id=chat_id, message_id=message_id, reply_markup=main_menu_keyboard(True))
         except:
             pass
 
@@ -1080,7 +1120,7 @@ def cb_logout(call):
     clear_selected_chats(user_id)
     user_states.pop(user_id, None)
     try:
-        bot.edit_message_text("🚪 <b>Выход выполнен</b>\n\nВы вышли из аккаунта. Для продолжения работы необходимо повторно авторизоваться.", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=main_menu_keyboard(False))
+        safe_edit_message_text("🚪 <b>Выход выполнен</b>\n\nВы вышли из аккаунта. Для продолжения работы необходимо повторно авторизоваться.", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=main_menu_keyboard(False))
     except:
         bot.send_message(call.message.chat.id, "🚪 <b>Выход выполнен</b>\n\nВы вышли из аккаунта. Для продолжения работы необходимо повторно авторизоваться.", reply_markup=main_menu_keyboard(False))
 

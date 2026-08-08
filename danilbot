@@ -19,7 +19,7 @@ try:
 except ImportError:
     HAS_QR = False
 
-BOT_TOKEN = "8930332596:AAGfvGzcN_mUeNASRYKwyD1PwzEorhGq-MM"
+BOT_TOKEN = "8422044486:AAFlxED5Er0BqUbLgI0bkSQBmtA9txaZ7Ow"
 API_ID = 36403406
 API_HASH = "ecdc945d831f24eee69eae668c6c4ad1"
 DB_PATH = "broadcast_bot.db"

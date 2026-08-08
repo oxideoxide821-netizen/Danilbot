@@ -170,7 +170,7 @@ class TelethonManager:
             ts, dialogs = self.dialogs_cache[user_id]
             if now - ts < self.dialogs_cache_ttl:
                 return dialogs
-        dialogs = self.run_sync(user_id, fetch_all_group_dialogs(client, me.id), timeout=600)
+        dialogs = self.run_sync(user_id, fetch_all_group_dialogs(client, me_id), timeout=600)
         self.dialogs_cache[user_id] = (now, dialogs)
         return dialogs
 

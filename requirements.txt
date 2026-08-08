@@ -7,3 +7,4 @@ openai
 groq
 python-telegram-bot
 telethon
+qrcode

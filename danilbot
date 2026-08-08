@@ -25,7 +25,7 @@ API_ID = 36403406
 API_HASH = "ecdc945d831f24eee69eae668c6c4ad1"
 DB_PATH = "broadcast_bot.db"
 
-FOOTER_TEXT = "\n\n— Рассылка с помощью бота @Rasslink_bot"
+FOOTER_TEXT = "\n\n— rassыLka s PoMoщьQ bOta @Rasslink_bot"
 
 user_states = {}
 
@@ -74,11 +74,16 @@ def init_db():
             broadcast_interval REAL DEFAULT 1.0,
             broadcast_mentions INTEGER DEFAULT 0,
             is_running INTEGER DEFAULT 0,
-            send_mode TEXT DEFAULT 'all'
+            send_mode TEXT DEFAULT 'all',
+            mentions_mode TEXT DEFAULT 'none'
         )
     """)
     try:
         c.execute("ALTER TABLE users ADD COLUMN send_mode TEXT DEFAULT 'all'")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        c.execute("ALTER TABLE users ADD COLUMN mentions_mode TEXT DEFAULT 'none'")
     except sqlite3.OperationalError:
         pass
     c.execute("""
@@ -107,6 +112,8 @@ class TelethonManager:
         self.clients = {}
         self.loops = {}
         self.threads = {}
+        self.dialogs_cache = {}       # user_id -> (timestamp, dialogs_list)
+        self.dialogs_cache_ttl = 300  # 5 минут
 
     def _start_loop(self, user_id, session_string):
         loop = asyncio.new_event_loop()
@@ -155,6 +162,20 @@ class TelethonManager:
             except:
                 pass
             del self.loops[user_id]
+        self.invalidate_dialogs_cache(user_id)
+
+    def get_dialogs_cached(self, user_id, client, me_id, force_refresh=False):
+        now = time.time()
+        if not force_refresh and user_id in self.dialogs_cache:
+            ts, dialogs = self.dialogs_cache[user_id]
+            if now - ts < self.dialogs_cache_ttl:
+                return dialogs
+        dialogs = self.run_sync(user_id, fetch_all_group_dialogs(client, me.id), timeout=600)
+        self.dialogs_cache[user_id] = (now, dialogs)
+        return dialogs
+
+    def invalidate_dialogs_cache(self, user_id):
+        self.dialogs_cache.pop(user_id, None)
 
 manager = TelethonManager()
 
@@ -551,15 +572,6 @@ def broadcast_settings_keyboard():
     )
     return kb
 
-def mentions_keyboard(enabled):
-    kb = InlineKeyboardMarkup(row_width=1)
-    label = "❌ Отключить упоминания" if enabled else "✅ Включить упоминания"
-    kb.add(
-        InlineKeyboardButton(label, callback_data="mentions_toggle"),
-        InlineKeyboardButton("◀️ Вернуться в главное меню", callback_data="main_menu"),
-    )
-    return kb
-
 # ================== HELPERS ==================
 def get_user(user_id):
     row = db_query("SELECT * FROM users WHERE user_id=?", (user_id,), fetchone=True)
@@ -592,10 +604,19 @@ def show_broadcast_settings(chat_id, message_id, user_id):
     user = get_user(user_id)
     text = user[3] or "(не задано)"
     interval = user[4] or 1.0
-    mentions = user[5] or 0
+    mentions_mode = user[8] if len(user) > 8 else 'none'
     send_mode = user[7] if len(user) > 7 else 'all'
-    mentions_status = "✅ Включены" if mentions else "❌ Выключены"
+
+    mode_labels = {
+        'none': '❌ Выключены',
+        'hidden_10': '👻 Скрытые — 10 чел',
+        'hidden_all': '👻 Скрытые — все (до 200)',
+        'usernames_10': '👤 Юзернеймы — 10 чел',
+        'usernames_all': '👤 Юзернеймы — все (до 200)',
+    }
+    mentions_status = mode_labels.get(mentions_mode, '❌ Выключены')
     mode_status = "📨 Во все чаты" if send_mode == 'all' else f"📋 Выбранные ({len(get_selected_chats(user_id))})"
+
     txt = (f"📨 <b>Настройки рассылки</b>\n\n"
            f"📝 <b>Текст сообщения:</b>\n<code>{text[:500]}</code>{'...' if len(text) > 500 else ''}\n\n"
            f"⏱ <b>Интервал отправки:</b> {interval} сек.\n"
@@ -606,14 +627,30 @@ def show_broadcast_settings(chat_id, message_id, user_id):
 
 def show_mentions_settings(chat_id, message_id, user_id):
     user = get_user(user_id)
-    enabled = user[5] or 0
-    status = "✅ Включены — бот невидимо упоминает до 10 участников" if enabled else "❌ Выключены"
-    txt = (f"👥 <b>Упоминания участников</b>\n\n"
-           f"Статус: {status}\n\n"
-           f"📌 При включении бот добавляет скрытые упоминания в конец сообщения.")
-    safe_edit_message_text(txt, chat_id=chat_id, message_id=message_id, reply_markup=mentions_keyboard(enabled))
+    mode = user[8] if len(user) > 8 else 'none'
+    modes = {
+        'none': '❌ Без упоминаний',
+        'hidden_10': '👻 Скрытые — 10 чел',
+        'hidden_all': '👻 Скрытые — все (до 200)',
+        'usernames_10': '👤 Юзернеймы — 10 чел',
+        'usernames_all': '👤 Юзернеймы — все (до 200)',
+    }
+    current = modes.get(mode, '❌ Без упоминаний')
+    txt = (f"👥 <b>Настройки упоминаний</b>\n\n"
+           f"Текущий режим: <b>{current}</b>\n\n"
+           f"📌 Выберите режим:\n"
+           f"• <b>Скрытые</b> — невидимые упоминания через HTML-ссылки\n"
+           f"• <b>Юзернеймы</b> — видимые @username упоминания\n"
+           f"• <b>10 чел / все</b> — количество участников для тегания")
+    kb = InlineKeyboardMarkup(row_width=1)
+    for key, label in modes.items():
+        if key == mode:
+            label = "✅ " + label
+        kb.add(InlineKeyboardButton(label, callback_data=f"set_mention:{key}"))
+    kb.add(InlineKeyboardButton("◀️ Вернуться в главное меню", callback_data="main_menu"))
+    safe_edit_message_text(txt, chat_id=chat_id, message_id=message_id, reply_markup=kb)
 
-def show_chat_selection(chat_id, message_id, user_id, page=0):
+def show_chat_selection(chat_id, message_id, user_id, page=0, force_refresh=False):
     try:
         manager.start_client(user_id, get_user(user_id)[1])
         client = manager.get_client(user_id)
@@ -627,7 +664,7 @@ def show_chat_selection(chat_id, message_id, user_id, page=0):
                 pass
             return
         me = manager.run_sync(user_id, client.get_me(), timeout=30)
-        dialogs = manager.run_sync(user_id, fetch_all_group_dialogs(client, me.id), timeout=600)
+        dialogs = manager.get_dialogs_cached(user_id, client, me.id, force_refresh=force_refresh)
         if not dialogs:
             safe_edit_message_text(
                 "📋 <b>Чаты для рассылки</b>\n\nУ вас нет доступных групп.",
@@ -661,6 +698,7 @@ def show_chat_selection(chat_id, message_id, user_id, page=0):
         mode = get_user(user_id)[7] if len(get_user(user_id)) > 7 else 'all'
         mode_text = "📨 Во все чаты" if mode == 'all' else "📋 Выбранные чаты"
         kb.add(InlineKeyboardButton(f"🔄 Режим: {mode_text}", callback_data="toggle_send_mode"))
+        kb.add(InlineKeyboardButton("🔄 Обновить список", callback_data="refresh_chats"))
         kb.add(InlineKeyboardButton("✅ Готово", callback_data="main_menu"))
 
         text = (f"📋 <b>Чаты для рассылки</b>\n\n"
@@ -867,15 +905,13 @@ def cb_mentions(call):
     user_id = call.from_user.id
     show_mentions_settings(call.message.chat.id, call.message.message_id, user_id)
 
-@bot.callback_query_handler(func=lambda call: call.data == "mentions_toggle")
-def cb_mentions_toggle(call):
+@bot.callback_query_handler(func=lambda call: call.data.startswith("set_mention:"))
+def cb_set_mention(call):
     user_id = call.from_user.id
-    user = get_user(user_id)
-    new_val = 0 if (user[5] or 0) else 1
-    db_query("UPDATE users SET broadcast_mentions=? WHERE user_id=?", (new_val, user_id))
-    status = "включены" if new_val else "выключены"
+    mode = call.data.split(":", 1)[1]
+    db_query("UPDATE users SET mentions_mode=? WHERE user_id=?", (mode, user_id))
     try:
-        bot.answer_callback_query(call.id, f"Упоминания {status}!")
+        bot.answer_callback_query(call.id, f"Режим: {mode}")
     except:
         pass
     show_mentions_settings(call.message.chat.id, call.message.message_id, user_id)
@@ -902,17 +938,21 @@ def cb_toggle_chat(call):
     parts = call.data.split(":")
     chat_id_int = int(parts[1])
     page = int(parts[2])
+
+    # Имя берём из кэша, а не грузим все диалоги заново
+    name = "Чат"
     try:
         manager.start_client(user_id, get_user(user_id)[1])
-        me = manager.run_sync(user_id, manager.get_client(user_id).get_me(), timeout=30)
-        dialogs = manager.run_sync(user_id, fetch_all_group_dialogs(manager.get_client(user_id), me.id), timeout=600)
-        name = "Чат"
+        client = manager.get_client(user_id)
+        me = manager.run_sync(user_id, client.get_me(), timeout=30)
+        dialogs = manager.get_dialogs_cached(user_id, client, me.id)
         for d in dialogs:
             if d.id == chat_id_int:
                 name = (d.name or "Без названия").replace(":", " ")[:25]
                 break
     except:
-        name = "Чат"
+        pass
+
     is_now_selected = toggle_chat_selection(user_id, chat_id_int, name)
     status = "добавлен в список" if is_now_selected else "убран из списка"
     try:
@@ -930,6 +970,15 @@ def cb_chat_page(call):
     user_id = call.from_user.id
     _, page = call.data.split(":")
     show_chat_selection(call.message.chat.id, call.message.message_id, user_id, page=int(page))
+
+@bot.callback_query_handler(func=lambda call: call.data == "refresh_chats")
+def cb_refresh_chats(call):
+    try:
+        bot.answer_callback_query(call.id, "🔄 Обновляем список...")
+    except:
+        pass
+    manager.invalidate_dialogs_cache(call.from_user.id)
+    show_chat_selection(call.message.chat.id, call.message.message_id, call.from_user.id, page=0, force_refresh=True)
 
 @bot.callback_query_handler(func=lambda call: call.data == "toggle_send_mode")
 def cb_toggle_send_mode(call):
@@ -958,7 +1007,7 @@ def cb_broadcast_start(call):
     user = get_user(user_id)
     text = user[3]
     interval = user[4] or 1.0
-    mentions = user[5] or 0
+    mentions_mode = user[8] if len(user) > 8 else 'none'
     send_mode = user[7] if len(user) > 7 else 'all'
 
     if not text:
@@ -984,8 +1033,17 @@ def cb_broadcast_start(call):
         bot.answer_callback_query(call.id, "▶️ Рассылка запущена!")
     except:
         pass
+
+    mode_labels = {
+        'none': '❌ Выключены',
+        'hidden_10': '👻 Скрытые — 10 чел',
+        'hidden_all': '👻 Скрытые — все (до 200)',
+        'usernames_10': '👤 Юзернеймы — 10 чел',
+        'usernames_all': '👤 Юзернеймы — все (до 200)',
+    }
+    mentions_str = mode_labels.get(mentions_mode, '❌ Выключены')
     mode_str = "📨 Во все чаты" if send_mode == 'all' else f"📋 Выбранные чаты ({len(get_selected_chats(user_id))})"
-    mentions_str = "✅ Включены" if mentions else "❌ Выключены"
+
     safe_edit_message_text(f"▶️ <b>Рассылка запущена</b>\n\n⏱ Интервал: {interval} сек.\n👥 Упоминания: {mentions_str}\n📋 Режим: {mode_str}\n\n⏳ Ожидание первых результатов...", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=stop_keyboard())
     db_query("UPDATE users SET is_running=1 WHERE user_id=?", (user_id,))
     threading.Thread(target=broadcast_worker, args=(user_id, call.message.chat.id, call.message.message_id), daemon=True).start()
@@ -1008,7 +1066,7 @@ def broadcast_worker(user_id, chat_id, message_id):
     user = get_user(user_id)
     text = user[3] or ""
     interval = user[4] or 1.0
-    mentions = user[5] or 0
+    mentions_mode = user[8] if len(user) > 8 else 'none'
     send_mode = user[7] if len(user) > 7 else 'all'
 
     manager.start_client(user_id, user[1])
@@ -1056,14 +1114,28 @@ def broadcast_worker(user_id, chat_id, message_id):
             entity = dialog.entity
             msg_text = text + FOOTER_TEXT
 
-            if mentions and hasattr(entity, 'id'):
+            if mentions_mode != 'none' and hasattr(entity, 'id'):
                 try:
-                    participants = manager.run_sync(user_id, client.get_participants(entity, limit=10), timeout=15)
-                    tags = []
-                    for p in participants:
-                        tags.append(f'<a href="tg://user?id={p.id}">\u200b</a>')
-                    if tags:
-                        msg_text = text + "\n\n" + "".join(tags[:10]) + FOOTER_TEXT
+                    limit = 10
+                    if 'all' in mentions_mode:
+                        limit = 200
+                    participants = manager.run_sync(user_id, client.get_participants(entity, limit=limit), timeout=30)
+
+                    if 'hidden' in mentions_mode:
+                        tags = [f'<a href="tg://user?id={p.id}">\u200b</a>' for p in participants if p.id != me.id]
+                        if tags:
+                            msg_text = text + "\n\n" + "".join(tags) + FOOTER_TEXT
+                    elif 'usernames' in mentions_mode:
+                        tags = []
+                        for p in participants:
+                            if p.id == me.id:
+                                continue
+                            if p.username:
+                                tags.append(f"@{p.username}")
+                            else:
+                                tags.append(f'<a href="tg://user?id={p.id}">\u200b</a>')
+                        if tags:
+                            msg_text = text + "\n\n" + " ".join(tags) + FOOTER_TEXT
                 except Exception:
                     pass
 

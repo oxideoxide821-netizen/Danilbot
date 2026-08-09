@@ -28,6 +28,13 @@ API_HASH = "ecdc945d831f24eee69eae668c6c4ad1"
 DB_PATH = "broadcast_bot.db"
 FOOTER_TEXT = "\n\n— Рассылка с помощью бота @Rasslink_bot"
 
+# ЗАМЕНИТЕ на свою прямую ссылку на GIF (например с imgur, tenor, giphy)
+MENU_IMAGE_URL = "https://i.postimg.cc/Tw96Nv0Q/IMG-20260809-114308-926.jpg"
+AUTH_IMAGE_URL = "https://i.postimg.cc/Vsxx96z6/IMG-20260809-115038-599.jpg"
+# ЗАМЕНИТЕ на свои ссылки после генерации:
+SETTINGS_IMAGE_URL = "https://i.postimg.cc/bwWkrKQ1/IMG-20260809-115817-666.jpg"
+ACCOUNTS_IMAGE_URL = "https://i.postimg.cc/651GbD1W/IMG-20260809-115919-061.jpg"
+
 user_states = {}
 chat_filters = {}
 
@@ -723,6 +730,72 @@ def show_chat_selection(chat_id, message_id, user_id, page=0, force_refresh=Fals
             except:
                 pass
 
+
+# ================== MENU WITH GIF ==================
+def send_menu_message(chat_id, text, reply_markup, reply_to_message_id=None):
+    """Отправляет меню с изображением (фото сверху, текст под ним)."""
+    try:
+        return bot.send_photo(
+            chat_id,
+            photo=MENU_IMAGE_URL,
+            caption=text,
+            parse_mode="HTML",
+            reply_markup=reply_markup,
+            reply_to_message_id=reply_to_message_id
+        )
+    except Exception as e:
+        # Fallback: если картинка не загрузилась — отправляем обычное текстовое сообщение
+        return bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=reply_markup, reply_to_message_id=reply_to_message_id)
+
+def send_auth_message(chat_id, text, reply_markup=None):
+    """Отправляет сообщение авторизации с картинкой (фото сверху, текст под ним)."""
+    try:
+        return bot.send_photo(
+            chat_id,
+            photo=AUTH_IMAGE_URL,
+            caption=text,
+            parse_mode="HTML",
+            reply_markup=reply_markup
+        )
+    except Exception:
+        return bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=reply_markup)
+
+def send_settings_message(chat_id, text, reply_markup=None):
+    """Отправляет сообщение настроек с картинкой."""
+    try:
+        return bot.send_photo(
+            chat_id,
+            photo=SETTINGS_IMAGE_URL,
+            caption=text,
+            parse_mode="HTML",
+            reply_markup=reply_markup
+        )
+    except Exception:
+        return bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=reply_markup)
+
+def send_accounts_message(chat_id, text, reply_markup=None):
+    """Отправляет сообщение аккаунтов с картинкой."""
+    try:
+        return bot.send_photo(
+            chat_id,
+            photo=ACCOUNTS_IMAGE_URL,
+            caption=text,
+            parse_mode="HTML",
+            reply_markup=reply_markup
+        )
+    except Exception:
+        return bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=reply_markup)
+
+def return_to_main_menu(chat_id, message_id, user_id):
+    """Удаляет старое сообщение и отправляет меню с GIF."""
+    try:
+        bot.delete_message(chat_id, message_id)
+    except:
+        pass
+    ha = has_accounts(user_id)
+    text = "📢 <b>Broadcast Bot — Главное меню</b>\n\n" + ("✅ Аккаунты подключены.\n📨 Настройте рассылку." if ha else "🔐 Добавьте аккаунт для начала работы.")
+    send_menu_message(chat_id, text, main_menu_keyboard(ha))
+
 # ================== HANDLERS ==================
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
@@ -731,7 +804,8 @@ def cmd_start(message):
     user_states.pop(user_id, None)
     chat_filters.pop(user_id, None)
     ha = has_accounts(user_id)
-    bot.send_message(user_id, "📢 <b>Broadcast Bot</b>\n\n" + ("✅ У вас есть подключённые аккаунты.\n📨 Настройте параметры и запустите рассылку." if ha else "👋 Добро пожаловать!\n\n🔐 Добавьте хотя бы один аккаунт, чтобы начать."), reply_markup=main_menu_keyboard(ha))
+    text = "📢 <b>Broadcast Bot</b>\n\n" + ("✅ У вас есть подключённые аккаунты.\n📨 Настройте параметры и запустите рассылку." if ha else "👋 Добро пожаловать!\n\n🔐 Добавьте хотя бы один аккаунт, чтобы начать.")
+    send_menu_message(user_id, text, main_menu_keyboard(ha))
 
 @bot.callback_query_handler(func=lambda call: call.data == "main_menu")
 def cb_main_menu(call):
@@ -739,8 +813,7 @@ def cb_main_menu(call):
     except: pass
     user_id = call.from_user.id
     user_states.pop(user_id, None)
-    ha = has_accounts(user_id)
-    safe_edit_message_text("📢 <b>Broadcast Bot — Главное меню</b>\n\n" + ("✅ Аккаунты подключены.\n📨 Настройте рассылку." if ha else "🔐 Добавьте аккаунт для начала работы."), chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=main_menu_keyboard(ha))
+    return_to_main_menu(call.message.chat.id, call.message.message_id, user_id)
 
 # ---------- AUTH ----------
 @bot.callback_query_handler(func=lambda call: call.data == "auth_start")
@@ -838,11 +911,15 @@ def cb_my_accounts(call):
     except: pass
     user_id = call.from_user.id
     user_states.pop(user_id, None)
+    try:
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    except:
+        pass
     accounts = get_accounts(user_id)
     if not accounts:
-        safe_edit_message_text("👤 <b>Мои аккаунты</b>\n\nУ вас пока нет добавленных аккаунтов.\n\nДобавьте первый аккаунт:", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=add_account_menu_keyboard())
+        send_accounts_message(call.message.chat.id, "👤 <b>Мои аккаунты</b>\n\nУ вас пока нет добавленных аккаунтов.\n\nДобавьте первый аккаунт:", add_account_menu_keyboard())
     else:
-        safe_edit_message_text("👤 <b>Мои аккаунты</b>\n\n✅ — активный аккаунт.\nНажмите на аккаунт, чтобы сделать его активным.", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=accounts_keyboard(user_id))
+        send_accounts_message(call.message.chat.id, "👤 <b>Мои аккаунты</b>\n\n✅ — активный аккаунт.\nНажмите на аккаунт, чтобы сделать его активным.", accounts_keyboard(user_id))
 
 @bot.callback_query_handler(func=lambda call: call.data == "add_account_menu")
 def cb_add_account_menu(call):
@@ -907,7 +984,31 @@ def cb_broadcast_settings(call):
     except: pass
     user_id = call.from_user.id
     user_states.pop(user_id, None)
-    show_broadcast_settings(call.message.chat.id, call.message.message_id, user_id)
+    try:
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    except:
+        pass
+    user = get_user(user_id)
+    text = user[1] or "(не задано)"
+    interval = user[2] or 1.0
+    mode = user[3] if len(user) > 3 else 'none'
+    count = user[4] if len(user) > 4 else 10
+    send_mode = user[5] if len(user) > 5 else 'all'
+    mode_labels = {
+        'none': '❌ Выключены',
+        'hidden': f'👻 Скрытые — {count} чел',
+        'usernames': f'👤 Юзернеймы — {count} чел',
+    }
+    mentions_status = mode_labels.get(mode, '❌ Выключены')
+    mode_status = "📨 Во все чаты" if send_mode == 'all' else "📋 Выбранные"
+    safe_text = html.escape(text[:500])
+    txt = (f"📨 <b>Настройки рассылки</b>\n\n"
+           f"📝 <b>Текст:</b>\n<code>{safe_text}</code>{'...' if len(text) > 500 else ''}\n\n"
+           f"⏱ <b>Интервал:</b> {interval} сек.\n"
+           f"👥 <b>Упоминания:</b> {mentions_status}\n"
+           f"📋 <b>Режим:</b> {mode_status}\n\n"
+           f"Выберите параметр:")
+    send_settings_message(call.message.chat.id, txt, broadcast_settings_keyboard())
 
 @bot.callback_query_handler(func=lambda call: call.data == "set_text")
 def cb_set_text(call):
@@ -1234,4 +1335,3 @@ if __name__ == "__main__":
     init_db()
     print("Bot started...")
     bot.infinity_polling()
-

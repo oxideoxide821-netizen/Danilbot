@@ -39,16 +39,32 @@ user_states = {}
 chat_filters = {}
 
 # ================== SAFE EDIT ==================
-def safe_edit_message_text(text, chat_id, message_id, reply_markup=None, parse_mode="HTML", **kwargs):
+def safe_edit_message(text, chat_id, message_id, reply_markup=None, parse_mode="HTML", **kwargs):
     try:
         return bot.edit_message_text(text, chat_id=chat_id, message_id=message_id, reply_markup=reply_markup, parse_mode=parse_mode, **kwargs)
     except ApiTelegramException as e:
-        if "message is not modified" in str(e).lower():
+        err = str(e).lower()
+        if "message is not modified" in err:
             return None
+        if "there is no text in the message to edit" in err:
+            try:
+                return bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption=text, reply_markup=reply_markup, **kwargs)
+            except ApiTelegramException as e2:
+                if "message is not modified" in str(e2).lower():
+                    return None
+                raise
         raise
     except Exception as e:
-        if "message is not modified" in str(e).lower():
+        err = str(e).lower()
+        if "message is not modified" in err:
             return None
+        if "there is no text in the message to edit" in err:
+            try:
+                return bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption=text, reply_markup=reply_markup, **kwargs)
+            except Exception as e2:
+                if "message is not modified" in str(e2).lower():
+                    return None
+                raise
         raise
 
 def safe_edit_message_caption(caption, chat_id, message_id, reply_markup=None, **kwargs):
@@ -636,7 +652,7 @@ def show_broadcast_settings(chat_id, message_id, user_id):
            f"👥 <b>Упоминания:</b> {mentions_status}\n"
            f"📋 <b>Режим:</b> {mode_status}\n\n"
            f"Выберите параметр:")
-    safe_edit_message_text(txt, chat_id=chat_id, message_id=message_id, reply_markup=broadcast_settings_keyboard())
+    safe_edit_message(txt, chat_id=chat_id, message_id=message_id, reply_markup=broadcast_settings_keyboard())
 
 def show_mentions_settings(chat_id, message_id, user_id):
     user = get_user(user_id)
@@ -659,20 +675,20 @@ def show_mentions_settings(chat_id, message_id, user_id):
         kb.add(InlineKeyboardButton(label, callback_data=f"set_mention:{key}"))
     kb.add(InlineKeyboardButton(f"🔢 Изменить количество ({count})", callback_data="set_mentions_count"))
     kb.add(InlineKeyboardButton("◀️ Вернуться в главное меню", callback_data="main_menu"))
-    safe_edit_message_text(txt, chat_id=chat_id, message_id=message_id, reply_markup=kb)
+    safe_edit_message(txt, chat_id=chat_id, message_id=message_id, reply_markup=kb)
 
 def show_chat_selection(chat_id, message_id, user_id, page=0, force_refresh=False):
     try:
         acc = get_active_account(user_id)
         if not acc:
-            safe_edit_message_text("❌ <b>Нет активного аккаунта</b>\n\nВыберите или добавьте аккаунт в разделе 👤 Мои аккаунты.", chat_id=chat_id, message_id=message_id, reply_markup=back_keyboard("my_accounts"))
+            safe_edit_message("❌ <b>Нет активного аккаунта</b>\n\nВыберите или добавьте аккаунт в разделе 👤 Мои аккаунты.", chat_id=chat_id, message_id=message_id, reply_markup=back_keyboard("my_accounts"))
             return
         account_id = acc[0]
         session = acc[2]
         manager.start_client(account_id, session)
         client = manager.get_client(account_id)
         if not client:
-            safe_edit_message_text("❌ <b>Не удалось подключиться к аккаунту</b>\n\nПопробуйте выбрать другой аккаунт.", chat_id=chat_id, message_id=message_id, reply_markup=back_keyboard("my_accounts"))
+            safe_edit_message("❌ <b>Не удалось подключиться к аккаунту</b>\n\nПопробуйте выбрать другой аккаунт.", chat_id=chat_id, message_id=message_id, reply_markup=back_keyboard("my_accounts"))
             return
         me = manager.run_sync(account_id, client.get_me(), timeout=30)
         dialogs = manager.get_dialogs_cached(account_id, client, me.id, force_refresh=force_refresh)
@@ -682,7 +698,7 @@ def show_chat_selection(chat_id, message_id, user_id, page=0, force_refresh=Fals
         if not dialogs:
             text = "📋 <b>Чаты для рассылки</b>\n\nНет доступных групп"
             text += f" по фильтру «<code>{filt}</code>»." if filt else "."
-            safe_edit_message_text(text, chat_id=chat_id, message_id=message_id, reply_markup=back_keyboard("main_menu"))
+            safe_edit_message(text, chat_id=chat_id, message_id=message_id, reply_markup=back_keyboard("main_menu"))
             return
         selected = {row[0] for row in get_selected_chats(user_id, account_id)}
         per_page = 10
@@ -720,10 +736,10 @@ def show_chat_selection(chat_id, message_id, user_id, page=0, force_refresh=Fals
         if filt:
             text += f"\n🔍 Фильтр: <code>{filt}</code>"
         text += "\n\nНажмите на чат, чтобы выбрать или убрать его из списка."
-        safe_edit_message_text(text, chat_id=chat_id, message_id=message_id, reply_markup=kb)
+        safe_edit_message(text, chat_id=chat_id, message_id=message_id, reply_markup=kb)
     except Exception as e:
         try:
-            safe_edit_message_text(f"❌ <b>Ошибка загрузки чатов</b>\n\n{str(e)[:200]}", chat_id=chat_id, message_id=message_id, reply_markup=back_keyboard("main_menu"))
+            safe_edit_message(f"❌ <b>Ошибка загрузки чатов</b>\n\n{str(e)[:200]}", chat_id=chat_id, message_id=message_id, reply_markup=back_keyboard("main_menu"))
         except:
             try:
                 bot.send_message(chat_id, f"❌ <b>Ошибка загрузки чатов</b>\n\n{str(e)[:200]}", reply_markup=back_keyboard("main_menu"))
@@ -877,7 +893,7 @@ def cb_auth_cancel(call):
         user_states.pop(user_id, None)
         ha = has_accounts(user_id)
         try:
-            safe_edit_message_text("❌ <b>Авторизация отменена</b>\n\nВы можете начать заново в любое время.", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=main_menu_keyboard(ha))
+            safe_edit_message("❌ <b>Авторизация отменена</b>\n\nВы можете начать заново в любое время.", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=main_menu_keyboard(ha))
         except:
             bot.send_message(call.message.chat.id, "❌ <b>Авторизация отменена</b>\n\nВы можете начать заново в любое время.", reply_markup=main_menu_keyboard(ha))
     else:
@@ -925,7 +941,7 @@ def cb_my_accounts(call):
 def cb_add_account_menu(call):
     try: bot.answer_callback_query(call.id)
     except: pass
-    safe_edit_message_text("➕ <b>Добавить аккаунт</b>\n\nВыберите способ авторизации:", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=add_account_menu_keyboard())
+    safe_edit_message("➕ <b>Добавить аккаунт</b>\n\nВыберите способ авторизации:", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=add_account_menu_keyboard())
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("select_account:"))
 def cb_select_account(call):
@@ -935,7 +951,7 @@ def cb_select_account(call):
     account_id = int(call.data.split(":")[1])
     set_active_account(user_id, account_id)
     manager.invalidate_dialogs_cache(account_id)
-    safe_edit_message_text("👤 <b>Мои аккаунты</b>\n\n✅ Активный аккаунт изменён.", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=accounts_keyboard(user_id))
+    safe_edit_message("👤 <b>Мои аккаунты</b>\n\n✅ Активный аккаунт изменён.", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=accounts_keyboard(user_id))
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("confirm_delete_account:"))
 def cb_confirm_delete_account(call):
@@ -944,11 +960,11 @@ def cb_confirm_delete_account(call):
     account_id = int(call.data.split(":")[1])
     acc = get_account(account_id)
     if not acc:
-        safe_edit_message_text("❌ Аккаунт не найден.", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=accounts_keyboard(call.from_user.id))
+        safe_edit_message("❌ Аккаунт не найден.", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=accounts_keyboard(call.from_user.id))
         return
     name = f"{acc[4]} {acc[5]}".strip() or "Аккаунт"
     phone = acc[3] or "без номера"
-    safe_edit_message_text(f"⚠️ <b>Удаление аккаунта</b>\n\n{name} ({phone})\n\nВы уверены, что хотите удалить этот аккаунт?\nВсе связанные настройки чатов будут удалены.", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=confirm_delete_keyboard(account_id))
+    safe_edit_message(f"⚠️ <b>Удаление аккаунта</b>\n\n{name} ({phone})\n\nВы уверены, что хотите удалить этот аккаунт?\nВсе связанные настройки чатов будут удалены.", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=confirm_delete_keyboard(account_id))
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("delete_account:"))
 def cb_delete_account(call):
@@ -956,7 +972,7 @@ def cb_delete_account(call):
     except: pass
     account_id = int(call.data.split(":")[1])
     delete_account(account_id)
-    safe_edit_message_text("🗑 <b>Аккаунт удалён</b>\n\nВозвращаемся к списку...", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=accounts_keyboard(call.from_user.id))
+    safe_edit_message("🗑 <b>Аккаунт удалён</b>\n\nВозвращаемся к списку...", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=accounts_keyboard(call.from_user.id))
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("account_info:"))
 def cb_account_info(call):
@@ -965,7 +981,7 @@ def cb_account_info(call):
     account_id = int(call.data.split(":")[1])
     acc = get_account(account_id)
     if not acc:
-        safe_edit_message_text("❌ Аккаунт не найден.", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=accounts_keyboard(call.from_user.id))
+        safe_edit_message("❌ Аккаунт не найден.", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=accounts_keyboard(call.from_user.id))
         return
     name = f"{acc[4]} {acc[5]}".strip() or "Неизвестно"
     phone = acc[3] or "не указан"
@@ -975,7 +991,7 @@ def cb_account_info(call):
            f"📱 Телефон: <code>{phone}</code>\n"
            f"🆔 ID в базе: <code>{acc[0]}</code>\n"
            f"📅 Добавлен: {created}")
-    safe_edit_message_text(txt, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=back_keyboard("my_accounts"))
+    safe_edit_message(txt, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=back_keyboard("my_accounts"))
 
 # ---------- BROADCAST SETTINGS ----------
 @bot.callback_query_handler(func=lambda call: call.data == "broadcast_settings")
@@ -1016,7 +1032,7 @@ def cb_set_text(call):
     except: pass
     user_id = call.from_user.id
     user_states[user_id] = "waiting_text"
-    safe_edit_message_text("📝 <b>Изменение текста рассылки</b>\n\nВведите новый текст для рассылки.\n\n💡 Поддерживается HTML-разметка:\n&lt;b&gt;жирный&lt;/b&gt;, &lt;i&gt;курсив&lt;/i&gt;, &lt;code&gt;код&lt;/code&gt;\n\nОтправьте текст в следующем сообщении:", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=back_keyboard("broadcast_settings"))
+    safe_edit_message("📝 <b>Изменение текста рассылки</b>\n\nВведите новый текст для рассылки.\n\n💡 Поддерживается HTML-разметка:\n&lt;b&gt;жирный&lt;/b&gt;, &lt;i&gt;курсив&lt;/i&gt;, &lt;code&gt;код&lt;/code&gt;\n\nОтправьте текст в следующем сообщении:", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=back_keyboard("broadcast_settings"))
 
 @bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == "waiting_text")
 def handle_text(message):
@@ -1032,7 +1048,7 @@ def cb_set_interval(call):
     except: pass
     user_id = call.from_user.id
     user_states[user_id] = "waiting_interval"
-    safe_edit_message_text("⏱ <b>Изменение интервала</b>\n\nВведите интервал между отправками (в секундах).\n\n💡 Примеры: <code>1.5</code>, <code>3</code>, <code>0.5</code>.\n\n⚠️ Рекомендуется: 1–3 сек.", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=back_keyboard("broadcast_settings"))
+    safe_edit_message("⏱ <b>Изменение интервала</b>\n\nВведите интервал между отправками (в секундах).\n\n💡 Примеры: <code>1.5</code>, <code>3</code>, <code>0.5</code>.\n\n⚠️ Рекомендуется: 1–3 сек.", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=back_keyboard("broadcast_settings"))
 
 @bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == "waiting_interval")
 def handle_interval(message):
@@ -1070,7 +1086,7 @@ def cb_set_mentions_count(call):
     except: pass
     user_id = call.from_user.id
     user_states[user_id] = "waiting_mentions_count"
-    safe_edit_message_text("🔢 <b>Количество упоминаемых</b>\n\nВведите число от 1 до 200:", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=back_keyboard("mentions_settings"))
+    safe_edit_message("🔢 <b>Количество упоминаемых</b>\n\nВведите число от 1 до 200:", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=back_keyboard("mentions_settings"))
 
 @bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == "waiting_mentions_count")
 def handle_mentions_count(message):
@@ -1154,7 +1170,7 @@ def cb_chat_filter(call):
     except: pass
     user_id = call.from_user.id
     user_states[user_id] = "waiting_chat_filter"
-    safe_edit_message_text("🔍 <b>Фильтр по названию</b>\n\nВведите часть названия чата:", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=back_keyboard("select_chats"))
+    safe_edit_message("🔍 <b>Фильтр по названию</b>\n\nВведите часть названия чата:", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=back_keyboard("select_chats"))
 
 @bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == "waiting_chat_filter")
 def handle_chat_filter(message):
@@ -1225,7 +1241,7 @@ def cb_broadcast_start(call):
     }
     mentions_str = mode_labels.get(mentions_mode, '❌ Выключены')
     mode_str = "📨 Во все чаты" if send_mode == 'all' else f"📋 Выбранные ({len(get_selected_chats(user_id, account_id))})"
-    safe_edit_message_text(f"▶️ <b>Рассылка запущена</b>\n\n⏱ Интервал: {interval} сек.\n👥 Упоминания: {mentions_str}\n📋 Режим: {mode_str}\n\n⏳ Ожидание...", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=stop_keyboard())
+    safe_edit_message(f"▶️ <b>Рассылка запущена</b>\n\n⏱ Интервал: {interval} сек.\n👥 Упоминания: {mentions_str}\n📋 Режим: {mode_str}\n\n⏳ Ожидание...", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=stop_keyboard())
     db_query("UPDATE users SET is_running=1 WHERE user_id=?", (user_id,))
     threading.Thread(target=broadcast_worker, args=(user_id, account_id, call.message.chat.id, call.message.message_id), daemon=True).start()
 
@@ -1237,7 +1253,7 @@ def cb_broadcast_stop(call):
     db_query("UPDATE users SET is_running=0 WHERE user_id=?", (user_id,))
     user_states.pop(user_id, None)
     try:
-        safe_edit_message_text("⏹ <b>Рассылка остановлена</b>\n\nОжидайте завершения текущей операции...", chat_id=call.message.chat.id, message_id=call.message.message_id)
+        safe_edit_message("⏹ <b>Рассылка остановлена</b>\n\nОжидайте завершения текущей операции...", chat_id=call.message.chat.id, message_id=call.message.message_id)
     except: pass
 
 def broadcast_worker(user_id, account_id, chat_id, message_id):
@@ -1249,13 +1265,13 @@ def broadcast_worker(user_id, account_id, chat_id, message_id):
     send_mode = user[5] if len(user) > 5 else 'all'
     acc = get_account(account_id)
     if not acc:
-        safe_edit_message_text("❌ <b>Аккаунт не найден</b>", chat_id=chat_id, message_id=message_id)
+        safe_edit_message("❌ <b>Аккаунт не найден</b>", chat_id=chat_id, message_id=message_id)
         db_query("UPDATE users SET is_running=0 WHERE user_id=?", (user_id,))
         return
     manager.start_client(account_id, acc[2])
     client = manager.get_client(account_id)
     if not client:
-        safe_edit_message_text("❌ <b>Клиент не найден</b>", chat_id=chat_id, message_id=message_id)
+        safe_edit_message("❌ <b>Клиент не найден</b>", chat_id=chat_id, message_id=message_id)
         db_query("UPDATE users SET is_running=0 WHERE user_id=?", (user_id,))
         return
     try:
@@ -1266,7 +1282,7 @@ def broadcast_worker(user_id, account_id, chat_id, message_id):
             selected_ids = {row[0] for row in selected}
             dialogs = [d for d in dialogs if d.id in selected_ids]
         if not dialogs:
-            safe_edit_message_text("❌ <b>Нет чатов для рассылки</b>", chat_id=chat_id, message_id=message_id, reply_markup=main_menu_keyboard(True))
+            safe_edit_message("❌ <b>Нет чатов для рассылки</b>", chat_id=chat_id, message_id=message_id, reply_markup=main_menu_keyboard(True))
             db_query("UPDATE users SET is_running=0 WHERE user_id=?", (user_id,))
             return
         total = len(dialogs)
@@ -1276,7 +1292,7 @@ def broadcast_worker(user_id, account_id, chat_id, message_id):
             user = get_user(user_id)
             if not user[6]:
                 remaining = total - idx
-                safe_edit_message_text(f"⏹ <b>Остановлено</b>\n\n📋 Всего: {total}\n✅ Отправлено: {sent}\n❌ Ошибок: {failed}\n📋 Осталось: {remaining}", chat_id=chat_id, message_id=message_id, reply_markup=main_menu_keyboard(True))
+                safe_edit_message(f"⏹ <b>Остановлено</b>\n\n📋 Всего: {total}\n✅ Отправлено: {sent}\n❌ Ошибок: {failed}\n📋 Осталось: {remaining}", chat_id=chat_id, message_id=message_id, reply_markup=main_menu_keyboard(True))
                 db_query("UPDATE users SET is_running=0 WHERE user_id=?", (user_id,))
                 return
             entity = dialog.entity
@@ -1320,18 +1336,19 @@ def broadcast_worker(user_id, account_id, chat_id, message_id):
                 remaining = total - idx - 1
                 try:
                     status_text = f"📊 <b>Статус</b>\n\n📋 Всего: {total}\n✅ Отправлено: {sent}\n❌ Ошибок: {failed}\n📋 Осталось: {remaining}\n⏳ {idx+1}/{total}"
-                    safe_edit_message_text(status_text, chat_id=chat_id, message_id=message_id, reply_markup=stop_keyboard())
+                    safe_edit_message(status_text, chat_id=chat_id, message_id=message_id, reply_markup=stop_keyboard())
                 except: pass
             time.sleep(interval)
         db_query("UPDATE users SET is_running=0 WHERE user_id=?", (user_id,))
         final_text = f"✅ <b>Рассылка завершена</b>\n\n📋 Всего: {total}\n✅ Отправлено: {sent}\n❌ Ошибок: {failed}"
-        safe_edit_message_text(final_text, chat_id=chat_id, message_id=message_id, reply_markup=main_menu_keyboard(True))
+        safe_edit_message(final_text, chat_id=chat_id, message_id=message_id, reply_markup=main_menu_keyboard(True))
     except Exception as e:
         db_query("UPDATE users SET is_running=0 WHERE user_id=?", (user_id,))
-        safe_edit_message_text(f"❌ <b>Ошибка</b>\n\n{str(e)}", chat_id=chat_id, message_id=message_id, reply_markup=main_menu_keyboard(True))
+        safe_edit_message(f"❌ <b>Ошибка</b>\n\n{str(e)}", chat_id=chat_id, message_id=message_id, reply_markup=main_menu_keyboard(True))
 
 # ================== MAIN ==================
 if __name__ == "__main__":
     init_db()
     print("Bot started...")
     bot.infinity_polling()
+

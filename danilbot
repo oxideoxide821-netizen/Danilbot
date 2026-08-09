@@ -5,6 +5,8 @@ import threading
 import time
 import io
 
+_db_lock = threading.Lock()
+
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from telebot.apihelper import ApiTelegramException
@@ -23,7 +25,7 @@ BOT_TOKEN = "8422044486:AAFlxED5Er0BqUbLgI0bkSQBmtA9txaZ7Ow"
 API_ID = 36403406
 API_HASH = "ecdc945d831f24eee69eae668c6c4ad1"
 DB_PATH = "broadcast_bot.db"
-FOOTER_TEXT = "\n\n— rassыLka s PoMoщьQ bOta @Rasslink_bot"
+FOOTER_TEXT = "\n\n— Рассылка с помощью бота @Rasslink_bot"
 
 user_states = {}
 chat_filters = {}
@@ -55,8 +57,10 @@ def safe_edit_message_caption(caption, chat_id, message_id, reply_markup=None, *
 
 # ================== DATABASE ==================
 def init_db():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30.0)
     c = conn.cursor()
+    c.execute("PRAGMA journal_mode=WAL")
+    c.execute("PRAGMA synchronous=NORMAL")
     c.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -93,13 +97,19 @@ def init_db():
     conn.close()
 
 def db_query(query, params=(), fetchone=False):
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    c = conn.cursor()
-    c.execute(query, params)
-    conn.commit()
-    result = c.fetchone() if fetchone else c.fetchall()
-    conn.close()
-    return result
+    with _db_lock:
+        conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30.0)
+        try:
+            c = conn.cursor()
+            c.execute(query, params)
+            if query.strip().upper().startswith("SELECT"):
+                conn.commit()  # завершить транзакцию даже для SELECT
+            else:
+                conn.commit()
+            result = c.fetchone() if fetchone else c.fetchall()
+            return result
+        finally:
+            conn.close()
 
 # ================== TELETHON MANAGER ==================
 class TelethonManager:

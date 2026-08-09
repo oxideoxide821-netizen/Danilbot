@@ -4,6 +4,7 @@ import asyncio
 import threading
 import time
 import io
+import html
 
 _db_lock = threading.Lock()
 
@@ -621,8 +622,9 @@ def show_broadcast_settings(chat_id, message_id, user_id):
     }
     mentions_status = mode_labels.get(mode, '❌ Выключены')
     mode_status = "📨 Во все чаты" if send_mode == 'all' else "📋 Выбранные"
+    safe_text = html.escape(text[:500])
     txt = (f"📨 <b>Настройки рассылки</b>\n\n"
-           f"📝 <b>Текст:</b>\n<code>{text[:500]}</code>{'...' if len(text) > 500 else ''}\n\n"
+           f"📝 <b>Текст:</b>\n<code>{safe_text}</code>{'...' if len(text) > 500 else ''}\n\n"
            f"⏱ <b>Интервал:</b> {interval} сек.\n"
            f"👥 <b>Упоминания:</b> {mentions_status}\n"
            f"📋 <b>Режим:</b> {mode_status}\n\n"
@@ -1232,3 +1234,4 @@ if __name__ == "__main__":
     init_db()
     print("Bot started...")
     bot.infinity_polling()
+

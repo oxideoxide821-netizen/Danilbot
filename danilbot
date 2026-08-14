@@ -1,1245 +1,922 @@
-import os
-import sqlite3
-import asyncio
-import threading
-import time
-import io
-import html
-import random
-
-_db_lock = threading.Lock()
-
 import telebot
+import sqlite3
+import threading
+import random
+import time
+from telebot.apihelper import ApiException
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
-from telebot.apihelper import ApiTelegramException
-from telethon import TelegramClient
-from telethon.sessions import SQLiteSession
-from telethon.errors import FloodWaitError, SessionPasswordNeededError
-from telethon.tl.types import Chat, Channel
 
-try:
-    import qrcode
-    from PIL import Image
-    HAS_QR = True
-except ImportError:
-    HAS_QR = False
+# ==================== КОНФИГУРАЦИЯ ====================
+TOKEN = "8966965835:AAHqdyndKmvDlxt3YEy08unwnde-qatn9w0"
+ADMIN_ID = 8371345434  # Вставь свой Telegram ID
+DB_PATH = "travka_bot.db"
 
-BOT_TOKEN = "8422044486:AAFlxED5Er0BqUbLgI0bkSQBmtA9txaZ7Ow"
-API_ID = 36403406
-API_HASH = "ecdc945d831f24eee69eae668c6c4ad1"
-DB_PATH = "broadcast_bot.db"
-SESSIONS_DIR = "sessions"
-FOOTER_TEXT = "\n\n— Pas$ыlqа s pOmocbQ b#ta @Rasslink_bot"
+# Кэшируем username бота при запуске
+BOT_USERNAME = None
 
-MENU_IMAGE_URL = "https://i.postimg.cc/Tw96Nv0Q/IMG-20260809-114308-926.jpg"
-AUTH_IMAGE_URL = "https://i.postimg.cc/Vsxx96z6/IMG-20260809-115038-599.jpg"
-SETTINGS_IMAGE_URL = "https://i.postimg.cc/bwWkrKQ1/IMG-20260809-115817-666.jpg"
-ACCOUNTS_IMAGE_URL = "https://i.postimg.cc/651GbD1W/IMG-20260809-115919-061.jpg"
+def get_bot_username():
+    global BOT_USERNAME
+    if BOT_USERNAME is None:
+        try:
+            BOT_USERNAME = bot.get_me().username
+        except:
+            BOT_USERNAME = ""
+    return BOT_USERNAME
 
-os.makedirs(SESSIONS_DIR, exist_ok=True)
+# Защита от переполнения SQLite INTEGER (2^63 - 1)
+MAX_SAFE_INT = 9_223_372_036_854_775_807
 
-user_states = {}
-chat_filters = {}
+# Валидные поля (защита от SQL-инъекции)
+VALID_FIELDS = {"balance", "grass", "rare_grass", "legendary_grass", "joints",
+                "blunts", "golden_joints", "total_smoked", "total_high", "level",
+                "exp", "farm_power", "legendary_chance", "lopata", "seeds", "greenhouse",
+                "last_farm", "last_daily"}
 
-# ================== SAFE EDIT ==================
-def safe_edit_message(text, chat_id, message_id, reply_markup=None, parse_mode="HTML", **kwargs):
-    try:
-        return bot.edit_message_text(text, chat_id=chat_id, message_id=message_id, reply_markup=reply_markup, parse_mode=parse_mode, **kwargs)
-    except ApiTelegramException as e:
-        err = str(e).lower()
-        if "message is not modified" in err:
-            return None
-        if "there is no text in the message to edit" in err:
-            try:
-                return bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption=text, reply_markup=reply_markup, **kwargs)
-            except ApiTelegramException as e2:
-                if "message is not modified" in str(e2).lower():
-                    return None
-                raise
-        raise
-    except Exception as e:
-        err = str(e).lower()
-        if "message is not modified" in err:
-            return None
-        if "there is no text in the message to edit" in err:
-            try:
-                return bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption=text, reply_markup=reply_markup, **kwargs)
-            except Exception as e2:
-                if "message is not modified" in str(e2).lower():
-                    return None
-                raise
-        raise
+# Кулдауны (секунды)
+FARM_COOLDOWN = 300      # 5 минут
+DAILY_COOLDOWN = 86400   # 24 часа
 
-# ================== DATABASE ==================
+# Экономика
+PRICES = {
+    "grass": 10,
+    "rare_grass": 50,
+    "legendary_grass": 200,
+    "joint": 100,
+    "blunt": 300,
+    "golden_joint": 1000
+}
+
+# Фразы кайфа
+HIGH_PHRASES = [
+    "{name} закурил и почувствовал лёгкий кайф... +{amount} 🌬️",
+    "{name} вошёл в состояние нирваны... +{amount} ✨",
+    "{name} увидел смысл жизни в дыму... +{amount} 🌀",
+    "{name} растворился в облаках... +{amount} ☁️",
+    "{name} почувствовал, как время замедлилось... +{amount} ⏳",
+    "{name} достиг просветления через траву... +{amount} 🧘",
+    "{name} улетел в космос на облаке дыма... +{amount} 🚀",
+    "{name} нашёл ответы на все вопросы... +{amount} 📿",
+    "{name} расслабился так, что забыл своё имя... +{amount} 😵‍💫",
+    "{name} стал единым с природой... +{amount} 🌿",
+    "{name} почувствовал вкус радуги... +{amount} 🌈",
+    "{name} услышал шёпот вселенной... +{amount} 🌌",
+    "{name} обрёл внутренний покой... +{amount} 🕊️",
+    "{name} раскрыл третий глаз... +{amount} 👁️",
+    "{name} плавно утонул в диване... +{amount} 🛋️"
+]
+
+# Улучшения
+UPGRADES = {
+    "lopata": {"name": "🥄 Золотая лопата", "price": 1000, "bonus": 1, "type": "farm_power"},
+    "seeds": {"name": "🌱 Элитные семена", "price": 5000, "bonus": 5, "type": "legendary_chance"},
+    "greenhouse": {"name": "🏠 Теплица", "price": 25000, "bonus": 3, "type": "farm_power"}
+}
+
+# ==================== CALLBACK HELPERS (owner_id защита) ====================
+def cb(action, owner_id):
+    """Формирует callback_data с owner_id для защиты кнопок"""
+    return f"{action}_{owner_id}"
+
+def parse_cb(data):
+    """Парсит callback_data: возвращает (action, owner_id или None)"""
+    parts = data.rsplit("_", 1)
+    if len(parts) == 2 and parts[1].lstrip("-").isdigit():
+        return parts[0], int(parts[1])
+    return data, None
+
+# ==================== БАЗА ДАННЫХ ====================
+db_lock = threading.Lock()
+
 def init_db():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30.0)
-    c = conn.cursor()
-    c.execute("PRAGMA journal_mode=WAL")
-    c.execute("PRAGMA synchronous=NORMAL")
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            broadcast_text TEXT DEFAULT '',
-            broadcast_interval REAL DEFAULT 1.0,
-            mentions_mode TEXT DEFAULT 'none',
-            mentions_count INTEGER DEFAULT 10,
-            send_mode TEXT DEFAULT 'all',
-            is_running INTEGER DEFAULT 0,
-            active_account_id INTEGER DEFAULT NULL,
-            broadcast_duration_hours REAL DEFAULT 0,
-            messages_per_chat INTEGER DEFAULT 1
-        )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS accounts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            session_path TEXT,
-            phone TEXT,
-            first_name TEXT,
-            last_name TEXT,
-            created_at INTEGER DEFAULT 0
-        )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS selected_chats (
-            user_id INTEGER,
-            account_id INTEGER,
-            chat_id INTEGER,
-            chat_name TEXT,
-            PRIMARY KEY (user_id, account_id, chat_id)
-        )
-    """)
-    conn.commit()
-    conn.close()
+    with db_lock:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT DEFAULT '',
+                balance INTEGER DEFAULT 0,
+                grass INTEGER DEFAULT 0,
+                rare_grass INTEGER DEFAULT 0,
+                legendary_grass INTEGER DEFAULT 0,
+                joints INTEGER DEFAULT 0,
+                blunts INTEGER DEFAULT 0,
+                golden_joints INTEGER DEFAULT 0,
+                total_smoked INTEGER DEFAULT 0,
+                total_high INTEGER DEFAULT 0,
+                level INTEGER DEFAULT 1,
+                exp INTEGER DEFAULT 0,
+                farm_power INTEGER DEFAULT 1,
+                legendary_chance INTEGER DEFAULT 0,
+                last_farm INTEGER DEFAULT 0,
+                last_daily INTEGER DEFAULT 0,
+                lopata INTEGER DEFAULT 0,
+                seeds INTEGER DEFAULT 0,
+                greenhouse INTEGER DEFAULT 0
+            )
+        """)
+        conn.commit()
+        conn.close()
 
-def db_query(query, params=(), fetchone=False):
-    with _db_lock:
-        conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30.0)
-        try:
-            c = conn.cursor()
-            c.execute(query, params)
+def get_user(user_id, username=""):
+    with db_lock:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+        user = c.fetchone()
+        if not user:
+            c.execute("INSERT INTO users (user_id, username) VALUES (?, ?)", (user_id, username))
             conn.commit()
-            result = c.fetchone() if fetchone else c.fetchall()
-            return result
-        finally:
-            conn.close()
+            c.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+            user = c.fetchone()
+        elif username and user[1] != username:
+            c.execute("UPDATE users SET username = ? WHERE user_id = ?", (username, user_id))
+            conn.commit()
+        conn.close()
+    return user
 
-# ================== TELETHON MANAGER ==================
-class TelethonManager:
-    def __init__(self):
-        self.clients = {}
-        self.loops = {}
-        self.threads = {}
-        self.dialogs_cache = {}
-        self.dialogs_cache_ttl = 300
-
-    def _session_path(self, account_id):
-        return os.path.join(SESSIONS_DIR, f"account_{account_id}.session")
-
-    def _start_loop(self, account_id, session_path):
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        session = SQLiteSession(session_path)
-        client = TelegramClient(session, API_ID, API_HASH, loop=loop)
-        loop.run_until_complete(client.connect())
-        self.clients[account_id] = client
-        self.loops[account_id] = loop
-        loop.run_forever()
-
-    def start_client(self, account_id, session_path=None):
-        client = self.clients.get(account_id)
-        if client:
-            try:
-                authorized = self.run_sync(account_id, client.is_user_authorized(), timeout=15)
-                if authorized:
-                    return True
-            except Exception:
-                pass
-            self.disconnect(account_id)
-        if account_id in self.threads and self.threads[account_id].is_alive():
-            self.disconnect(account_id)
-        if session_path is None:
-            session_path = self._session_path(account_id)
-        t = threading.Thread(target=self._start_loop, args=(account_id, session_path), daemon=True)
-        t.start()
-        self.threads[account_id] = t
-        for _ in range(50):
-            if account_id in self.clients:
-                try:
-                    auth = self.run_sync(account_id, self.clients[account_id].is_user_authorized(), timeout=15)
-                    if auth:
-                        return True
-                except:
-                    pass
-            time.sleep(0.1)
-        return False
-
-    def get_client(self, account_id):
-        client = self.clients.get(account_id)
-        if not client:
-            return None
-        try:
-            authorized = self.run_sync(account_id, client.is_user_authorized(), timeout=10)
-            if authorized:
-                return client
-        except Exception:
-            pass
-        self.disconnect(account_id)
-        return None
-
-    def run_sync(self, account_id, coro, timeout=30):
-        loop = self.loops.get(account_id)
-        if not loop:
-            return None
-        future = asyncio.run_coroutine_threadsafe(coro, loop)
-        try:
-            return future.result(timeout=timeout)
-        except Exception as e:
-            raise e
-
-    def disconnect(self, account_id):
-        if account_id in self.clients:
-            try:
-                self.run_sync(account_id, self.clients[account_id].disconnect(), timeout=10)
-            except:
-                pass
-            del self.clients[account_id]
-        if account_id in self.loops:
-            try:
-                self.loops[account_id].stop()
-            except:
-                pass
-            del self.loops[account_id]
-        self.dialogs_cache.pop(account_id, None)
-
-    def get_dialogs_cached(self, account_id, client, me_id, force_refresh=False):
-        now = time.time()
-        if not force_refresh and account_id in self.dialogs_cache:
-            ts, dialogs = self.dialogs_cache[account_id]
-            if now - ts < self.dialogs_cache_ttl:
-                return dialogs
-        dialogs = self.run_sync(account_id, fetch_all_group_dialogs(client, me_id), timeout=600)
-        self.dialogs_cache[account_id] = (now, dialogs)
-        return dialogs
-
-    def invalidate_dialogs_cache(self, account_id):
-        self.dialogs_cache.pop(account_id, None)
-
-manager = TelethonManager()
-
-async def fetch_all_group_dialogs(client, me_id):
-    result = []
-    async for dialog in client.iter_dialogs():
-        if dialog.id == me_id:
-            continue
-        entity = dialog.entity
-        if entity is None:
-            continue
-        if isinstance(entity, Chat):
-            result.append(dialog)
-        elif isinstance(entity, Channel) and getattr(entity, 'megagroup', False):
-            result.append(dialog)
-    return result
-
-# ================== PHONE AUTH ==================
-class PhoneAuthManager:
-    def __init__(self):
-        self.pending = {}
-
-    def start_auth(self, user_id, chat_id, bot_instance):
-        if user_id in self.pending:
-            bot_instance.send_message(chat_id, "⏳ Авторизация уже идёт.")
-            return
-        self.pending[user_id] = {
-            'chat_id': chat_id, 'phone': None, 'client': None, 'loop': None,
-            'code_event': threading.Event(), 'code_value': None,
-            'password_event': threading.Event(), 'password_value': None,
-            'cancelled': False
-        }
-        security_text = (
-            "📱 <b>Авторизация по номеру</b>\n\n"
-            "Введите номер телефона в формате <code>+79991234567</code>:\n\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "🔒 <b>ПОЛНАЯ БЕЗОПАСНОСТЬ ВАШЕГО АККАУНТА:</b>\n"
-            "• ✅ Бот НЕ имеет доступа к вашим личным сообщениям\n"
-            "• ✅ Бот НЕ может читать ваши чаты и переписки\n"
-            "• ✅ Сессия хранится локально в файле на сервере бота\n"
-            "• ✅ Это стандартный официальный Telegram API\n"
-            "• ✅ Вы можете удалить сессию в любой момент через Telegram → Настройки → Устройства\n"
-            "• ✅ Мы НЕ запрашиваем и НЕ видим ваш пароль 2FA (если есть)\n"
-            "• ✅ Ваш аккаунт принадлежит только ВАМ\n\n"
-            "⚠️ <b>Важно:</b> сессия НЕ истекает через сутки — она работает постоянно, пока вы её не удалите вручную."
-        )
-        bot_instance.send_message(chat_id, security_text, reply_markup=cancel_auth_keyboard())
-        user_states[user_id] = 'phone_input'
-
-    def submit_phone(self, user_id, phone):
-        if user_id not in self.pending or self.pending[user_id].get('cancelled'):
-            return False
-        self.pending[user_id]['phone'] = phone
-        threading.Thread(target=self._auth_thread, args=(user_id,), daemon=True).start()
-        return True
-
-    def submit_code(self, user_id, code):
-        if user_id in self.pending and not self.pending[user_id].get('cancelled'):
-            self.pending[user_id]['code_value'] = code
-            self.pending[user_id]['code_event'].set()
-            return True
-        return False
-
-    def submit_password(self, user_id, password):
-        if user_id in self.pending and not self.pending[user_id].get('cancelled'):
-            self.pending[user_id]['password_value'] = password
-            self.pending[user_id]['password_event'].set()
-            return True
-        return False
-
-    def cancel(self, user_id):
-        if user_id in self.pending:
-            self.pending[user_id]['cancelled'] = True
-            self.pending[user_id]['code_event'].set()
-            self.pending[user_id]['password_event'].set()
-            p = self.pending[user_id]
-            if p.get('client') and p.get('loop'):
-                try:
-                    asyncio.run_coroutine_threadsafe(p['client'].disconnect(), p['loop']).result(timeout=5)
-                except:
-                    pass
-            del self.pending[user_id]
-            return True
-        return False
-
-    def _auth_thread(self, user_id):
-        p = self.pending[user_id]
-        phone = p['phone']
-        chat_id = p['chat_id']
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        temp_session_path = os.path.join(SESSIONS_DIR, f"temp_{user_id}_{int(time.time())}")
-        session = SQLiteSession(temp_session_path)
-        client = TelegramClient(session, API_ID, API_HASH, loop=loop)
-        p['client'] = client
-        p['loop'] = loop
-
-        async def do_auth():
-            try:
-                await client.connect()
-                await client.send_code_request(phone)
-                if p['cancelled']:
-                    return
-                bot.send_message(chat_id, f"✅ Код подтверждения отправлен!\n\n📱 Номер: <code>{phone}</code>\n\n━━━━━━━━━━━━━━━━━━━━\n⚠️ ВАЖНО\n✏️ Введите код так:\n• Поставьте точку внутри: 56.785\n\n🔒 Сессия сохраняется в локальном файле и НЕ истекает через сутки.", reply_markup=cancel_auth_keyboard())
-                user_states[user_id] = 'phone_code_input'
-                p['code_event'].wait()
-                if p['cancelled']:
-                    return
-                clean_code = p['code_value'].replace('.', '').replace(' ', '').replace('-', '')
-                try:
-                    await client.sign_in(phone, clean_code)
-                except SessionPasswordNeededError:
-                    bot.send_message(chat_id, "🔒 <b>Требуется пароль 2FA</b>\n\nВведите пароль от аккаунта:", reply_markup=cancel_auth_keyboard())
-                    user_states[user_id] = 'phone_2fa_input'
-                    p['password_event'].wait()
-                    if p['cancelled']:
-                        return
-                    await client.sign_in(password=p['password_value'])
-                if await client.is_user_authorized():
-                    me = await client.get_me()
-                    created_at = int(time.time())
-                    db_query("INSERT INTO accounts (user_id, session_path, phone, first_name, last_name, created_at) VALUES (?,?,?,?,?,?)",
-                             (user_id, temp_session_path, me.phone or phone, me.first_name or '', me.last_name or '', created_at))
-                    row = db_query("SELECT id FROM accounts WHERE user_id=? ORDER BY id DESC LIMIT 1", (user_id,), fetchone=True)
-                    account_id = row[0] if row else None
-                    # Rename session file to permanent name
-                    permanent_path = manager._session_path(account_id)
-                    try:
-                        await client.disconnect()
-                        if os.path.exists(temp_session_path):
-                            os.rename(temp_session_path, permanent_path)
-                        db_query("UPDATE accounts SET session_path=? WHERE id=?", (permanent_path, account_id))
-                    except Exception as e:
-                        print(f"Rename error: {e}")
-                        db_query("UPDATE accounts SET session_path=? WHERE id=?", (temp_session_path, account_id))
-
-                    existing = db_query("SELECT COUNT(*) FROM accounts WHERE user_id=?", (user_id,), fetchone=True)
-                    if existing and existing[0] == 1 and account_id:
-                        db_query("UPDATE users SET active_account_id=? WHERE user_id=?", (account_id, user_id))
-                    user_states.pop(user_id, None)
-                    name = me.first_name + (f" {me.last_name}" if me.last_name else "")
-                    bot.send_message(chat_id, f"✅ <b>Аккаунт добавлен!</b>\n\n👤 {name}\n📱 <code>{me.phone or phone}</code>\n\n🔒 Сессия сохранена в локальном файле.\n✅ Сессия НЕ истекает через сутки — работает постоянно.\n✅ Вы можете удалить сессию в любое время через Telegram → Настройки → Устройства.\n\nТеперь вы можете использовать его для рассылки.", reply_markup=main_menu_keyboard(True))
-                else:
-                    if not p['cancelled']:
-                        bot.send_message(chat_id, "❌ Авторизация не удалась.", reply_markup=main_menu_keyboard(has_accounts(user_id)))
-            except Exception as e:
-                if not p['cancelled']:
-                    bot.send_message(chat_id, f"❌ Ошибка: {str(e)}", reply_markup=main_menu_keyboard(has_accounts(user_id)))
-            finally:
-                try:
-                    await client.disconnect()
-                except:
-                    pass
-                if user_id in self.pending:
-                    del self.pending[user_id]
-
-        loop.run_until_complete(do_auth())
-
-phone_auth_manager = PhoneAuthManager()
-
-# ================== QR AUTH ==================
-class QRAuthManager:
-    def __init__(self):
-        self.pending = {}
-
-    def start_auth(self, user_id, chat_id, bot_instance):
-        if user_id in self.pending:
-            bot_instance.send_message(chat_id, "⏳ Авторизация уже идёт.")
-            return
-        if not HAS_QR:
-            bot_instance.send_message(chat_id, "❌ Установи: pip install qrcode[pil]")
-            return
-        self.pending[user_id] = {
-            'password_event': threading.Event(), 'password_value': None,
-            'email_event': threading.Event(), 'email_value': None,
-            'cancelled': False, 'needs_email': False
-        }
-
-        def auth_thread():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            temp_session_path = os.path.join(SESSIONS_DIR, f"temp_qr_{user_id}_{int(time.time())}")
-            session = SQLiteSession(temp_session_path)
-            client = TelegramClient(session, API_ID, API_HASH, loop=loop)
-
-            async def do_auth():
-                try:
-                    await client.connect()
-                    if await client.is_user_authorized():
-                        me = await client.get_me()
-                        created_at = int(time.time())
-                        db_query("INSERT INTO accounts (user_id, session_path, phone, first_name, last_name, created_at) VALUES (?,?,?,?,?,?)",
-                                 (user_id, temp_session_path, me.phone or '', me.first_name or '', me.last_name or '', created_at))
-                        row = db_query("SELECT id FROM accounts WHERE user_id=? ORDER BY id DESC LIMIT 1", (user_id,), fetchone=True)
-                        account_id = row[0] if row else None
-                        permanent_path = manager._session_path(account_id)
-                        try:
-                            await client.disconnect()
-                            if os.path.exists(temp_session_path):
-                                os.rename(temp_session_path, permanent_path)
-                            db_query("UPDATE accounts SET session_path=? WHERE id=?", (permanent_path, account_id))
-                        except:
-                            db_query("UPDATE accounts SET session_path=? WHERE id=?", (temp_session_path, account_id))
-                        existing = db_query("SELECT COUNT(*) FROM accounts WHERE user_id=?", (user_id,), fetchone=True)
-                        if existing and existing[0] == 1 and account_id:
-                            db_query("UPDATE users SET active_account_id=? WHERE user_id=?", (account_id, user_id))
-                        user_states.pop(user_id, None)
-                        name = me.first_name + (f" {me.last_name}" if me.last_name else "")
-                        bot_instance.send_message(chat_id, f"✅ <b>Аккаунт добавлен!</b>\n\n👤 {name}\n📱 <code>{me.phone or 'не указан'}</code>\n\n🔒 Сессия сохранена в локальном файле.\n✅ Сессия НЕ истекает через сутки — работает постоянно.\n✅ Вы можете удалить сессию в любое время через Telegram → Настройки → Устройства.\n\nТеперь вы можете использовать его для рассылки.", reply_markup=main_menu_keyboard(True))
-                        return
-
-                    qr_login = await client.qr_login()
-                    url = qr_login.url
-                    qr = qrcode.QRCode(version=1, box_size=10, border=2)
-                    qr.add_data(url)
-                    qr.make(fit=True)
-                    img = qr.make_image(fill_color="black", back_color="white")
-                    buf = io.BytesIO()
-                    img.save(buf, format='PNG')
-                    buf.seek(0)
-                    bot_instance.send_photo(chat_id, buf, caption="🔐 <b>Авторизация через QR</b>\n\n1. Откройте Telegram на телефоне\n2. Настройки → Устройства → Подключить десктопное устройство\n3. Отсканируйте этот QR-код\n\n⏳ Ожидание сканирования (до 2 минут)...\n\n🔒 <b>ПОЛНАЯ БЕЗОПАСНОСТЬ:</b>\n• ✅ Бот НЕ имеет доступа к вашим сообщениям\n• ✅ Бот НЕ может читать ваши чаты\n• ✅ Сессия хранится локально в файле\n• ✅ Сессия НЕ истекает через сутки\n• ✅ Вы можете удалить сессию в любой момент через Telegram → Устройства", reply_markup=cancel_auth_keyboard())
-
-                    try:
-                        await asyncio.wait_for(qr_login.wait(), timeout=120)
-                    except asyncio.TimeoutError:
-                        if not self.pending[user_id]['cancelled']:
-                            bot_instance.send_message(chat_id, "❌ <b>Время ожидания истекло</b>\n\nQR-код был активен 2 минуты.", reply_markup=main_menu_keyboard(has_accounts(user_id)))
-                        return
-
-                except SessionPasswordNeededError:
-                    if self.pending[user_id]['cancelled']:
-                        return
-                    bot_instance.send_message(chat_id, "🔒 <b>Требуется пароль 2FA</b>\n\nВведите пароль от аккаунта:", reply_markup=cancel_auth_keyboard())
-                    self.pending[user_id]['password_event'].wait()
-                    if self.pending[user_id].get('cancelled'):
-                        return
-                    password = self.pending[user_id]['password_value']
-                    try:
-                        await client.sign_in(password=password)
-                    except Exception as e:
-                        if self.pending[user_id]['cancelled']:
-                            return
-                        error_text = str(e).lower()
-                        if 'email' in error_text or 'e-mail' in error_text or 'код' in error_text:
-                            bot_instance.send_message(chat_id, "📧 <b>Требуется код из Email</b>\n\nВведите код:", reply_markup=cancel_auth_keyboard())
-                            self.pending[user_id]['needs_email'] = True
-                            self.pending[user_id]['email_event'].wait()
-                            if self.pending[user_id].get('cancelled'):
-                                return
-                            email_code = self.pending[user_id]['email_value']
-                            try:
-                                await client.sign_in(code=email_code)
-                            except Exception as e2:
-                                if not self.pending[user_id]['cancelled']:
-                                    bot_instance.send_message(chat_id, f"❌ Ошибка: {str(e2)}", reply_markup=main_menu_keyboard(has_accounts(user_id)))
-                                return
-                        else:
-                            if not self.pending[user_id]['cancelled']:
-                                bot_instance.send_message(chat_id, f"❌ Ошибка пароля: {str(e)}", reply_markup=main_menu_keyboard(has_accounts(user_id)))
-                            return
-                except Exception as e:
-                    if not self.pending[user_id]['cancelled']:
-                        bot_instance.send_message(chat_id, f"❌ Ошибка: {str(e)}", reply_markup=main_menu_keyboard(has_accounts(user_id)))
-                    return
-
-                if await client.is_user_authorized():
-                    me = await client.get_me()
-                    created_at = int(time.time())
-                    db_query("INSERT INTO accounts (user_id, session_path, phone, first_name, last_name, created_at) VALUES (?,?,?,?,?,?)",
-                             (user_id, temp_session_path, me.phone or '', me.first_name or '', me.last_name or '', created_at))
-                    row = db_query("SELECT id FROM accounts WHERE user_id=? ORDER BY id DESC LIMIT 1", (user_id,), fetchone=True)
-                    account_id = row[0] if row else None
-                    permanent_path = manager._session_path(account_id)
-                    try:
-                        await client.disconnect()
-                        if os.path.exists(temp_session_path):
-                            os.rename(temp_session_path, permanent_path)
-                        db_query("UPDATE accounts SET session_path=? WHERE id=?", (permanent_path, account_id))
-                    except:
-                        db_query("UPDATE accounts SET session_path=? WHERE id=?", (temp_session_path, account_id))
-                    existing = db_query("SELECT COUNT(*) FROM accounts WHERE user_id=?", (user_id,), fetchone=True)
-                    if existing and existing[0] == 1 and account_id:
-                        db_query("UPDATE users SET active_account_id=? WHERE user_id=?", (account_id, user_id))
-                    user_states.pop(user_id, None)
-                    name = me.first_name + (f" {me.last_name}" if me.last_name else "")
-                    bot_instance.send_message(chat_id, f"✅ <b>Аккаунт добавлен!</b>\n\n👤 {name}\n📱 <code>{me.phone or 'не указан'}</code>\n\n🔒 Сессия сохранена в локальном файле.\n✅ Сессия НЕ истекает через сутки — работает постоянно.\n✅ Вы можете удалить сессию в любое время через Telegram → Настройки → Устройства.\n\nТеперь вы можете использовать его для рассылки.", reply_markup=main_menu_keyboard(True))
-                else:
-                    if not self.pending[user_id]['cancelled']:
-                        bot_instance.send_message(chat_id, "❌ Авторизация не удалась.", reply_markup=main_menu_keyboard(has_accounts(user_id)))
-                await client.disconnect()
-
-            try:
-                loop.run_until_complete(do_auth())
-            finally:
-                try:
-                    loop.run_until_complete(client.disconnect())
-                except:
-                    pass
-            if user_id in self.pending:
-                del self.pending[user_id]
-
-        threading.Thread(target=auth_thread, daemon=True).start()
-
-    def submit_password(self, user_id, password):
-        if user_id in self.pending:
-            self.pending[user_id]['password_value'] = password
-            self.pending[user_id]['password_event'].set()
-            return True
-        return False
-
-    def submit_email(self, user_id, code):
-        if user_id in self.pending:
-            self.pending[user_id]['email_value'] = code
-            self.pending[user_id]['email_event'].set()
-            return True
-        return False
-
-    def cancel(self, user_id):
-        if user_id in self.pending:
-            self.pending[user_id]['cancelled'] = True
-            self.pending[user_id]['password_event'].set()
-            self.pending[user_id]['email_event'].set()
-            del self.pending[user_id]
-            return True
-        return False
-
-qr_manager = QRAuthManager()
-
-# ================== BOT ==================
-bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
-
-# ================== KEYBOARDS ==================
-def main_menu_keyboard(has_accounts=False):
-    kb = InlineKeyboardMarkup(row_width=2)
-    if not has_accounts:
-        kb.add(InlineKeyboardButton("🔐 Добавить аккаунт (QR)", callback_data="auth_start"))
-        kb.add(InlineKeyboardButton("📱 Добавить аккаунт (номер)", callback_data="phone_auth_start"))
-    else:
-        kb.add(
-            InlineKeyboardButton("📨 Настройки рассылки", callback_data="broadcast_settings"),
-            InlineKeyboardButton("▶️ Запустить рассылку", callback_data="broadcast_start"),
-        )
-        kb.add(
-            InlineKeyboardButton("📋 Чаты для рассылки", callback_data="select_chats"),
-            InlineKeyboardButton("👥 Упоминания", callback_data="mentions_settings"),
-        )
-        kb.add(InlineKeyboardButton("👤 Мои аккаунты", callback_data="my_accounts"))
-    return kb
-
-def back_keyboard(callback="main_menu"):
-    kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton("◀️ Назад", callback_data=callback))
-    return kb
-
-def cancel_auth_keyboard():
-    kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton("❌ Отменить авторизацию", callback_data="auth_cancel"))
-    return kb
-
-def stop_keyboard():
-    kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton("⏹ Остановить рассылку", callback_data="broadcast_stop"))
-    return kb
-
-def broadcast_settings_keyboard():
-    kb = InlineKeyboardMarkup(row_width=1)
-    kb.add(
-        InlineKeyboardButton("📝 Изменить текст сообщения", callback_data="set_text"),
-        InlineKeyboardButton("⏱ Изменить интервал отправки", callback_data="set_interval"),
-        InlineKeyboardButton("⏳ Длительность рассылки", callback_data="set_duration"),
-        InlineKeyboardButton("📬 Сообщений на чат", callback_data="set_msgs_per_chat"),
-        InlineKeyboardButton("◀️ Вернуться в главное меню", callback_data="main_menu"),
-    )
-    return kb
-
-def accounts_keyboard(user_id):
-    kb = InlineKeyboardMarkup(row_width=1)
-    accounts = get_accounts(user_id)
-    active = get_active_account(user_id)
-    active_id = active[0] if active else None
-    for acc in accounts:
-        aid = acc[0]
-        name = f"{acc[4]} {acc[5]}".strip() or "Аккаунт"
-        phone = acc[3] or "без номера"
-        mark = "✅ " if aid == active_id else ""
-        kb.add(InlineKeyboardButton(f"{mark}{name} ({phone})", callback_data=f"select_account:{aid}"))
-        kb.row(
-            InlineKeyboardButton("❌ Удалить", callback_data=f"confirm_delete_account:{aid}"),
-            InlineKeyboardButton("ℹ️ Инфо", callback_data=f"account_info:{aid}")
-        )
-    kb.add(InlineKeyboardButton("➕ Добавить аккаунт", callback_data="add_account_menu"))
-    kb.add(InlineKeyboardButton("◀️ В главное меню", callback_data="main_menu"))
-    return kb
-
-def add_account_menu_keyboard():
-    kb = InlineKeyboardMarkup(row_width=1)
-    kb.add(
-        InlineKeyboardButton("🔐 Авторизоваться через QR", callback_data="auth_start"),
-        InlineKeyboardButton("📱 Авторизоваться по номеру", callback_data="phone_auth_start"),
-        InlineKeyboardButton("◀️ Назад", callback_data="my_accounts")
-    )
-    return kb
-
-def confirm_delete_keyboard(account_id):
-    kb = InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        InlineKeyboardButton("✅ Да, удалить", callback_data=f"delete_account:{account_id}"),
-        InlineKeyboardButton("❌ Нет, отмена", callback_data="my_accounts")
-    )
-    return kb
-
-def duration_keyboard():
-    kb = InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        InlineKeyboardButton("1 час", callback_data="dur_1"),
-        InlineKeyboardButton("24 часа", callback_data="dur_24"),
-        InlineKeyboardButton("168 часов (неделя)", callback_data="dur_168"),
-        InlineKeyboardButton("♾ Бесконечно (0)", callback_data="dur_0"),
-        InlineKeyboardButton("✏️ Свое значение", callback_data="dur_custom"),
-        InlineKeyboardButton("◀️ Назад", callback_data="broadcast_settings")
-    )
-    return kb
-
-def mentions_keyboard():
-    kb = InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        InlineKeyboardButton("❌ Без упоминаний", callback_data="mentions_none"),
-        InlineKeyboardButton("5 чел", callback_data="mentions_5"),
-        InlineKeyboardButton("10 чел", callback_data="mentions_10"),
-        InlineKeyboardButton("25 чел", callback_data="mentions_25"),
-        InlineKeyboardButton("50 чел", callback_data="mentions_50"),
-        InlineKeyboardButton("✏️ Свое число", callback_data="mentions_custom"),
-        InlineKeyboardButton("◀️ Назад", callback_data="main_menu")
-    )
-    return kb
-
-def msgs_per_chat_keyboard():
-    kb = InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        InlineKeyboardButton("1 сообщение", callback_data="mpc_1"),
-        InlineKeyboardButton("3 сообщения", callback_data="mpc_3"),
-        InlineKeyboardButton("5 сообщений", callback_data="mpc_5"),
-        InlineKeyboardButton("10 сообщений", callback_data="mpc_10"),
-        InlineKeyboardButton("✏️ Свое число", callback_data="mpc_custom"),
-        InlineKeyboardButton("◀️ Назад", callback_data="broadcast_settings")
-    )
-    return kb
-
-# ================== HELPERS ==================
-def get_user(user_id):
-    row = db_query("SELECT * FROM users WHERE user_id=?", (user_id,), fetchone=True)
-    if not row:
-        db_query("INSERT INTO users (user_id) VALUES (?)", (user_id,))
-        row = db_query("SELECT * FROM users WHERE user_id=?", (user_id,), fetchone=True)
-    return row
-
-def get_accounts(user_id):
-    return db_query("SELECT * FROM accounts WHERE user_id=? ORDER BY id", (user_id,))
-
-def get_account(account_id):
-    return db_query("SELECT * FROM accounts WHERE id=?", (account_id,), fetchone=True)
-
-def get_active_account(user_id):
-    user = get_user(user_id)
-    aid = user[7] if len(user) > 7 else None
-    if not aid:
-        return None
-    return get_account(aid)
-
-def set_active_account(user_id, account_id):
-    db_query("UPDATE users SET active_account_id=? WHERE user_id=?", (account_id, user_id))
-
-def delete_account(account_id):
-    acc = get_account(account_id)
-    if not acc:
+def update_user(user_id, field, value):
+    if field not in VALID_FIELDS:
         return
-    user_id = acc[1]
-    manager.disconnect(account_id)
-    session_path = acc[2]
-    if session_path and os.path.exists(session_path):
-        try:
-            os.remove(session_path)
-        except:
-            pass
-    db_query("DELETE FROM selected_chats WHERE account_id=?", (account_id,))
-    db_query("DELETE FROM accounts WHERE id=?", (account_id,))
-    remaining = get_accounts(user_id)
-    if remaining:
-        set_active_account(user_id, remaining[0][0])
-    else:
-        db_query("UPDATE users SET active_account_id=NULL WHERE user_id=?", (user_id,))
+    if isinstance(value, int):
+        if value > MAX_SAFE_INT:
+            value = MAX_SAFE_INT
+        if value < 0:
+            value = 0
+    with db_lock:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute(f"UPDATE users SET {field} = ? WHERE user_id = ?", (value, user_id))
+        conn.commit()
+        conn.close()
 
-def has_accounts(user_id):
-    c = db_query("SELECT COUNT(*) FROM accounts WHERE user_id=?", (user_id,), fetchone=True)
-    return c and c[0] > 0
+def add_field(user_id, field, amount):
+    if field not in VALID_FIELDS:
+        return 0
+    user = get_user(user_id)
+    idx = {
+        "balance": 2, "grass": 3, "rare_grass": 4, "legendary_grass": 5,
+        "joints": 6, "blunts": 7, "golden_joints": 8, "total_smoked": 9,
+        "total_high": 10, "level": 11, "exp": 12, "farm_power": 13,
+        "legendary_chance": 14, "lopata": 17, "seeds": 18, "greenhouse": 19
+    }
+    current = user[idx[field]] if field in idx else 0
+    new_val = current + amount
+    update_user(user_id, field, new_val)
+    return new_val
 
-def get_selected_chats(user_id, account_id):
-    return db_query("SELECT chat_id, chat_name FROM selected_chats WHERE user_id=? AND account_id=?", (user_id, account_id))
+# ==================== БОТ ====================
+bot = telebot.TeleBot(TOKEN)
 
-def toggle_chat_selection(user_id, account_id, chat_id, chat_name):
-    existing = db_query("SELECT 1 FROM selected_chats WHERE user_id=? AND account_id=? AND chat_id=?", (user_id, account_id, chat_id), fetchone=True)
-    if existing:
-        db_query("DELETE FROM selected_chats WHERE user_id=? AND account_id=? AND chat_id=?", (user_id, account_id, chat_id))
-        return False
-    else:
-        db_query("INSERT OR REPLACE INTO selected_chats (user_id, account_id, chat_id, chat_name) VALUES (?,?,?,?)", (user_id, account_id, chat_id, chat_name))
-        return True
+# ==================== INLINE КЛАВИАТУРЫ (с owner_id) ====================
+def main_menu(owner_id):
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        InlineKeyboardButton("🌿 Собрать траву", callback_data=cb("farm", owner_id)),
+        InlineKeyboardButton("🔨 Крафт", callback_data=cb("craft_menu", owner_id)),
+        InlineKeyboardButton("💨 Курить", callback_data=cb("smoke_menu", owner_id)),
+        InlineKeyboardButton("🏪 Магазин", callback_data=cb("shop_menu", owner_id)),
+        InlineKeyboardButton("📊 Топы", callback_data=cb("tops_menu", owner_id)),
+        InlineKeyboardButton("👤 Профиль", callback_data=cb("profile", owner_id)),
+        InlineKeyboardButton("🎁 Ежедневный бонус", callback_data=cb("daily", owner_id)),
+        InlineKeyboardButton("📦 Инвентарь", callback_data=cb("inventory", owner_id))
+    )
+    return markup
 
-def clear_selected_chats(user_id, account_id):
-    db_query("DELETE FROM selected_chats WHERE user_id=? AND account_id=?", (user_id, account_id))
+def craft_menu(owner_id):
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        InlineKeyboardButton("🚬 Скрафтить косяк (5 травы)", callback_data=cb("craft_joint", owner_id)),
+        InlineKeyboardButton("🌯 Скрафтить блант (3 редкой)", callback_data=cb("craft_blunt", owner_id)),
+        InlineKeyboardButton("🥇 Скрафтить золотой косяк (2 легенд.)", callback_data=cb("craft_golden", owner_id)),
+        InlineKeyboardButton("🔙 Назад", callback_data=cb("main_menu", owner_id))
+    )
+    return markup
 
-# ================== BROADCAST LOGIC ==================
-async def get_members_for_mentions(client, chat_id, count):
-    members = []
+def smoke_menu(owner_id):
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        InlineKeyboardButton("🚬 Курить косяк", callback_data=cb("smoke_joint", owner_id)),
+        InlineKeyboardButton("🌯 Курить блант", callback_data=cb("smoke_blunt", owner_id)),
+        InlineKeyboardButton("🥇 Курить золотой косяк", callback_data=cb("smoke_golden", owner_id)),
+        InlineKeyboardButton("🔙 Назад", callback_data=cb("main_menu", owner_id))
+    )
+    return markup
+
+def shop_menu(owner_id):
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        InlineKeyboardButton("💰 Продать траву", callback_data=cb("sell_menu", owner_id)),
+        InlineKeyboardButton("🛒 Купить траву", callback_data=cb("buy_menu", owner_id)),
+        InlineKeyboardButton("⬆️ Улучшения", callback_data=cb("upgrades_menu", owner_id)),
+        InlineKeyboardButton("🔙 Назад", callback_data=cb("main_menu", owner_id))
+    )
+    return markup
+
+def sell_menu(owner_id):
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        InlineKeyboardButton("🌿 Продать обычную траву", callback_data=cb("sell_grass", owner_id)),
+        InlineKeyboardButton("⭐ Продать редкую траву", callback_data=cb("sell_rare", owner_id)),
+        InlineKeyboardButton("💎 Продать легендарную траву", callback_data=cb("sell_legendary", owner_id)),
+        InlineKeyboardButton("🔙 Назад", callback_data=cb("shop_menu", owner_id))
+    )
+    return markup
+
+def buy_menu(owner_id):
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        InlineKeyboardButton("🌿 Купить обычную траву (10💰)", callback_data=cb("buy_grass", owner_id)),
+        InlineKeyboardButton("⭐ Купить редкую траву (50💰)", callback_data=cb("buy_rare", owner_id)),
+        InlineKeyboardButton("💎 Купить легендарную траву (200💰)", callback_data=cb("buy_legendary", owner_id)),
+        InlineKeyboardButton("🔙 Назад", callback_data=cb("shop_menu", owner_id))
+    )
+    return markup
+
+def tops_menu(owner_id):
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        InlineKeyboardButton("🏆 Топ курильщиков", callback_data=cb("top_smokers", owner_id)),
+        InlineKeyboardButton("🌀 Топ кайфариков", callback_data=cb("top_high", owner_id)),
+        InlineKeyboardButton("💎 Топ богачей", callback_data=cb("top_rich", owner_id)),
+        InlineKeyboardButton("🔙 Назад", callback_data=cb("main_menu", owner_id))
+    )
+    return markup
+
+def back_button(owner_id):
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("🔙 Назад", callback_data=cb("main_menu", owner_id)))
+    return markup
+
+def add_to_chat_markup():
+    """Кнопка добавления бота в чат (использует кэшированный username)"""
+    markup = InlineKeyboardMarkup()
+    username = get_bot_username()
+    if username:
+        markup.add(InlineKeyboardButton("➕ Добавить в чат", url=f"https://t.me/{username}?startgroup=true"))
+    return markup
+
+# ==================== ХЕЛПЕР: безопасный edit ====================
+def safe_edit(chat_id, msg_id, text, markup=None, parse_mode="Markdown"):
     try:
-        async for user in client.iter_participants(chat_id, limit=count * 3):
-            if user.bot:
-                continue
-            if user.deleted:
-                continue
-            members.append(user)
-            if len(members) >= count:
-                break
-    except Exception:
-        pass
-    random.shuffle(members)
-    return members[:count]
-
-def build_mention_text(client, members):
-    parts = []
-    for m in members:
-        if m.username:
-            parts.append(f"@{m.username}")
-        else:
-            name = (m.first_name or '') + (f" {m.last_name}" if m.last_name else '')
-            parts.append(f'<a href="tg://user?id={m.id}">{html.escape(name or "User")}</a>')
-    return " ".join(parts)
-
-async def send_to_chat(client, chat_id, text, mentions_mode, mentions_count):
-    final_text = text
-    if mentions_mode != 'none' and mentions_count > 0:
-        members = await get_members_for_mentions(client, chat_id, mentions_count)
-        if members:
-            mention_text = build_mention_text(client, members)
-            final_text = f"{mention_text}\n\n{text}"
-    try:
-        await client.send_message(chat_id, final_text, parse_mode='html', link_preview=False)
-        return True
-    except FloodWaitError as e:
-        await asyncio.sleep(e.seconds)
-        try:
-            await client.send_message(chat_id, final_text, parse_mode='html', link_preview=False)
-            return True
-        except:
-            return False
-    except Exception:
-        return False
-
-def broadcast_worker(user_id, account_id, chat_ids, text, interval, duration_hours, msgs_per_chat, mentions_mode, mentions_count):
-    start_time = time.time()
-    duration_seconds = duration_hours * 3600 if duration_hours > 0 else None
-
-    success = 0
-    failed = 0
-
-    while True:
-        if duration_seconds and (time.time() - start_time) >= duration_seconds:
-            break
-
-        user_row = db_query("SELECT is_running FROM users WHERE user_id=?", (user_id,), fetchone=True)
-        if not user_row or not user_row[0]:
-            break
-
-        client = manager.get_client(account_id)
-        if not client:
-            time.sleep(5)
-            continue
-
-        for chat_id in chat_ids:
-            user_row = db_query("SELECT is_running FROM users WHERE user_id=?", (user_id,), fetchone=True)
-            if not user_row or not user_row[0]:
-                break
-
-            for _ in range(msgs_per_chat):
-                user_row = db_query("SELECT is_running FROM users WHERE user_id=?", (user_id,), fetchone=True)
-                if not user_row or not user_row[0]:
-                    break
-
-                try:
-                    result = manager.run_sync(account_id, send_to_chat(client, chat_id, text, mentions_mode, mentions_count), timeout=60)
-                    if result:
-                        success += 1
-                    else:
-                        failed += 1
-                except Exception:
-                    failed += 1
-
-                time.sleep(interval)
-
-            if duration_seconds and (time.time() - start_time) >= duration_seconds:
-                break
-
-        if duration_seconds and (time.time() - start_time) >= duration_seconds:
-            break
-
-    db_query("UPDATE users SET is_running=0 WHERE user_id=?", (user_id,))
-    try:
-        bot.send_message(user_id, f"⏹ <b>Рассылка завершена!</b>\n\n✅ Успешно: {success}\n❌ Ошибок: {failed}", reply_markup=main_menu_keyboard(has_accounts(user_id)))
-    except:
+        bot.edit_message_text(text, chat_id, msg_id, parse_mode=parse_mode, reply_markup=markup)
+    except ApiException:
         pass
 
-# ================== HANDLERS ==================
-@bot.message_handler(commands=['start'])
+# ==================== КОМАНДЫ ====================
+@bot.message_handler(commands=["start"])
 def cmd_start(message):
-    user_id = message.from_user.id
-    get_user(user_id)
-    has_acc = has_accounts(user_id)
+    uid = message.from_user.id
+    get_user(uid, message.from_user.username or "")
+    text = f"""👋 Привет, {message.from_user.first_name}!
 
-    welcome_text = (
-        "👋 <b>Добро пожаловать в бота для рассылки!</b>\n\n"
-        "🔹 Добавьте свой аккаунт Telegram\n"
-        "🔹 Выберите чаты для рассылки\n"
-        "🔹 Настройте текст, интервал и упоминания\n"
-        "🔹 Запустите рассылку одной кнопкой!\n\n"
-        "🔒 <b>Ваша сессия хранится в локальном файле и НЕ истекает через сутки.</b>"
+🌿 Добро пожаловать в *Травка Бот*!
+Собирай траву, крафть косяки, кури и становись легендой!
+
+💡 Команды работают без слеша: *сбор*, *крафт*, *кури*, *магазин*, *топ*, *передать*
+Или используй кнопки ниже.
+
+👥 Добавь бота в чат, чтобы играть вместе с друзьями!"""
+    bot.send_message(message.chat.id, text, parse_mode="Markdown", reply_markup=main_menu(uid))
+    add_markup = add_to_chat_markup()
+    if add_markup.keyboard:
+        try:
+            bot.send_message(message.chat.id, "➕ Хочешь играть с друзьями? Добавь бота в свой чат!", reply_markup=add_markup)
+        except:
+            pass
+
+@bot.message_handler(commands=["help"])
+def cmd_help(message):
+    text = """📋 *Команды Травка Бота:*
+
+🌿 *сбор* / *собрать* — собрать траву
+🔨 *крафт* / *скрафтить* — меню крафта
+💨 *кури* / *курить* — покурить
+🏪 *магазин* — купить/продать
+📊 *топ* — топы игроков
+👤 *профиль* / *баланс* — твоя статистика
+🎁 *ежедневный* / *бонус* — ежедневная награда
+📦 *инвентарь* — твои ресурсы
+🔄 *передать* [кол-во] [тип] @юзер — передать траву
+🔄 Также можно ответить (reply) на сообщение пользователя и написать: *передать* [кол-во] [тип]
+
+💡 Также работают inline-кнопки под сообщениями!"""
+    bot.send_message(message.chat.id, text, parse_mode="Markdown", reply_markup=main_menu(message.from_user.id))
+
+# ==================== СБОР ТРАВЫ ====================
+def do_farm(user_id, username, chat_id, message_id=None):
+    user = get_user(user_id, username)
+    now = int(time.time())
+    last_farm = user[15]
+    
+    if now - last_farm < FARM_COOLDOWN:
+        wait = FARM_COOLDOWN - (now - last_farm)
+        mins, secs = divmod(wait, 60)
+        text = f"⏳ Подожди ещё *{mins}м {secs}с* перед следующим сбором!"
+        if message_id:
+            safe_edit(chat_id, message_id, text, back_button(user_id))
+        else:
+            bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=back_button(user_id))
+        return
+    
+    farm_power = user[13]
+    leg_chance = user[14]
+    
+    grass_amount = random.randint(1, 3) * farm_power
+    rare_amount = random.randint(0, 2) * farm_power
+    leg_roll = random.randint(1, 100)
+    leg_amount = 0
+    if leg_roll <= (5 + leg_chance):
+        leg_amount = random.randint(1, 2) * farm_power
+    
+    add_field(user_id, "grass", grass_amount)
+    add_field(user_id, "rare_grass", rare_amount)
+    add_field(user_id, "legendary_grass", leg_amount)
+    update_user(user_id, "last_farm", now)
+    
+    text = f"""🌿 *Сбор травы завершён!*
+
+🌱 Обычной травы: +{grass_amount}
+⭐ Редкой травы: +{rare_amount}
+💎 Легендарной травы: +{leg_amount}
+
+💪 Сила сбора: x{farm_power}"""
+    if message_id:
+        safe_edit(chat_id, message_id, text, back_button(user_id))
+    else:
+        bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=back_button(user_id))
+
+@bot.message_handler(func=lambda m: m.text and m.text.lower() in ["сбор", "собрать", "фарм", "собирать"])
+def msg_farm(message):
+    do_farm(message.from_user.id, message.from_user.username or "", message.chat.id)
+
+# ==================== КРАФТ ====================
+def do_craft(user_id, username, chat_id, item, message_id=None):
+    user = get_user(user_id, username)
+    
+    if item == "joint":
+        need, have, field, give_field, give_amount = 5, user[3], "grass", "joints", 1
+        name = "🚬 Косяк"
+    elif item == "blunt":
+        need, have, field, give_field, give_amount = 3, user[4], "rare_grass", "blunts", 1
+        name = "🌯 Блант"
+    elif item == "golden":
+        need, have, field, give_field, give_amount = 2, user[5], "legendary_grass", "golden_joints", 1
+        name = "🥇 Золотой косяк"
+    else:
+        return
+    
+    if have < need:
+        text = f"❌ Недостаточно ресурсов для {name}!\nНужно: {need}, есть: {have}"
+    else:
+        add_field(user_id, field, -need)
+        new_count = add_field(user_id, give_field, give_amount)
+        text = f"✅ {name} успешно скрафчен!\n\n📦 Теперь у тебя: {new_count} шт."
+    
+    if message_id:
+        safe_edit(chat_id, message_id, text, craft_menu(user_id))
+    else:
+        bot.send_message(chat_id, text, reply_markup=craft_menu(user_id))
+
+@bot.message_handler(func=lambda m: m.text and m.text.lower() in ["крафт", "скрафтить", "крафтить"])
+def msg_craft(message):
+    bot.send_message(message.chat.id, "🔨 *Меню крафта:*", parse_mode="Markdown", reply_markup=craft_menu(message.from_user.id))
+
+# ==================== КУРЕНИЕ ====================
+def do_smoke(user_id, username, first_name, chat_id, item, message_id=None):
+    user = get_user(user_id, username)
+    
+    if item == "joint":
+        have, field, high, exp = user[6], "joints", 1, 10
+        name = "косяк"
+    elif item == "blunt":
+        have, field, high, exp = user[7], "blunts", 3, 25
+        name = "блант"
+    elif item == "golden":
+        have, field, high, exp = user[8], "golden_joints", 10, 100
+        name = "золотой косяк"
+    else:
+        return
+    
+    if have < 1:
+        text = f"❌ У тебя нет {name}а! Скрафть в меню крафта."
+        if message_id:
+            safe_edit(chat_id, message_id, text, smoke_menu(user_id))
+        else:
+            bot.send_message(chat_id, text, reply_markup=smoke_menu(user_id))
+        return
+    
+    add_field(user_id, field, -1)
+    add_field(user_id, "total_smoked", 1)
+    add_field(user_id, "total_high", high)
+    
+    current_exp = user[12] + exp
+    current_level = user[11]
+    needed = current_level * 100
+    new_level = current_level
+    while current_exp >= needed:
+        current_exp -= needed
+        new_level += 1
+        needed = new_level * 100
+    
+    if new_level > current_level:
+        update_user(user_id, "level", new_level)
+        update_user(user_id, "exp", current_exp)
+        level_up = f"\n\n🎉 *LEVEL UP!* Теперь ты {new_level} уровня!"
+    else:
+        update_user(user_id, "exp", current_exp)
+        level_up = ""
+    
+    phrase = random.choice(HIGH_PHRASES).format(name=first_name or username or "Курильщик", amount=high)
+    text = f"{phrase}{level_up}\n\n📊 Всего покурено: {user[9]+1}\n🌀 Всего кайфа: {user[10]+high}"
+    
+    if message_id:
+        safe_edit(chat_id, message_id, text, smoke_menu(user_id), parse_mode="Markdown")
+    else:
+        bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=smoke_menu(user_id))
+
+@bot.message_handler(func=lambda m: m.text and m.text.lower() in ["кури", "курить", "дымить", "закурить"])
+def msg_smoke(message):
+    bot.send_message(message.chat.id, "💨 *Что будешь курить?*", parse_mode="Markdown", reply_markup=smoke_menu(message.from_user.id))
+
+# ==================== ТОПЫ ====================
+def show_top(chat_id, top_type, owner_id, message_id=None):
+    with db_lock:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        if top_type == "smokers":
+            c.execute("SELECT username, total_smoked FROM users ORDER BY total_smoked DESC LIMIT 10")
+            title = "🏆 *Топ курильщиков*"
+        elif top_type == "high":
+            c.execute("SELECT username, total_high FROM users ORDER BY total_high DESC LIMIT 10")
+            title = "🌀 *Топ кайфариков*"
+        else:
+            c.execute("SELECT username, balance FROM users ORDER BY balance DESC LIMIT 10")
+            title = "💎 *Топ богачей*"
+        rows = c.fetchall()
+        conn.close()
+    
+    text = title + "\n\n"
+    medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+    for i, (uname, val) in enumerate(rows):
+        name = uname or "Безымянный"
+        text += f"{medals[i]} {name} — {val:,}\n"
+    if not rows:
+        text += "Пока никого нет..."
+    
+    if message_id:
+        safe_edit(chat_id, message_id, text, tops_menu(owner_id))
+    else:
+        bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=tops_menu(owner_id))
+
+@bot.message_handler(func=lambda m: m.text and m.text.lower() in ["топ", "топы", "лидеры"])
+def msg_top(message):
+    bot.send_message(message.chat.id, "📊 *Выбери топ:*", parse_mode="Markdown", reply_markup=tops_menu(message.from_user.id))
+
+# ==================== ПРОФИЛЬ ====================
+def show_profile(user_id, username, chat_id, message_id=None):
+    user = get_user(user_id, username)
+    text = f"""👤 *Профиль*
+
+💰 Баланс: {user[2]:,} монет
+🌿 Обычная трава: {user[3]}
+⭐ Редкая трава: {user[4]}
+💎 Легендарная трава: {user[5]}
+🚬 Косяки: {user[6]}
+🌯 Бланты: {user[7]}
+🥇 Золотые косяки: {user[8]}
+📊 Всего покурено: {user[9]}
+🌀 Всего кайфа: {user[10]}
+⭐ Уровень: {user[11]}
+📈 Опыт: {user[12]}/{user[11]*100}
+💪 Сила сбора: x{user[13]}
+🍀 Шанс легендарки: +{user[14]}%"""
+    if message_id:
+        safe_edit(chat_id, message_id, text, main_menu(user_id))
+    else:
+        bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=main_menu(user_id))
+
+@bot.message_handler(func=lambda m: m.text and m.text.lower() in ["профиль", "баланс", "я", "стата", "статистика"])
+def msg_profile(message):
+    show_profile(message.from_user.id, message.from_user.username or "", message.chat.id)
+
+# ==================== ИНВЕНТАРЬ ====================
+def show_inventory(user_id, username, chat_id, message_id=None):
+    user = get_user(user_id, username)
+    text = f"""📦 *Инвентарь*
+
+🌿 Обычная трава: {user[3]}
+⭐ Редкая трава: {user[4]}
+💎 Легендарная трава: {user[5]}
+🚬 Косяки: {user[6]}
+🌯 Бланты: {user[7]}
+🥇 Золотые косяки: {user[8]}"""
+    if message_id:
+        safe_edit(chat_id, message_id, text, back_button(user_id))
+    else:
+        bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=back_button(user_id))
+
+@bot.message_handler(func=lambda m: m.text and m.text.lower() in ["инвентарь", "инв", "рюкзак"])
+def msg_inventory(message):
+    show_inventory(message.from_user.id, message.from_user.username or "", message.chat.id)
+
+# ==================== ЕЖЕДНЕВНЫЙ БОНУС ====================
+def do_daily(user_id, username, chat_id, message_id=None):
+    user = get_user(user_id, username)
+    now = int(time.time())
+    last = user[16]
+    
+    if now - last < DAILY_COOLDOWN:
+        wait = DAILY_COOLDOWN - (now - last)
+        hours, rem = divmod(wait, 3600)
+        mins, secs = divmod(rem, 60)
+        text = f"⏳ Следующий бонус через *{hours}ч {mins}м {secs}с*"
+    else:
+        reward = random.randint(100, 500)
+        add_field(user_id, "balance", reward)
+        update_user(user_id, "last_daily", now)
+        text = f"🎁 *Ежедневный бонус получен!*\n\n💰 +{reward} монет"
+    
+    if message_id:
+        safe_edit(chat_id, message_id, text, back_button(user_id))
+    else:
+        bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=back_button(user_id))
+
+@bot.message_handler(func=lambda m: m.text and m.text.lower() in ["ежедневный", "бонус", "daily", "награда"])
+def msg_daily(message):
+    do_daily(message.from_user.id, message.from_user.username or "", message.chat.id)
+
+# ==================== МАГАЗИН / ПРОДАЖА / ПОКУПКА ====================
+def sell_item(user_id, username, chat_id, item, amount_str, message_id=None):
+    user = get_user(user_id, username)
+    fields = {"grass": ("grass", 3, PRICES["grass"]),
+              "rare": ("rare_grass", 4, PRICES["rare_grass"]),
+              "legendary": ("legendary_grass", 5, PRICES["legendary_grass"])}
+    
+    if item not in fields:
+        return
+    
+    field, idx, price = fields[item]
+    have = user[idx]
+    
+    if amount_str.lower() in ["все", "all"]:
+        amount = have
+    else:
+        try:
+            amount = int(amount_str)
+        except:
+            text = "❌ Укажи число или слово 'все'"
+            if message_id:
+                safe_edit(chat_id, message_id, text, sell_menu(user_id))
+            else:
+                bot.send_message(chat_id, text, reply_markup=sell_menu(user_id))
+            return
+    
+    if amount <= 0:
+        text = "❌ Количество должно быть больше 0"
+    elif have < amount:
+        text = f"❌ Недостаточно товара! У тебя: {have}"
+    else:
+        earnings = amount * price
+        if earnings > MAX_SAFE_INT:
+            earnings = MAX_SAFE_INT
+        add_field(user_id, field, -amount)
+        add_field(user_id, "balance", earnings)
+        text = f"💰 Продано {amount} шт. за {earnings:,} монет!"
+    
+    if message_id:
+        safe_edit(chat_id, message_id, text, sell_menu(user_id))
+    else:
+        bot.send_message(chat_id, text, reply_markup=sell_menu(user_id))
+
+def buy_item(user_id, username, chat_id, item, amount_str, message_id=None):
+    user = get_user(user_id, username)
+    fields = {"grass": ("grass", PRICES["grass"]),
+              "rare": ("rare_grass", PRICES["rare_grass"]),
+              "legendary": ("legendary_grass", PRICES["legendary_grass"])}
+    
+    if item not in fields:
+        return
+    
+    field, price = fields[item]
+    
+    if amount_str.lower() in ["все", "all"]:
+        balance = user[2]
+        amount = balance // price
+    else:
+        try:
+            amount = int(amount_str)
+        except:
+            text = "❌ Укажи число или слово 'все'"
+            if message_id:
+                safe_edit(chat_id, message_id, text, buy_menu(user_id))
+            else:
+                bot.send_message(chat_id, text, reply_markup=buy_menu(user_id))
+            return
+    
+    cost = amount * price
+    if cost > MAX_SAFE_INT:
+        cost = MAX_SAFE_INT
+    
+    if amount <= 0:
+        text = "❌ Количество должно быть больше 0"
+    elif user[2] < cost:
+        text = f"❌ Недостаточно монет! Нужно: {cost:,}, есть: {user[2]:,}"
+    else:
+        add_field(user_id, "balance", -cost)
+        add_field(user_id, field, amount)
+        text = f"🛒 Куплено {amount} шт. за {cost:,} монет!"
+    
+    if message_id:
+        safe_edit(chat_id, message_id, text, buy_menu(user_id))
+    else:
+        bot.send_message(chat_id, text, reply_markup=buy_menu(user_id))
+
+# Обработка текста "продать трава 50" или "купить редкая 10"
+@bot.message_handler(func=lambda m: m.text and m.text.lower().startswith(("продать", "купить")))
+def msg_trade_text(message):
+    text = message.text.lower().strip()
+    parts = text.split()
+    if len(parts) < 3:
+        bot.send_message(message.chat.id, "❌ Формат: продать/купить [тип] [кол-во/все]", reply_markup=shop_menu(message.from_user.id))
+        return
+    
+    action = parts[0]
+    item_map = {
+        "трава": "grass", "обычная": "grass", "редкая": "rare", "редкую": "rare",
+        "легендарная": "legendary", "легендарную": "legendary",
+        "grass": "grass", "rare": "rare", "legendary": "legendary"
+    }
+    item = item_map.get(parts[1], parts[1])
+    amount = parts[2]
+    
+    if action == "продать":
+        sell_item(message.from_user.id, message.from_user.username or "", message.chat.id, item, amount)
+    else:
+        buy_item(message.from_user.id, message.from_user.username or "", message.chat.id, item, amount)
+
+@bot.message_handler(func=lambda m: m.text and m.text.lower() in ["магазин", "shop", "торговля"])
+def msg_shop(message):
+    bot.send_message(message.chat.id, "🏪 *Магазин:*", parse_mode="Markdown", reply_markup=shop_menu(message.from_user.id))
+
+# ==================== УЛУЧШЕНИЯ ====================
+def upgrades_menu_markup(owner_id):
+    markup = InlineKeyboardMarkup(row_width=1)
+    for key, data in UPGRADES.items():
+        markup.add(InlineKeyboardButton(f"{data['name']} — {data['price']:,}💰", callback_data=cb(f"buy_upgrade_{key}", owner_id)))
+    markup.add(InlineKeyboardButton("🔙 Назад", callback_data=cb("shop_menu", owner_id)))
+    return markup
+
+def buy_upgrade(user_id, username, chat_id, upgrade_key, message_id=None):
+    user = get_user(user_id, username)
+    upg = UPGRADES.get(upgrade_key)
+    if not upg:
+        return
+    
+    idx_map = {"lopata": 17, "seeds": 18, "greenhouse": 19}
+    current_lvl = user[idx_map[upgrade_key]]
+    price = upg["price"] * (current_lvl + 1)
+    
+    if user[2] < price:
+        text = f"❌ Недостаточно монет! Нужно: {price:,}"
+    else:
+        add_field(user_id, "balance", -price)
+        add_field(user_id, upgrade_key, 1)
+        if upg["type"] == "farm_power":
+            add_field(user_id, "farm_power", upg["bonus"])
+        elif upg["type"] == "legendary_chance":
+            add_field(user_id, "legendary_chance", upg["bonus"])
+        text = f"✅ {upg['name']} куплено! (Уровень {current_lvl+1})"
+    
+    if message_id:
+        safe_edit(chat_id, message_id, text, upgrades_menu_markup(user_id))
+    else:
+        bot.send_message(chat_id, text, reply_markup=upgrades_menu_markup(user_id))
+
+# ==================== ПЕРЕДАЧА ====================
+@bot.message_handler(func=lambda m: m.text and m.text.lower().startswith("передать"))
+def msg_transfer(message):
+    text = message.text.lower().strip()
+    parts = text.split()
+    
+    # Проверяем reply
+    target_id = None
+    target_username = None
+    
+    if message.reply_to_message:
+        target_id = message.reply_to_message.from_user.id
+        target_username = message.reply_to_message.from_user.username or ""
+        # Формат: "передать [кол-во] [тип]" (без @username, т.к. reply)
+        if len(parts) < 3:
+            bot.send_message(message.chat.id, "❌ Формат (reply): передать [кол-во] [тип]", reply_markup=main_menu(message.from_user.id))
+            return
+        try:
+            amount = int(parts[1])
+        except:
+            bot.send_message(message.chat.id, "❌ Укажи число", reply_markup=main_menu(message.from_user.id))
+            return
+        item_type = parts[2]
+    else:
+        # Обычный формат: передать [кол-во] [тип] @username
+        if len(parts) < 4:
+            bot.send_message(message.chat.id, "❌ Формат: передать [кол-во] [тип] @username\nИли ответь (reply) на сообщение и напиши: передать [кол-во] [тип]", reply_markup=main_menu(message.from_user.id))
+            return
+        try:
+            amount = int(parts[1])
+        except:
+            bot.send_message(message.chat.id, "❌ Укажи число первым аргументом", reply_markup=main_menu(message.from_user.id))
+            return
+        item_type = parts[2]
+        target_username = parts[3].replace("@", "")
+    
+    if amount <= 0:
+        bot.send_message(message.chat.id, "❌ Количество должно быть больше 0", reply_markup=main_menu(message.from_user.id))
+        return
+    
+    item_map = {
+        "трава": "grass", "траву": "grass",
+        "редкая": "rare_grass", "редкую": "rare_grass",
+        "легендарная": "legendary_grass", "легендарную": "legendary_grass",
+        "косяк": "joints", "косяки": "joints",
+        "блант": "blunts", "бланты": "blunts",
+        "золотой": "golden_joints", "золотые": "golden_joints", "голд": "golden_joints"
+    }
+    field = item_map.get(item_type, item_type)
+    
+    idx_map = {"grass": 3, "rare_grass": 4, "legendary_grass": 5, "joints": 6, "blunts": 7, "golden_joints": 8}
+    idx = idx_map.get(field)
+    if idx is None:
+        bot.send_message(message.chat.id, "❌ Неизвестный тип предмета", reply_markup=main_menu(message.from_user.id))
+        return
+    
+    user = get_user(message.from_user.id, message.from_user.username or "")
+    if user[idx] < amount:
+        bot.send_message(message.chat.id, f"❌ Недостаточно! У тебя: {user[idx]}", reply_markup=main_menu(message.from_user.id))
+        return
+    
+    # Определяем target_id
+    if target_id is None:
+        with db_lock:
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute("SELECT user_id FROM users WHERE username = ?", (target_username,))
+            row = c.fetchone()
+            conn.close()
+        if not row:
+            bot.send_message(message.chat.id, f"❌ Пользователь @{target_username} не найден в боте", reply_markup=main_menu(message.from_user.id))
+            return
+        target_id = row[0]
+    
+    if target_id == message.from_user.id:
+        bot.send_message(message.chat.id, "❌ Нельзя передать самому себе", reply_markup=main_menu(message.from_user.id))
+        return
+    
+    # Защита от переполнения у получателя
+    target_user = get_user(target_id)
+    target_current = target_user[idx]
+    if target_current + amount > MAX_SAFE_INT:
+        bot.send_message(message.chat.id, "❌ У получателя слишком много предметов этого типа!", reply_markup=main_menu(message.from_user.id))
+        return
+    
+    add_field(message.from_user.id, field, -amount)
+    add_field(target_id, field, amount)
+    
+    # Формируем имя получателя красиво
+    if target_username:
+        display_name = f"@{target_username}"
+    else:
+        display_name = f"пользователю (ID: {target_id})"
+    
+    bot.send_message(
+        message.chat.id,
+        f"✅ Передано {amount} {item_type} {display_name}!",
+        reply_markup=main_menu(message.from_user.id)
     )
-
-    if MENU_IMAGE_URL and not has_acc:
-        bot.send_photo(message.chat.id, MENU_IMAGE_URL, caption=welcome_text, reply_markup=main_menu_keyboard(has_acc))
-    else:
-        bot.send_message(message.chat.id, welcome_text, reply_markup=main_menu_keyboard(has_acc))
-
-@bot.callback_query_handler(func=lambda call: call.data == "main_menu")
-def cb_main_menu(call):
-    user_id = call.from_user.id
-    has_acc = has_accounts(user_id)
-    safe_edit_message("👋 <b>Главное меню</b>", call.message.chat.id, call.message.message_id, reply_markup=main_menu_keyboard(has_acc))
-
-@bot.callback_query_handler(func=lambda call: call.data == "auth_start")
-def cb_auth_start(call):
-    qr_manager.start_auth(call.from_user.id, call.message.chat.id, bot)
-
-@bot.callback_query_handler(func=lambda call: call.data == "phone_auth_start")
-def cb_phone_auth_start(call):
-    phone_auth_manager.start_auth(call.from_user.id, call.message.chat.id, bot)
-
-@bot.callback_query_handler(func=lambda call: call.data == "auth_cancel")
-def cb_auth_cancel(call):
-    user_id = call.from_user.id
-    phone_auth_manager.cancel(user_id)
-    qr_manager.cancel(user_id)
-    user_states.pop(user_id, None)
-    has_acc = has_accounts(user_id)
-    safe_edit_message("❌ Авторизация отменена.", call.message.chat.id, call.message.message_id, reply_markup=main_menu_keyboard(has_acc))
-
-@bot.callback_query_handler(func=lambda call: call.data == "broadcast_settings")
-def cb_broadcast_settings(call):
-    user_id = call.from_user.id
-    user = get_user(user_id)
-    text = user[1] or "(не задан)"
-    interval = user[2] or 1.0
-    duration = user[8] if len(user) > 8 else 0
-    mpc = user[9] if len(user) > 9 else 1
-    mentions_mode = user[3] or 'none'
-    mentions_count = user[4] or 10
-
-    dur_str = f"{duration} ч" if duration > 0 else "♾ Бесконечно"
-    men_str = f"{mentions_count} чел" if mentions_mode != 'none' else "❌ Выключены"
-
-    settings_text = (
-        f"📨 <b>Настройки рассылки</b>\n\n"
-        f"📝 Текст: {text[:100]}{'...' if len(text) > 100 else ''}\n"
-        f"⏱ Интервал: {interval} сек\n"
-        f"⏳ Длительность: {dur_str}\n"
-        f"📬 Сообщений на чат: {mpc}\n"
-        f"👥 Упоминания: {men_str}"
-    )
-    safe_edit_message(settings_text, call.message.chat.id, call.message.message_id, reply_markup=broadcast_settings_keyboard())
-
-@bot.callback_query_handler(func=lambda call: call.data == "set_text")
-def cb_set_text(call):
-    user_id = call.from_user.id
-    user_states[user_id] = 'set_text'
-    safe_edit_message("📝 Введите текст сообщения для рассылки:", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard("broadcast_settings"))
-
-@bot.callback_query_handler(func=lambda call: call.data == "set_interval")
-def cb_set_interval(call):
-    user_id = call.from_user.id
-    user_states[user_id] = 'set_interval'
-    safe_edit_message("⏱ Введите интервал в секундах (например: 1.5, 2, 5):", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard("broadcast_settings"))
-
-@bot.callback_query_handler(func=lambda call: call.data == "set_duration")
-def cb_set_duration(call):
-    safe_edit_message("⏳ Выберите длительность рассылки:", call.message.chat.id, call.message.message_id, reply_markup=duration_keyboard())
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("dur_"))
-def cb_dur_preset(call):
-    user_id = call.from_user.id
-    val = call.data.split("_")[1]
-    if val == "custom":
-        user_states[user_id] = 'set_duration_custom'
-        safe_edit_message("⏳ Введите длительность в часах (например: 1, 24, 168) или 0 для бесконечной:", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard("set_duration"))
-    else:
-        hours = float(val)
-        db_query("UPDATE users SET broadcast_duration_hours=? WHERE user_id=?", (hours, user_id))
-        safe_edit_message(f"✅ Длительность установлена: {'♾ Бесконечно' if hours == 0 else f'{int(hours)} ч'}", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard("broadcast_settings"))
-
-@bot.callback_query_handler(func=lambda call: call.data == "set_msgs_per_chat")
-def cb_set_msgs_per_chat(call):
-    safe_edit_message("📬 Выберите количество сообщений на чат:", call.message.chat.id, call.message.message_id, reply_markup=msgs_per_chat_keyboard())
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("mpc_"))
-def cb_mpc_preset(call):
-    user_id = call.from_user.id
-    val = call.data.split("_")[1]
-    if val == "custom":
-        user_states[user_id] = 'set_mpc_custom'
-        safe_edit_message("📬 Введите количество сообщений на чат (от 1 до сколько угодно):", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard("set_msgs_per_chat"))
-    else:
-        count = int(val)
-        db_query("UPDATE users SET messages_per_chat=? WHERE user_id=?", (count, user_id))
-        safe_edit_message(f"✅ Сообщений на чат: {count}", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard("broadcast_settings"))
-
-@bot.callback_query_handler(func=lambda call: call.data == "mentions_settings")
-def cb_mentions_settings(call):
-    safe_edit_message("👥 Настройки упоминаний:", call.message.chat.id, call.message.message_id, reply_markup=mentions_keyboard())
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("mentions_"))
-def cb_mentions_preset(call):
-    user_id = call.from_user.id
-    val = call.data.split("_")[1]
-    if val == "none":
-        db_query("UPDATE users SET mentions_mode='none' WHERE user_id=?", (user_id,))
-        safe_edit_message("✅ Упоминания выключены.", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard("main_menu"))
-    elif val == "custom":
-        user_states[user_id] = 'set_mentions_custom'
-        safe_edit_message("👥 Введите количество упоминаемых человек (от 1 до сколько угодно):", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard("mentions_settings"))
-    else:
-        count = int(val)
-        db_query("UPDATE users SET mentions_mode='random', mentions_count=? WHERE user_id=?", (count, user_id))
-        safe_edit_message(f"✅ Упоминания: {count} чел", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard("main_menu"))
-
-@bot.callback_query_handler(func=lambda call: call.data == "select_chats")
-def cb_select_chats(call):
-    user_id = call.from_user.id
-    active = get_active_account(user_id)
-    if not active:
-        safe_edit_message("❌ Сначала добавьте и выберите аккаунт.", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard())
-        return
-    account_id = active[0]
-
-    started = manager.start_client(account_id, active[2])
-    if not started:
-        safe_edit_message("❌ Не удалось подключить аккаунт. Попробуйте удалить и добавить заново.", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard())
-        return
-
-    client = manager.get_client(account_id)
-    if not client:
-        safe_edit_message("❌ Ошибка подключения аккаунта.", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard())
-        return
-
     try:
-        me = manager.run_sync(account_id, client.get_me(), timeout=15)
-        me_id = me.id
+        bot.send_message(target_id, f"📦 Тебе передали {amount} {item_type} от @{message.from_user.username or 'Безымянный'}!")
     except:
-        safe_edit_message("❌ Ошибка получения данных аккаунта.", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard())
-        return
+        pass
 
+# ==================== CALLBACK ОБРАБОТЧИКИ (с защитой owner_id) ====================
+@bot.callback_query_handler(func=lambda call: True)
+def callback_handler(call):
+    user_id = call.from_user.id
+    username = call.from_user.username or ""
+    first_name = call.from_user.first_name or ""
+    chat_id = call.message.chat.id
+    msg_id = call.message.message_id
+    data = call.data
+    
+    # Парсим callback_data и проверяем владельца
+    action, owner_id = parse_cb(data)
+    if owner_id is not None and user_id != owner_id:
+        bot.answer_callback_query(call.id, text="🚫 Сообщение не твоё!", show_alert=True)
+        return
+    
+    bot.answer_callback_query(call.id)
+    
+    if action == "main_menu":
+        safe_edit(chat_id, msg_id, "🏠 *Главное меню:*", main_menu(user_id))
+    elif action == "farm":
+        do_farm(user_id, username, chat_id, msg_id)
+    elif action == "craft_menu":
+        safe_edit(chat_id, msg_id, "🔨 *Меню крафта:*", craft_menu(user_id))
+    elif action == "craft_joint":
+        do_craft(user_id, username, chat_id, "joint", msg_id)
+    elif action == "craft_blunt":
+        do_craft(user_id, username, chat_id, "blunt", msg_id)
+    elif action == "craft_golden":
+        do_craft(user_id, username, chat_id, "golden", msg_id)
+    elif action == "smoke_menu":
+        safe_edit(chat_id, msg_id, "💨 *Что будешь курить?*", smoke_menu(user_id))
+    elif action == "smoke_joint":
+        do_smoke(user_id, username, first_name, chat_id, "joint", msg_id)
+    elif action == "smoke_blunt":
+        do_smoke(user_id, username, first_name, chat_id, "blunt", msg_id)
+    elif action == "smoke_golden":
+        do_smoke(user_id, username, first_name, chat_id, "golden", msg_id)
+    elif action == "shop_menu":
+        safe_edit(chat_id, msg_id, "🏪 *Магазин:*", shop_menu(user_id))
+    elif action == "sell_menu":
+        safe_edit(chat_id, msg_id, "💰 *Что продать?*\n\nНапиши: продать [тип] [кол-во/все]", sell_menu(user_id))
+    elif action == "buy_menu":
+        safe_edit(chat_id, msg_id, "🛒 *Что купить?*\n\nНапиши: купить [тип] [кол-во/все]", buy_menu(user_id))
+    elif action == "upgrades_menu":
+        safe_edit(chat_id, msg_id, "⬆️ *Улучшения:*", upgrades_menu_markup(user_id))
+    elif action in ["sell_grass", "sell_rare", "sell_legendary"]:
+        item = action.replace("sell_", "")
+        safe_edit(chat_id, msg_id, f"💰 Сколько продать?\n\nНапиши: продать {item} [кол-во/все]", sell_menu(user_id))
+    elif action in ["buy_grass", "buy_rare", "buy_legendary"]:
+        item = action.replace("buy_", "")
+        safe_edit(chat_id, msg_id, f"🛒 Сколько купить?\n\nНапиши: купить {item} [кол-во/все]", buy_menu(user_id))
+    elif action.startswith("buy_upgrade_"):
+        key = action.replace("buy_upgrade_", "")
+        buy_upgrade(user_id, username, chat_id, key, msg_id)
+    elif action == "tops_menu":
+        safe_edit(chat_id, msg_id, "📊 *Выбери топ:*", tops_menu(user_id))
+    elif action == "top_smokers":
+        show_top(chat_id, "smokers", user_id, msg_id)
+    elif action == "top_high":
+        show_top(chat_id, "high", user_id, msg_id)
+    elif action == "top_rich":
+        show_top(chat_id, "rich", user_id, msg_id)
+    elif action == "profile":
+        show_profile(user_id, username, chat_id, msg_id)
+    elif action == "inventory":
+        show_inventory(user_id, username, chat_id, msg_id)
+    elif action == "daily":
+        do_daily(user_id, username, chat_id, msg_id)
+
+# ==================== АДМИН КОМАНДЫ ====================
+@bot.message_handler(commands=["admin_give"])
+def admin_give(message):
+    if message.from_user.id != ADMIN_ID:
+        return
     try:
-        dialogs = manager.get_dialogs_cached(account_id, client, me_id, force_refresh=True)
+        parts = message.text.split()
+        target = int(parts[1])
+        amount = int(parts[2])
+        field = parts[3] if len(parts) > 3 else "balance"
+        if field not in VALID_FIELDS:
+            bot.reply_to(message, "❌ Недопустимое поле!")
+            return
+        if amount > MAX_SAFE_INT:
+            amount = MAX_SAFE_INT
+        add_field(target, field, amount)
+        bot.reply_to(message, f"✅ Выдано {amount:,} {field} пользователю {target}")
     except Exception as e:
-        safe_edit_message(f"❌ Ошибка загрузки чатов: {str(e)}", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard())
+        bot.reply_to(message, f"❌ Ошибка: {e}")
+
+@bot.message_handler(commands=["admin_give_all"])
+def admin_give_all(message):
+    if message.from_user.id != ADMIN_ID:
         return
-
-    selected = get_selected_chats(user_id, account_id)
-    selected_ids = {s[0] for s in selected}
-
-    kb = InlineKeyboardMarkup(row_width=1)
-    for dialog in dialogs[:50]:
-        cid = dialog.id
-        name = dialog.name or f"Chat {cid}"
-        mark = "✅ " if cid in selected_ids else "⬜ "
-        kb.add(InlineKeyboardButton(f"{mark}{name}", callback_data=f"toggle_chat:{cid}:{html.escape(name[:30])}"))
-
-    kb.add(InlineKeyboardButton("🔄 Обновить список", callback_data="select_chats"))
-    kb.add(InlineKeyboardButton("❌ Очистить выбор", callback_data="clear_chats"))
-    kb.add(InlineKeyboardButton("◀️ Назад", callback_data="main_menu"))
-
-    safe_edit_message(f"📋 Выберите чаты для рассылки (выбрано: {len(selected_ids)}):", call.message.chat.id, call.message.message_id, reply_markup=kb)
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("toggle_chat:"))
-def cb_toggle_chat(call):
-    user_id = call.from_user.id
-    active = get_active_account(user_id)
-    if not active:
-        return
-    parts = call.data.split(":", 2)
-    chat_id = int(parts[1])
-    chat_name = parts[2] if len(parts) > 2 else "Chat"
-    toggle_chat_selection(user_id, active[0], chat_id, chat_name)
-    cb_select_chats(call)
-
-@bot.callback_query_handler(func=lambda call: call.data == "clear_chats")
-def cb_clear_chats(call):
-    user_id = call.from_user.id
-    active = get_active_account(user_id)
-    if active:
-        clear_selected_chats(user_id, active[0])
-    cb_select_chats(call)
-
-@bot.callback_query_handler(func=lambda call: call.data == "broadcast_start")
-def cb_broadcast_start(call):
-    user_id = call.from_user.id
-    user = get_user(user_id)
-    active = get_active_account(user_id)
-
-    if not active:
-        safe_edit_message("❌ Сначала добавьте аккаунт.", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard())
-        return
-
-    account_id = active[0]
-    text = user[1] or ""
-    interval = user[2] or 1.0
-    duration = user[8] if len(user) > 8 else 0
-    mpc = user[9] if len(user) > 9 else 1
-    mentions_mode = user[3] or 'none'
-    mentions_count = user[4] or 10
-
-    if not text.strip():
-        safe_edit_message("❌ Сначала задайте текст сообщения в настройках.", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard("broadcast_settings"))
-        return
-
-    selected = get_selected_chats(user_id, account_id)
-    if not selected:
-        safe_edit_message("❌ Сначала выберите чаты для рассылки.", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard("select_chats"))
-        return
-
-    started = manager.start_client(account_id, active[2])
-    if not started:
-        safe_edit_message("❌ Не удалось подключить аккаунт.", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard())
-        return
-
-    chat_ids = [s[0] for s in selected]
-
-    db_query("UPDATE users SET is_running=1 WHERE user_id=?", (user_id,))
-
-    dur_str = f"{duration} ч" if duration > 0 else "♾ Бесконечно"
-    men_str = f"{mentions_count} чел" if mentions_mode != 'none' else "❌ Выключены"
-
-    safe_edit_message(
-        f"▶️ <b>Рассылка запущена!</b>\n\n"
-        f"📝 Текст: {text[:50]}{'...' if len(text) > 50 else ''}\n"
-        f"📋 Чатов: {len(chat_ids)}\n"
-        f"📬 Сообщений на чат: {mpc}\n"
-        f"⏱ Интервал: {interval} сек\n"
-        f"⏳ Длительность: {dur_str}\n"
-        f"👥 Упоминания: {men_str}",
-        call.message.chat.id, call.message.message_id, reply_markup=stop_keyboard()
-    )
-
-    t = threading.Thread(target=broadcast_worker, args=(user_id, account_id, chat_ids, text + FOOTER_TEXT, interval, duration, mpc, mentions_mode, mentions_count), daemon=True)
-    t.start()
-
-@bot.callback_query_handler(func=lambda call: call.data == "broadcast_stop")
-def cb_broadcast_stop(call):
-    user_id = call.from_user.id
-    db_query("UPDATE users SET is_running=0 WHERE user_id=?", (user_id,))
-    safe_edit_message("⏹ Рассылка останавливается...", call.message.chat.id, call.message.message_id, reply_markup=main_menu_keyboard(has_accounts(user_id)))
-
-@bot.callback_query_handler(func=lambda call: call.data == "my_accounts")
-def cb_my_accounts(call):
-    user_id = call.from_user.id
-    accounts = get_accounts(user_id)
-    if not accounts:
-        safe_edit_message("👤 У вас пока нет аккаунтов.", call.message.chat.id, call.message.message_id, reply_markup=add_account_menu_keyboard())
-        return
-    safe_edit_message("👤 <b>Ваши аккаунты</b>:", call.message.chat.id, call.message.message_id, reply_markup=accounts_keyboard(user_id))
-
-@bot.callback_query_handler(func=lambda call: call.data == "add_account_menu")
-def cb_add_account_menu(call):
-    safe_edit_message("➕ <b>Добавить аккаунт</b>", call.message.chat.id, call.message.message_id, reply_markup=add_account_menu_keyboard())
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("select_account:"))
-def cb_select_account(call):
-    user_id = call.from_user.id
-    account_id = int(call.data.split(":")[1])
-    set_active_account(user_id, account_id)
-    safe_edit_message("✅ Аккаунт выбран.", call.message.chat.id, call.message.message_id, reply_markup=accounts_keyboard(user_id))
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("confirm_delete_account:"))
-def cb_confirm_delete(call):
-    account_id = int(call.data.split(":")[1])
-    safe_edit_message("❓ Вы уверены, что хотите удалить этот аккаунт?", call.message.chat.id, call.message.message_id, reply_markup=confirm_delete_keyboard(account_id))
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("delete_account:"))
-def cb_delete_account(call):
-    user_id = call.from_user.id
-    account_id = int(call.data.split(":")[1])
-    delete_account(account_id)
-    safe_edit_message("✅ Аккаунт удалён.", call.message.chat.id, call.message.message_id, reply_markup=accounts_keyboard(user_id))
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("account_info:"))
-def cb_account_info(call):
-    account_id = int(call.data.split(":")[1])
-    acc = get_account(account_id)
-    if not acc:
-        safe_edit_message("❌ Аккаунт не найден.", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard("my_accounts"))
-        return
-    name = f"{acc[4]} {acc[5]}".strip() or "Аккаунт"
-    phone = acc[3] or "не указан"
-    created = time.strftime('%d.%m.%Y %H:%M', time.localtime(acc[6])) if acc[6] else "неизвестно"
-    info = f"ℹ️ <b>Информация об аккаунте</b>\n\n👤 {name}\n📱 <code>{phone}</code>\n📅 Добавлен: {created}"
-    safe_edit_message(info, call.message.chat.id, call.message.message_id, reply_markup=back_keyboard("my_accounts"))
-
-# ================== MESSAGE HANDLERS ==================
-@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == 'phone_input')
-def handle_phone_input(message):
-    user_id = message.from_user.id
-    phone = message.text.strip()
-    if phone_auth_manager.submit_phone(user_id, phone):
-        bot.delete_message(message.chat.id, message.message_id)
-    else:
-        bot.send_message(message.chat.id, "❌ Ошибка. Попробуйте снова /start")
-
-@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == 'phone_code_input')
-def handle_phone_code(message):
-    user_id = message.from_user.id
-    code = message.text.strip()
-    if phone_auth_manager.submit_code(user_id, code):
-        bot.delete_message(message.chat.id, message.message_id)
-    else:
-        bot.send_message(message.chat.id, "❌ Ошибка. Попробуйте снова /start")
-
-@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == 'phone_2fa_input')
-def handle_phone_2fa(message):
-    user_id = message.from_user.id
-    password = message.text.strip()
-    if phone_auth_manager.submit_password(user_id, password):
-        bot.delete_message(message.chat.id, message.message_id)
-    else:
-        bot.send_message(message.chat.id, "❌ Ошибка. Попробуйте снова /start")
-
-@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == 'set_text')
-def handle_set_text(message):
-    user_id = message.from_user.id
-    text = message.text
-    db_query("UPDATE users SET broadcast_text=? WHERE user_id=?", (text, user_id))
-    user_states.pop(user_id, None)
-    bot.send_message(message.chat.id, "✅ Текст сохранён.", reply_markup=main_menu_keyboard(has_accounts(user_id)))
-
-@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == 'set_interval')
-def handle_set_interval(message):
-    user_id = message.from_user.id
     try:
-        interval = float(message.text.replace(',', '.'))
-        if interval < 0.5:
-            interval = 0.5
-        db_query("UPDATE users SET broadcast_interval=? WHERE user_id=?", (interval, user_id))
-        user_states.pop(user_id, None)
-        bot.send_message(message.chat.id, f"✅ Интервал установлен: {interval} сек", reply_markup=main_menu_keyboard(has_accounts(user_id)))
-    except ValueError:
-        bot.send_message(message.chat.id, "❌ Введите число, например 1.5 или 2")
+        parts = message.text.split()
+        amount = int(parts[1]) if len(parts) > 1 else 100_000_000_000_000
+        field = parts[2] if len(parts) > 2 else "balance"
+        if field not in VALID_FIELDS:
+            bot.reply_to(message, "❌ Недопустимое поле!")
+            return
+        if amount > MAX_SAFE_INT:
+            amount = MAX_SAFE_INT
+        with db_lock:
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute(f"UPDATE users SET {field} = CASE WHEN {field} + ? > {MAX_SAFE_INT} THEN {MAX_SAFE_INT} ELSE {field} + ? END", (amount, amount))
+            conn.commit()
+            conn.close()
+        bot.reply_to(message, f"✅ Выдано {amount:,} {field} всем пользователям!")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка: {e}")
 
-@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == 'set_duration_custom')
-def handle_set_duration_custom(message):
-    user_id = message.from_user.id
-    try:
-        hours = float(message.text.replace(',', '.'))
-        if hours < 0:
-            hours = 0
-        db_query("UPDATE users SET broadcast_duration_hours=? WHERE user_id=?", (hours, user_id))
-        user_states.pop(user_id, None)
-        dur_str = "♾ Бесконечно" if hours == 0 else f"{hours} ч"
-        bot.send_message(message.chat.id, f"✅ Длительность установлена: {dur_str}", reply_markup=main_menu_keyboard(has_accounts(user_id)))
-    except ValueError:
-        bot.send_message(message.chat.id, "❌ Введите число, например 1, 24, 168 или 0")
-
-@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == 'set_mpc_custom')
-def handle_set_mpc_custom(message):
-    user_id = message.from_user.id
-    try:
-        count = int(message.text.strip())
-        if count < 1:
-            count = 1
-        db_query("UPDATE users SET messages_per_chat=? WHERE user_id=?", (count, user_id))
-        user_states.pop(user_id, None)
-        bot.send_message(message.chat.id, f"✅ Сообщений на чат: {count}", reply_markup=main_menu_keyboard(has_accounts(user_id)))
-    except ValueError:
-        bot.send_message(message.chat.id, "❌ Введите целое число от 1 и выше")
-
-@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == 'set_mentions_custom')
-def handle_set_mentions_custom(message):
-    user_id = message.from_user.id
-    try:
-        count = int(message.text.strip())
-        if count < 1:
-            count = 1
-        db_query("UPDATE users SET mentions_mode='random', mentions_count=? WHERE user_id=?", (count, user_id))
-        user_states.pop(user_id, None)
-        bot.send_message(message.chat.id, f"✅ Упоминания: {count} чел", reply_markup=main_menu_keyboard(has_accounts(user_id)))
-    except ValueError:
-        bot.send_message(message.chat.id, "❌ Введите целое число от 1 и выше")
-
-# ================== MAIN ==================
+# ==================== ЗАПУСК ====================
 if __name__ == "__main__":
     init_db()
-    # Auto-reconnect existing accounts
-    accounts = db_query("SELECT id, session_path FROM accounts")
-    for acc in accounts:
-        aid = acc[0]
-        spath = acc[1]
-        if spath and os.path.exists(spath):
-            try:
-                manager.start_client(aid, spath)
-            except Exception as e:
-                print(f"Auto-connect failed for account {aid}: {e}")
-    print("Bot started!")
-    bot.polling(none_stop=True, interval=0.5)
+    # Кэшируем username бота при старте
+    try:
+        BOT_USERNAME = bot.get_me().username
+    except:
+        BOT_USERNAME = ""
+    print("🌿 Травка Бот запущен!")
+    bot.polling(non_stop=True)

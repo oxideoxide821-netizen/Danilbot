@@ -84,7 +84,12 @@ def init_db():
             is_running INTEGER DEFAULT 0,
             active_account_id INTEGER DEFAULT NULL,
             broadcast_duration_hours REAL DEFAULT 0,
-            messages_per_chat INTEGER DEFAULT 1
+            messages_per_chat INTEGER DEFAULT 1,
+            broadcast_format TEXT DEFAULT 'plain',
+            media_file_id TEXT DEFAULT '',
+            media_type TEXT DEFAULT '',
+            hidden_mentions_mode TEXT DEFAULT 'none',
+            hidden_mentions_count INTEGER DEFAULT 10
         )
     """)
     c.execute("""
@@ -116,6 +121,17 @@ def init_db():
             UNIQUE(inviter_id, invited_id)
         )
     """)
+    for col, dtype in [
+        ("broadcast_format", "TEXT DEFAULT 'plain'"),
+        ("media_file_id", "TEXT DEFAULT ''"),
+        ("media_type", "TEXT DEFAULT ''"),
+        ("hidden_mentions_mode", "TEXT DEFAULT 'none'"),
+        ("hidden_mentions_count", "INTEGER DEFAULT 10"),
+    ]:
+        try:
+            c.execute(f"ALTER TABLE users ADD COLUMN {col} {dtype}")
+        except:
+            pass
     conn.commit()
     conn.close()
 
@@ -125,10 +141,7 @@ def db_query(query, params=(), fetchone=False):
         try:
             c = conn.cursor()
             c.execute(query, params)
-            if query.strip().upper().startswith("SELECT"):
-                conn.commit()
-            else:
-                conn.commit()
+            conn.commit()
             result = c.fetchone() if fetchone else c.fetchall()
             return result
         finally:
@@ -571,9 +584,12 @@ def broadcast_settings_keyboard():
     kb = InlineKeyboardMarkup(row_width=1)
     kb.add(
         InlineKeyboardButton("📝 Изменить текст сообщения", callback_data="set_text"),
+        InlineKeyboardButton("🎨 Оформление и медиа", callback_data="formatting_settings"),
         InlineKeyboardButton("⏱ Изменить интервал отправки", callback_data="set_interval"),
         InlineKeyboardButton("⏳ Длительность рассылки", callback_data="set_duration"),
         InlineKeyboardButton("📬 Сообщений на чат", callback_data="set_msgs_per_chat"),
+        InlineKeyboardButton("👥 Упоминания", callback_data="mentions_settings"),
+        InlineKeyboardButton("👻 Скрытые упоминания", callback_data="hidden_mentions_settings"),
         InlineKeyboardButton("◀️ Вернуться в главное меню", callback_data="main_menu"),
     )
     return kb
@@ -611,6 +627,71 @@ def confirm_delete_keyboard(account_id):
     kb.add(
         InlineKeyboardButton("✅ Да, удалить", callback_data=f"delete_account:{account_id}"),
         InlineKeyboardButton("❌ Нет, отмена", callback_data="my_accounts")
+    )
+    return kb
+
+def duration_keyboard():
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        InlineKeyboardButton("1 час", callback_data="dur_1"),
+        InlineKeyboardButton("24 часа", callback_data="dur_24"),
+        InlineKeyboardButton("168 часов (неделя)", callback_data="dur_168"),
+        InlineKeyboardButton("♾ Бесконечно (0)", callback_data="dur_0"),
+        InlineKeyboardButton("✏️ Свое значение", callback_data="dur_custom"),
+        InlineKeyboardButton("◀️ Назад", callback_data="broadcast_settings")
+    )
+    return kb
+
+def mentions_keyboard():
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        InlineKeyboardButton("❌ Без упоминаний", callback_data="mentions_none"),
+        InlineKeyboardButton("5 чел", callback_data="mentions_5"),
+        InlineKeyboardButton("10 чел", callback_data="mentions_10"),
+        InlineKeyboardButton("25 чел", callback_data="mentions_25"),
+        InlineKeyboardButton("50 чел", callback_data="mentions_50"),
+        InlineKeyboardButton("✏️ Свое число", callback_data="mentions_custom"),
+        InlineKeyboardButton("◀️ Назад", callback_data="main_menu")
+    )
+    return kb
+
+def hidden_mentions_keyboard():
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        InlineKeyboardButton("❌ Без скрытых", callback_data="hmentions_none"),
+        InlineKeyboardButton("5 чел", callback_data="hmentions_5"),
+        InlineKeyboardButton("10 чел", callback_data="hmentions_10"),
+        InlineKeyboardButton("25 чел", callback_data="hmentions_25"),
+        InlineKeyboardButton("50 чел", callback_data="hmentions_50"),
+        InlineKeyboardButton("✏️ Свое число", callback_data="hmentions_custom"),
+        InlineKeyboardButton("◀️ Назад", callback_data="broadcast_settings")
+    )
+    return kb
+
+def msgs_per_chat_keyboard():
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        InlineKeyboardButton("1 сообщение", callback_data="mpc_1"),
+        InlineKeyboardButton("3 сообщения", callback_data="mpc_3"),
+        InlineKeyboardButton("5 сообщений", callback_data="mpc_5"),
+        InlineKeyboardButton("10 сообщений", callback_data="mpc_10"),
+        InlineKeyboardButton("✏️ Свое число", callback_data="mpc_custom"),
+        InlineKeyboardButton("◀️ Назад", callback_data="broadcast_settings")
+    )
+    return kb
+
+def formatting_keyboard():
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        InlineKeyboardButton("📄 Обычный", callback_data="fmt_plain"),
+        InlineKeyboardButton("𝗕 Жирный", callback_data="fmt_bold"),
+        InlineKeyboardButton("𝘐 Курсив", callback_data="fmt_italic"),
+        InlineKeyboardButton("𝙈 Жирный + курсив", callback_data="fmt_bolditalic"),
+        InlineKeyboardButton("𝖬 Моноширинный", callback_data="fmt_mono"),
+        InlineKeyboardButton("❝ Цитата", callback_data="fmt_quote"),
+        InlineKeyboardButton("📎 Прикрепить фото/видео/док", callback_data="fmt_attach_media"),
+        InlineKeyboardButton("🗑 Убрать медиа", callback_data="fmt_remove_media"),
+        InlineKeyboardButton("◀️ Назад", callback_data="broadcast_settings")
     )
     return kb
 
@@ -688,57 +769,32 @@ def get_referral_link(user_id):
 def has_premium_footer(user_id):
     return get_referral_count(user_id) >= 5
 
-
-# ================== BROADCAST KEYBOARDS ==================
-def duration_keyboard():
-    kb = InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        InlineKeyboardButton("1 час", callback_data="dur_1"),
-        InlineKeyboardButton("24 часа", callback_data="dur_24"),
-        InlineKeyboardButton("168 часов (неделя)", callback_data="dur_168"),
-        InlineKeyboardButton("♾ Бесконечно (0)", callback_data="dur_0"),
-        InlineKeyboardButton("✏️ Свое значение", callback_data="dur_custom"),
-        InlineKeyboardButton("◀️ Назад", callback_data="broadcast_settings")
-    )
-    return kb
-
-def mentions_keyboard():
-    kb = InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        InlineKeyboardButton("❌ Без упоминаний", callback_data="mentions_none"),
-        InlineKeyboardButton("5 чел", callback_data="mentions_5"),
-        InlineKeyboardButton("10 чел", callback_data="mentions_10"),
-        InlineKeyboardButton("25 чел", callback_data="mentions_25"),
-        InlineKeyboardButton("50 чел", callback_data="mentions_50"),
-        InlineKeyboardButton("✏️ Свое число", callback_data="mentions_custom"),
-        InlineKeyboardButton("◀️ Назад", callback_data="main_menu")
-    )
-    return kb
-
-def msgs_per_chat_keyboard():
-    kb = InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        InlineKeyboardButton("1 сообщение", callback_data="mpc_1"),
-        InlineKeyboardButton("3 сообщения", callback_data="mpc_3"),
-        InlineKeyboardButton("5 сообщений", callback_data="mpc_5"),
-        InlineKeyboardButton("10 сообщений", callback_data="mpc_10"),
-        InlineKeyboardButton("✏️ Свое число", callback_data="mpc_custom"),
-        InlineKeyboardButton("◀️ Назад", callback_data="broadcast_settings")
-    )
-    return kb
-
 # ================== BROADCAST LOGIC ==================
-async def get_members_for_mentions(client, chat_id, count):
+def apply_format(text, fmt):
+    if fmt == 'bold':
+        return f"<b>{html.escape(text)}</b>"
+    elif fmt == 'italic':
+        return f"<i>{html.escape(text)}</i>"
+    elif fmt == 'bolditalic':
+        return f"<b><i>{html.escape(text)}</i></b>"
+    elif fmt == 'mono':
+        return f"<code>{html.escape(text)}</code>"
+    elif fmt == 'quote':
+        return f"<blockquote>{html.escape(text)}</blockquote>"
+    return text
+
+async def get_members_for_mentions(client, chat_id, count, exclude_ids=None):
     members = []
+    exclude_ids = exclude_ids or set()
     try:
-        async for user in client.iter_participants(chat_id, limit=count * 3):
+        async for user in client.iter_participants(chat_id, limit=count * 5):
             if user.bot:
                 continue
             if user.deleted:
                 continue
+            if user.id in exclude_ids:
+                continue
             members.append(user)
-            if len(members) >= count:
-                break
     except Exception:
         pass
     random.shuffle(members)
@@ -754,27 +810,54 @@ def build_mention_text(client, members):
             parts.append(f'<a href="tg://user?id={m.id}">{html.escape(name or "User")}</a>')
     return " ".join(parts)
 
-async def send_to_chat(client, chat_id, text, mentions_mode, mentions_count):
-    final_text = text
+def build_hidden_mention_text(members):
+    parts = []
+    for m in members:
+        parts.append(f'<a href="tg://user?id={m.id}">\u200b</a>')
+    return "".join(parts)
+
+async def send_to_chat(client, chat_id, text, mentions_mode, mentions_count, fmt='plain', media_file_id=None, media_type=None, used_ids=None, hidden_mode='none', hidden_count=0):
+    used_ids = used_ids or set()
+    final_text = apply_format(text, fmt)
+
+    visible_members = []
     if mentions_mode != 'none' and mentions_count > 0:
-        members = await get_members_for_mentions(client, chat_id, mentions_count)
-        if members:
-            mention_text = build_mention_text(client, members)
-            final_text = f"{mention_text}\n\n{text}"
+        visible_members = await get_members_for_mentions(client, chat_id, mentions_count, used_ids)
+        if visible_members:
+            mention_text = build_mention_text(client, visible_members)
+            final_text = f"{mention_text}\n\n{final_text}"
+            for m in visible_members:
+                used_ids.add(m.id)
+
+    hidden_members = []
+    if hidden_mode != 'none' and hidden_count > 0:
+        hidden_members = await get_members_for_mentions(client, chat_id, hidden_count, used_ids)
+        if hidden_members:
+            hidden_text = build_hidden_mention_text(hidden_members)
+            final_text = hidden_text + "\n\n" + final_text
+            for m in hidden_members:
+                used_ids.add(m.id)
+
     try:
-        await client.send_message(chat_id, final_text, parse_mode='html', link_preview=False)
+        if media_file_id and media_type:
+            await client.send_file(chat_id, media_file_id, caption=final_text, parse_mode='html', link_preview=False)
+        else:
+            await client.send_message(chat_id, final_text, parse_mode='html', link_preview=False)
         return True
     except FloodWaitError as e:
         await asyncio.sleep(e.seconds)
         try:
-            await client.send_message(chat_id, final_text, parse_mode='html', link_preview=False)
+            if media_file_id and media_type:
+                await client.send_file(chat_id, media_file_id, caption=final_text, parse_mode='html', link_preview=False)
+            else:
+                await client.send_message(chat_id, final_text, parse_mode='html', link_preview=False)
             return True
         except:
             return False
     except Exception:
         return False
 
-def broadcast_worker(user_id, account_id, chat_ids, text, interval, duration_hours, msgs_per_chat, mentions_mode, mentions_count):
+def broadcast_worker(user_id, account_id, chat_ids, text, interval, duration_hours, msgs_per_chat, mentions_mode, mentions_count, fmt='plain', media_file_id=None, media_type=None, hidden_mode='none', hidden_count=0):
     start_time = time.time()
     duration_seconds = duration_hours * 3600 if duration_hours > 0 else None
     success = 0
@@ -793,12 +876,13 @@ def broadcast_worker(user_id, account_id, chat_ids, text, interval, duration_hou
             user_row = db_query("SELECT is_running FROM users WHERE user_id=?", (user_id,), fetchone=True)
             if not user_row or not user_row[0]:
                 break
+            chat_used_ids = set()
             for _ in range(msgs_per_chat):
                 user_row = db_query("SELECT is_running FROM users WHERE user_id=?", (user_id,), fetchone=True)
                 if not user_row or not user_row[0]:
                     break
                 try:
-                    result = manager.run_sync(account_id, send_to_chat(client, chat_id, text, mentions_mode, mentions_count), timeout=60)
+                    result = manager.run_sync(account_id, send_to_chat(client, chat_id, text, mentions_mode, mentions_count, fmt, media_file_id, media_type, chat_used_ids, hidden_mode, hidden_count), timeout=60)
                     if result:
                         success += 1
                     else:
@@ -816,6 +900,88 @@ def broadcast_worker(user_id, account_id, chat_ids, text, interval, duration_hou
     except:
         pass
 
+# ================== CHAT LIST RENDER ==================
+def _render_chat_page(user_id, chat_id, message_id, account_id):
+    data = chat_filters.get(user_id, {})
+    dialogs = data.get('_dialogs', [])
+    if not dialogs:
+        cb_select_chats_raw(user_id, chat_id, message_id, account_id)
+        return
+
+    selected = get_selected_chats(user_id, account_id)
+    selected_ids = {s[0] for s in selected}
+
+    page = user_chat_pages.get(user_id, 0)
+    per_page = 9
+    total_pages = max(1, (len(dialogs) + per_page - 1) // per_page)
+    if page >= total_pages:
+        page = total_pages - 1
+        user_chat_pages[user_id] = page
+    start = page * per_page
+    end = start + per_page
+    page_dialogs = dialogs[start:end]
+
+    kb = InlineKeyboardMarkup()
+    for i in range(0, len(page_dialogs), 3):
+        row = []
+        for j in range(3):
+            if i + j < len(page_dialogs):
+                dialog = page_dialogs[i + j]
+                cid = dialog.id
+                name = dialog.name or f"Chat {cid}"
+                chat_filters[user_id][cid] = name
+                mark = "✅ " if cid in selected_ids else "⬜ "
+                short = name[:12] + "..." if len(name) > 12 else name
+                row.append(InlineKeyboardButton(f"{mark}{short}", callback_data=f"t:{cid}"))
+        if row:
+            kb.row(*row)
+
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("⬅️ Назад", callback_data="chat_page_prev"))
+    nav_row.append(InlineKeyboardButton(f"📄 {page + 1}/{total_pages}", callback_data="noop"))
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton("Вперёд ➡️", callback_data="chat_page_next"))
+    if nav_row:
+        kb.row(*nav_row)
+
+    kb.row(InlineKeyboardButton("🔄 Обновить список", callback_data="select_chats"))
+    kb.row(InlineKeyboardButton("❌ Очистить выбор", callback_data="clear_chats"))
+    kb.row(InlineKeyboardButton("◀️ Назад", callback_data="main_menu"))
+    safe_edit_message(f"📋 Выберите чаты для рассылки (выбрано: {len(selected_ids)}):", chat_id, message_id, reply_markup=kb)
+
+
+def cb_select_chats_raw(user_id, chat_id, message_id, account_id):
+    acc = get_account(account_id)
+    if not acc:
+        safe_edit_message("❌ Аккаунт не найден.", chat_id, message_id, reply_markup=back_keyboard())
+        return
+
+    safe_edit_message("⏳ <b>Загрузка чатов...</b>\n\nПодождите, получаем список групп.", chat_id, message_id)
+
+    started = manager.start_client(account_id, acc[2])
+    if not started:
+        safe_edit_message("❌ Не удалось подключить аккаунт. Попробуйте удалить и добавить заново.", chat_id, message_id, reply_markup=back_keyboard())
+        return
+    client = manager.get_client(account_id)
+    if not client:
+        safe_edit_message("❌ Ошибка подключения аккаунта.", chat_id, message_id, reply_markup=back_keyboard())
+        return
+    try:
+        me = manager.run_sync(account_id, client.get_me(), timeout=15)
+        me_id = me.id
+    except:
+        safe_edit_message("❌ Ошибка получения данных аккаунта.", chat_id, message_id, reply_markup=back_keyboard())
+        return
+    try:
+        dialogs = manager.get_dialogs_cached(account_id, client, me_id, force_refresh=True)
+    except Exception as e:
+        safe_edit_message(f"❌ Ошибка загрузки чатов: {str(e)}", chat_id, message_id, reply_markup=back_keyboard())
+        return
+
+    chat_filters[user_id] = {'_dialogs': dialogs}
+    _render_chat_page(user_id, chat_id, message_id, account_id)
+
 # ================== HANDLERS ==================
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
@@ -823,7 +989,6 @@ def cmd_start(message):
     get_user(user_id)
     has_acc = has_accounts(user_id)
 
-    # Handle referral
     if message.text and len(message.text.split()) > 1:
         arg = message.text.split()[1]
         if arg.startswith("ref"):
@@ -890,15 +1055,27 @@ def cb_broadcast_settings(call):
     mpc = user[9] if len(user) > 9 else 1
     mentions_mode = user[3] or 'none'
     mentions_count = user[4] or 10
+    fmt = user[10] if len(user) > 10 else 'plain'
+    media_type = user[12] if len(user) > 12 else ''
+    media_file = user[11] if len(user) > 11 else ''
+    hidden_mode = user[13] if len(user) > 13 else 'none'
+    hidden_count = user[14] if len(user) > 14 else 10
     dur_str = f"{duration} ч" if duration > 0 else "♾ Бесконечно"
     men_str = f"{mentions_count} чел" if mentions_mode != 'none' else "❌ Выключены"
+    hidden_str = f"{hidden_count} чел" if hidden_mode != 'none' else "❌ Выключены"
+    fmt_names = {'plain': 'Обычный', 'bold': 'Жирный', 'italic': 'Курсив', 'bolditalic': 'Жирный+Курсив', 'mono': 'Моноширинный', 'quote': 'Цитата'}
+    fmt_str = fmt_names.get(fmt, 'Обычный')
+    media_str = f"📎 {media_type.upper()} прикреплено" if media_file and media_type else "❌ Нет медиа"
     settings_text = (
         f"📨 <b>Настройки рассылки</b>\n\n"
         f"📝 Текст: {text[:100]}{'...' if len(text) > 100 else ''}\n"
+        f"🎨 Оформление: {fmt_str}\n"
+        f"{media_str}\n"
         f"⏱ Интервал: {interval} сек\n"
         f"⏳ Длительность: {dur_str}\n"
         f"📬 Сообщений на чат: {mpc}\n"
-        f"👥 Упоминания: {men_str}"
+        f"👥 Упоминания: {men_str}\n"
+        f"👻 Скрытые упоминания: {hidden_str}"
     )
     safe_edit_message(settings_text, call.message.chat.id, call.message.message_id, reply_markup=broadcast_settings_keyboard())
 
@@ -934,6 +1111,25 @@ def cb_dur_preset(call):
 def cb_set_msgs_per_chat(call):
     safe_edit_message("📬 Выберите количество сообщений на чат:", call.message.chat.id, call.message.message_id, reply_markup=msgs_per_chat_keyboard())
 
+@bot.callback_query_handler(func=lambda call: call.data == "formatting_settings")
+def cb_formatting_settings(call):
+    safe_edit_message("🎨 <b>Оформление сообщения</b>\n\nВыберите стиль текста или прикрепите медиа:", call.message.chat.id, call.message.message_id, reply_markup=formatting_keyboard())
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("fmt_"))
+def cb_format_preset(call):
+    user_id = call.from_user.id
+    val = call.data.split("_")[1]
+    if val == "attach_media":
+        user_states[user_id] = 'attach_media'
+        safe_edit_message("📎 Отправьте <b>фото, видео или документ</b>, который будет прикреплён к каждому сообщению рассылки:", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard("formatting_settings"))
+    elif val == "remove_media":
+        db_query("UPDATE users SET media_file_id='', media_type='' WHERE user_id=?", (user_id,))
+        safe_edit_message("✅ Медиа убрано.", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard("formatting_settings"))
+    else:
+        db_query("UPDATE users SET broadcast_format=? WHERE user_id=?", (val, user_id))
+        fmt_names = {'plain': 'Обычный', 'bold': 'Жирный', 'italic': 'Курсив', 'bolditalic': 'Жирный+Курсив', 'mono': 'Моноширинный', 'quote': 'Цитата'}
+        safe_edit_message(f"✅ Оформление: {fmt_names.get(val, val)}", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard("formatting_settings"))
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith("mpc_"))
 def cb_mpc_preset(call):
     user_id = call.from_user.id
@@ -965,90 +1161,24 @@ def cb_mentions_preset(call):
         db_query("UPDATE users SET mentions_mode='random', mentions_count=? WHERE user_id=?", (count, user_id))
         safe_edit_message(f"✅ Упоминания: {count} чел", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard("main_menu"))
 
-def _render_chat_page(user_id, chat_id, message_id, account_id):
-    """Fast re-render chat list from cache (no server reload)."""
-    data = chat_filters.get(user_id, {})
-    dialogs = data.get('_dialogs', [])
-    if not dialogs:
-        # Fallback: reload from server if cache lost
-        cb_select_chats_raw(user_id, chat_id, message_id, account_id)
-        return
+@bot.callback_query_handler(func=lambda call: call.data == "hidden_mentions_settings")
+def cb_hidden_mentions_settings(call):
+    safe_edit_message("👻 Настройки скрытых упоминаний:\n\nПользователи получат уведомление, но не увидят упоминание в тексте.", call.message.chat.id, call.message.message_id, reply_markup=hidden_mentions_keyboard())
 
-    selected = get_selected_chats(user_id, account_id)
-    selected_ids = {s[0] for s in selected}
-
-    page = user_chat_pages.get(user_id, 0)
-    per_page = 9
-    total_pages = max(1, (len(dialogs) + per_page - 1) // per_page)
-    if page >= total_pages:
-        page = total_pages - 1
-        user_chat_pages[user_id] = page
-    start = page * per_page
-    end = start + per_page
-    page_dialogs = dialogs[start:end]
-
-    kb = InlineKeyboardMarkup()
-    for i in range(0, len(page_dialogs), 3):
-        row = []
-        for j in range(3):
-            if i + j < len(page_dialogs):
-                dialog = page_dialogs[i + j]
-                cid = dialog.id
-                name = dialog.name or f"Chat {cid}"
-                chat_filters[user_id][cid] = name
-                mark = "✅ " if cid in selected_ids else "⬜ "
-                short = name[:12] + "..." if len(name) > 12 else name
-                row.append(InlineKeyboardButton(f"{mark}{short}", callback_data=f"t:{cid}"))
-        if row:
-            kb.row(*row)
-
-    nav_row = []
-    if page > 0:
-        nav_row.append(InlineKeyboardButton("⬅️ Назад", callback_data="chat_page_prev"))
-    nav_row.append(InlineKeyboardButton(f"📄 {page + 1}/{total_pages}", callback_data="noop"))
-    if page < total_pages - 1:
-        nav_row.append(InlineKeyboardButton("Вперёд ➡️", callback_data="chat_page_next"))
-    if nav_row:
-        kb.row(*nav_row)
-
-    kb.row(InlineKeyboardButton("🔄 Обновить список", callback_data="select_chats"))
-    kb.row(InlineKeyboardButton("❌ Очистить выбор", callback_data="clear_chats"))
-    kb.row(InlineKeyboardButton("◀️ Назад", callback_data="main_menu"))
-    safe_edit_message(f"📋 Выберите чаты для рассылки (выбрано: {len(selected_ids)}):", chat_id, message_id, reply_markup=kb)
-
-
-def cb_select_chats_raw(user_id, chat_id, message_id, account_id):
-    """Load chats from server (slow, shows loading)."""
-    acc = get_account(account_id)
-    if not acc:
-        safe_edit_message("❌ Аккаунт не найден.", chat_id, message_id, reply_markup=back_keyboard())
-        return
-
-    safe_edit_message("⏳ <b>Загрузка чатов...</b>\n\nПодождите, получаем список групп.", chat_id, message_id)
-
-    started = manager.start_client(account_id, acc[2])
-    if not started:
-        safe_edit_message("❌ Не удалось подключить аккаунт. Попробуйте удалить и добавить заново.", chat_id, message_id, reply_markup=back_keyboard())
-        return
-    client = manager.get_client(account_id)
-    if not client:
-        safe_edit_message("❌ Ошибка подключения аккаунта.", chat_id, message_id, reply_markup=back_keyboard())
-        return
-    try:
-        me = manager.run_sync(account_id, client.get_me(), timeout=15)
-        me_id = me.id
-    except:
-        safe_edit_message("❌ Ошибка получения данных аккаунта.", chat_id, message_id, reply_markup=back_keyboard())
-        return
-    try:
-        dialogs = manager.get_dialogs_cached(account_id, client, me_id, force_refresh=True)
-    except Exception as e:
-        safe_edit_message(f"❌ Ошибка загрузки чатов: {str(e)}", chat_id, message_id, reply_markup=back_keyboard())
-        return
-
-    chat_filters[user_id] = {'_dialogs': dialogs}
-    _render_chat_page(user_id, chat_id, message_id, account_id)
-
+@bot.callback_query_handler(func=lambda call: call.data.startswith("hmentions_"))
+def cb_hidden_mentions_preset(call):
+    user_id = call.from_user.id
+    val = call.data.split("_")[1]
+    if val == "none":
+        db_query("UPDATE users SET hidden_mentions_mode='none' WHERE user_id=?", (user_id,))
+        safe_edit_message("✅ Скрытые упоминания выключены.", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard("broadcast_settings"))
+    elif val == "custom":
+        user_states[user_id] = 'set_hidden_mentions_custom'
+        safe_edit_message("👻 Введите количество скрытых упоминаемых человек (от 1 до сколько угодно):", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard("hidden_mentions_settings"))
+    else:
+        count = int(val)
+        db_query("UPDATE users SET hidden_mentions_mode='random', hidden_mentions_count=? WHERE user_id=?", (count, user_id))
+        safe_edit_message(f"✅ Скрытые упоминания: {count} чел", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard("broadcast_settings"))
 
 @bot.callback_query_handler(func=lambda call: call.data == "select_chats")
 def cb_select_chats(call):
@@ -1059,7 +1189,6 @@ def cb_select_chats(call):
         return
     account_id = active[0]
     cb_select_chats_raw(user_id, call.message.chat.id, call.message.message_id, account_id)
-
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("t:"))
 def cb_toggle_chat(call):
@@ -1072,7 +1201,6 @@ def cb_toggle_chat(call):
     toggle_chat_selection(user_id, active[0], chat_id, chat_name)
     _render_chat_page(user_id, call.message.chat.id, call.message.message_id, active[0])
 
-
 @bot.callback_query_handler(func=lambda call: call.data == "clear_chats")
 def cb_clear_chats(call):
     user_id = call.from_user.id
@@ -1080,7 +1208,6 @@ def cb_clear_chats(call):
     if active:
         clear_selected_chats(user_id, active[0])
     _render_chat_page(user_id, call.message.chat.id, call.message.message_id, active[0])
-
 
 @bot.callback_query_handler(func=lambda call: call.data == "chat_page_prev")
 def cb_chat_page_prev(call):
@@ -1090,7 +1217,6 @@ def cb_chat_page_prev(call):
     if active:
         _render_chat_page(user_id, call.message.chat.id, call.message.message_id, active[0])
 
-
 @bot.callback_query_handler(func=lambda call: call.data == "chat_page_next")
 def cb_chat_page_next(call):
     user_id = call.from_user.id
@@ -1098,7 +1224,6 @@ def cb_chat_page_next(call):
     active = get_active_account(user_id)
     if active:
         _render_chat_page(user_id, call.message.chat.id, call.message.message_id, active[0])
-
 
 @bot.callback_query_handler(func=lambda call: call.data == "noop")
 def cb_noop(call):
@@ -1119,6 +1244,11 @@ def cb_broadcast_start(call):
     mpc = user[9] if len(user) > 9 else 1
     mentions_mode = user[3] or 'none'
     mentions_count = user[4] or 10
+    fmt = user[10] if len(user) > 10 else 'plain'
+    media_file_id = user[11] if len(user) > 11 else ''
+    media_type = user[12] if len(user) > 12 else ''
+    hidden_mode = user[13] if len(user) > 13 else 'none'
+    hidden_count = user[14] if len(user) > 14 else 10
     if not text.strip():
         safe_edit_message("❌ Сначала задайте текст сообщения в настройках.", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard("broadcast_settings"))
         return
@@ -1134,18 +1264,22 @@ def cb_broadcast_start(call):
     db_query("UPDATE users SET is_running=1 WHERE user_id=?", (user_id,))
     dur_str = f"{duration} ч" if duration > 0 else "♾ Бесконечно"
     men_str = f"{mentions_count} чел" if mentions_mode != 'none' else "❌ Выключены"
+    hidden_str = f"{hidden_count} чел" if hidden_mode != 'none' else "❌ Выключены"
+    media_str = f"📎 {media_type.upper()} прикреплено\n" if media_file_id and media_type else ""
     safe_edit_message(
         f"▶️ <b>Рассылка запущена!</b>\n\n"
         f"📝 Текст: {text[:50]}{'...' if len(text) > 50 else ''}\n"
+        f"{media_str}"
         f"📋 Чатов: {len(chat_ids)}\n"
         f"📬 Сообщений на чат: {mpc}\n"
         f"⏱ Интервал: {interval} сек\n"
         f"⏳ Длительность: {dur_str}\n"
-        f"👥 Упоминания: {men_str}",
+        f"👥 Упоминания: {men_str}\n"
+        f"👻 Скрытые: {hidden_str}",
         call.message.chat.id, call.message.message_id, reply_markup=stop_keyboard()
     )
     footer = "" if has_premium_footer(user_id) else FOOTER_TEXT
-    t = threading.Thread(target=broadcast_worker, args=(user_id, account_id, chat_ids, text + footer, interval, duration, mpc, mentions_mode, mentions_count), daemon=True)
+    t = threading.Thread(target=broadcast_worker, args=(user_id, account_id, chat_ids, text + footer, interval, duration, mpc, mentions_mode, mentions_count, fmt, media_file_id, media_type, hidden_mode, hidden_count), daemon=True)
     t.start()
 
 @bot.callback_query_handler(func=lambda call: call.data == "broadcast_stop")
@@ -1198,6 +1332,23 @@ def cb_account_info(call):
     created = time.strftime('%d.%m.%Y %H:%M', time.localtime(acc[6])) if acc[6] else "неизвестно"
     info = f"ℹ️ <b>Информация об аккаунте</b>\n\n👤 {name}\n📱 <code>{phone}</code>\n📅 Добавлен: {created}"
     safe_edit_message(info, call.message.chat.id, call.message.message_id, reply_markup=back_keyboard("my_accounts"))
+
+@bot.callback_query_handler(func=lambda call: call.data == "referral_program")
+def cb_referral_program(call):
+    user_id = call.from_user.id
+    count = get_referral_count(user_id)
+    link = get_referral_link(user_id)
+    remaining = max(0, 5 - count)
+    status = "✅ <b>Подпись убрана!</b>" if count >= 5 else f"❌ Осталось пригласить: <b>{remaining}</b>"
+    text = (
+        f"🔗 <b>Реферальная программа</b>\n\n"
+        f"📊 Приглашено: <b>{count}/5</b>\n"
+        f"{status}\n\n"
+        f"📎 Ваша ссылка:\n<code>{link}</code>\n\n"
+        f"📌 Отправьте эту ссылку друзьям. Когда 5 человек перейдут по ней и запустят бота — "
+        f"подпись «{FOOTER_TEXT.strip()}» больше не будет добавляться к вашим сообщениям."
+    )
+    safe_edit_message(text, call.message.chat.id, call.message.message_id, reply_markup=back_keyboard("main_menu"))
 
 # ================== MESSAGE HANDLERS ==================
 @bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == 'phone_input')
@@ -1288,27 +1439,41 @@ def handle_set_mentions_custom(message):
     except ValueError:
         bot.send_message(message.chat.id, "❌ Введите целое число от 1 и выше")
 
-@bot.callback_query_handler(func=lambda call: call.data == "referral_program")
-def cb_referral_program(call):
-    user_id = call.from_user.id
-    count = get_referral_count(user_id)
-    link = get_referral_link(user_id)
-    remaining = max(0, 5 - count)
-    status = "✅ <b>Подпись убрана!</b>" if count >= 5 else f"❌ Осталось пригласить: <b>{remaining}</b>"
-    text = (
-        f"🔗 <b>Реферальная программа</b>\n\n"
-        f"📊 Приглашено: <b>{count}/5</b>\n"
-        f"{status}\n\n"
-        f"📎 Ваша ссылка:\n<code>{link}</code>\n\n"
-        f"📌 Отправьте эту ссылку друзьям. Когда 5 человек перейдут по ней и запустят бота — "
-        f"подпись «{FOOTER_TEXT.strip()}» больше не будет добавляться к вашим сообщениям."
-    )
-    safe_edit_message(text, call.message.chat.id, call.message.message_id, reply_markup=back_keyboard("main_menu"))
+@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == 'set_hidden_mentions_custom')
+def handle_hidden_mentions_custom(message):
+    user_id = message.from_user.id
+    try:
+        count = int(message.text.strip())
+        if count < 1:
+            count = 1
+        db_query("UPDATE users SET hidden_mentions_mode='random', hidden_mentions_count=? WHERE user_id=?", (count, user_id))
+        user_states.pop(user_id, None)
+        bot.send_message(message.chat.id, f"✅ Скрытые упоминания: {count} чел", reply_markup=main_menu_keyboard(has_accounts(user_id)))
+    except ValueError:
+        bot.send_message(message.chat.id, "❌ Введите целое число от 1 и выше")
+
+@bot.message_handler(content_types=['photo', 'video', 'document'], func=lambda m: user_states.get(m.from_user.id) == 'attach_media')
+def handle_attach_media(message):
+    user_id = message.from_user.id
+    if message.photo:
+        file_id = message.photo[-1].file_id
+        media_type = 'photo'
+    elif message.video:
+        file_id = message.video.file_id
+        media_type = 'video'
+    elif message.document:
+        file_id = message.document.file_id
+        media_type = 'document'
+    else:
+        bot.send_message(message.chat.id, "❌ Неподдерживаемый тип файла.")
+        return
+    db_query("UPDATE users SET media_file_id=?, media_type=? WHERE user_id=?", (file_id, media_type, user_id))
+    user_states.pop(user_id, None)
+    bot.send_message(message.chat.id, f"✅ Медиа прикреплено: {media_type}", reply_markup=main_menu_keyboard(has_accounts(user_id)))
 
 # ================== MAIN ==================
 if __name__ == "__main__":
     init_db()
-    # Auto-reconnect existing accounts on startup
     accounts = db_query("SELECT id, session_string FROM accounts")
     for acc in accounts:
         aid = acc[0]
@@ -1321,4 +1486,3 @@ if __name__ == "__main__":
                 print(f"Auto-connect failed for account {aid}: {e}")
     print("Bot started!")
     bot.polling(none_stop=True, interval=0.5)
-

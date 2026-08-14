@@ -965,42 +965,18 @@ def cb_mentions_preset(call):
         db_query("UPDATE users SET mentions_mode='random', mentions_count=? WHERE user_id=?", (count, user_id))
         safe_edit_message(f"✅ Упоминания: {count} чел", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard("main_menu"))
 
-@bot.callback_query_handler(func=lambda call: call.data == "select_chats")
-def cb_select_chats(call):
-    user_id = call.from_user.id
-    active = get_active_account(user_id)
-    if not active:
-        safe_edit_message("❌ Сначала добавьте и выберите аккаунт.", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard())
+def _render_chat_page(user_id, chat_id, message_id, account_id):
+    """Fast re-render chat list from cache (no server reload)."""
+    data = chat_filters.get(user_id, {})
+    dialogs = data.get('_dialogs', [])
+    if not dialogs:
+        # Fallback: reload from server if cache lost
+        cb_select_chats_raw(user_id, chat_id, message_id, account_id)
         return
-    account_id = active[0]
 
-    # Show loading message first
-    safe_edit_message("⏳ <b>Загрузка чатов...</b>\n\nПодождите, получаем список групп.", call.message.chat.id, call.message.message_id)
-
-    started = manager.start_client(account_id, active[2])
-    if not started:
-        safe_edit_message("❌ Не удалось подключить аккаунт. Попробуйте удалить и добавить заново.", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard())
-        return
-    client = manager.get_client(account_id)
-    if not client:
-        safe_edit_message("❌ Ошибка подключения аккаунта.", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard())
-        return
-    try:
-        me = manager.run_sync(account_id, client.get_me(), timeout=15)
-        me_id = me.id
-    except:
-        safe_edit_message("❌ Ошибка получения данных аккаунта.", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard())
-        return
-    try:
-        dialogs = manager.get_dialogs_cached(account_id, client, me_id, force_refresh=True)
-    except Exception as e:
-        safe_edit_message(f"❌ Ошибка загрузки чатов: {str(e)}", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard())
-        return
     selected = get_selected_chats(user_id, account_id)
     selected_ids = {s[0] for s in selected}
-    chat_filters[user_id] = {}
 
-    # Pagination: 9 chats per page (3x3 grid)
     page = user_chat_pages.get(user_id, 0)
     per_page = 9
     total_pages = max(1, (len(dialogs) + per_page - 1) // per_page)
@@ -1026,7 +1002,6 @@ def cb_select_chats(call):
         if row:
             kb.row(*row)
 
-    # Pagination nav
     nav_row = []
     if page > 0:
         nav_row.append(InlineKeyboardButton("⬅️ Назад", callback_data="chat_page_prev"))
@@ -1039,7 +1014,52 @@ def cb_select_chats(call):
     kb.row(InlineKeyboardButton("🔄 Обновить список", callback_data="select_chats"))
     kb.row(InlineKeyboardButton("❌ Очистить выбор", callback_data="clear_chats"))
     kb.row(InlineKeyboardButton("◀️ Назад", callback_data="main_menu"))
-    safe_edit_message(f"📋 Выберите чаты для рассылки (выбрано: {len(selected_ids)}):", call.message.chat.id, call.message.message_id, reply_markup=kb)
+    safe_edit_message(f"📋 Выберите чаты для рассылки (выбрано: {len(selected_ids)}):", chat_id, message_id, reply_markup=kb)
+
+
+def cb_select_chats_raw(user_id, chat_id, message_id, account_id):
+    """Load chats from server (slow, shows loading)."""
+    acc = get_account(account_id)
+    if not acc:
+        safe_edit_message("❌ Аккаунт не найден.", chat_id, message_id, reply_markup=back_keyboard())
+        return
+
+    safe_edit_message("⏳ <b>Загрузка чатов...</b>\n\nПодождите, получаем список групп.", chat_id, message_id)
+
+    started = manager.start_client(account_id, acc[2])
+    if not started:
+        safe_edit_message("❌ Не удалось подключить аккаунт. Попробуйте удалить и добавить заново.", chat_id, message_id, reply_markup=back_keyboard())
+        return
+    client = manager.get_client(account_id)
+    if not client:
+        safe_edit_message("❌ Ошибка подключения аккаунта.", chat_id, message_id, reply_markup=back_keyboard())
+        return
+    try:
+        me = manager.run_sync(account_id, client.get_me(), timeout=15)
+        me_id = me.id
+    except:
+        safe_edit_message("❌ Ошибка получения данных аккаунта.", chat_id, message_id, reply_markup=back_keyboard())
+        return
+    try:
+        dialogs = manager.get_dialogs_cached(account_id, client, me_id, force_refresh=True)
+    except Exception as e:
+        safe_edit_message(f"❌ Ошибка загрузки чатов: {str(e)}", chat_id, message_id, reply_markup=back_keyboard())
+        return
+
+    chat_filters[user_id] = {'_dialogs': dialogs}
+    _render_chat_page(user_id, chat_id, message_id, account_id)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "select_chats")
+def cb_select_chats(call):
+    user_id = call.from_user.id
+    active = get_active_account(user_id)
+    if not active:
+        safe_edit_message("❌ Сначала добавьте и выберите аккаунт.", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard())
+        return
+    account_id = active[0]
+    cb_select_chats_raw(user_id, call.message.chat.id, call.message.message_id, account_id)
+
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("t:"))
 def cb_toggle_chat(call):
@@ -1050,7 +1070,8 @@ def cb_toggle_chat(call):
     chat_id = int(call.data.split(":")[1])
     chat_name = chat_filters.get(user_id, {}).get(chat_id, "Chat")
     toggle_chat_selection(user_id, active[0], chat_id, chat_name)
-    cb_select_chats(call)
+    _render_chat_page(user_id, call.message.chat.id, call.message.message_id, active[0])
+
 
 @bot.callback_query_handler(func=lambda call: call.data == "clear_chats")
 def cb_clear_chats(call):
@@ -1058,19 +1079,26 @@ def cb_clear_chats(call):
     active = get_active_account(user_id)
     if active:
         clear_selected_chats(user_id, active[0])
-    cb_select_chats(call)
+    _render_chat_page(user_id, call.message.chat.id, call.message.message_id, active[0])
+
 
 @bot.callback_query_handler(func=lambda call: call.data == "chat_page_prev")
 def cb_chat_page_prev(call):
     user_id = call.from_user.id
     user_chat_pages[user_id] = max(0, user_chat_pages.get(user_id, 0) - 1)
-    cb_select_chats(call)
+    active = get_active_account(user_id)
+    if active:
+        _render_chat_page(user_id, call.message.chat.id, call.message.message_id, active[0])
+
 
 @bot.callback_query_handler(func=lambda call: call.data == "chat_page_next")
 def cb_chat_page_next(call):
     user_id = call.from_user.id
     user_chat_pages[user_id] = user_chat_pages.get(user_id, 0) + 1
-    cb_select_chats(call)
+    active = get_active_account(user_id)
+    if active:
+        _render_chat_page(user_id, call.message.chat.id, call.message.message_id, active[0])
+
 
 @bot.callback_query_handler(func=lambda call: call.data == "noop")
 def cb_noop(call):

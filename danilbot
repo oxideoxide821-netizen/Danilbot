@@ -972,6 +972,10 @@ def cb_select_chats(call):
         safe_edit_message("❌ Сначала добавьте и выберите аккаунт.", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard())
         return
     account_id = active[0]
+
+    # Show loading message first
+    safe_edit_message("⏳ <b>Загрузка чатов...</b>\n\nПодождите, получаем список групп.", call.message.chat.id, call.message.message_id)
+
     started = manager.start_client(account_id, active[2])
     if not started:
         safe_edit_message("❌ Не удалось подключить аккаунт. Попробуйте удалить и добавить заново.", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard())
@@ -993,15 +997,17 @@ def cb_select_chats(call):
         return
     selected = get_selected_chats(user_id, account_id)
     selected_ids = {s[0] for s in selected}
-    kb = InlineKeyboardMarkup(row_width=1)
+    chat_filters[user_id] = {}
+    kb = InlineKeyboardMarkup(row_width=3)
     for dialog in dialogs[:50]:
         cid = dialog.id
         name = dialog.name or f"Chat {cid}"
+        chat_filters[user_id][cid] = name
         mark = "✅ " if cid in selected_ids else "⬜ "
-        kb.add(InlineKeyboardButton(f"{mark}{name}", callback_data=f"toggle_chat:{cid}:{html.escape(name[:30])}"))
-    kb.add(InlineKeyboardButton("🔄 Обновить список", callback_data="select_chats"))
-    kb.add(InlineKeyboardButton("❌ Очистить выбор", callback_data="clear_chats"))
-    kb.add(InlineKeyboardButton("◀️ Назад", callback_data="main_menu"))
+        kb.add(InlineKeyboardButton(f"{mark}{name}", callback_data=f"t:{cid}"))
+    kb.row(InlineKeyboardButton("🔄 Обновить список", callback_data="select_chats"))
+    kb.row(InlineKeyboardButton("❌ Очистить выбор", callback_data="clear_chats"))
+    kb.row(InlineKeyboardButton("◀️ Назад", callback_data="main_menu"))
     safe_edit_message(f"📋 Выберите чаты для рассылки (выбрано: {len(selected_ids)}):", call.message.chat.id, call.message.message_id, reply_markup=kb)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("t:"))

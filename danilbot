@@ -1,13 +1,1243 @@
+import os
+import sqlite3
+import asyncio
+import threading
+import time
+import io
+import html
+import random
+
+_db_lock = threading.Lock()
+
 import telebot
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+from telebot.apihelper import ApiTelegramException
+from telethon import TelegramClient, types
+from telethon.sessions import StringSession
+from telethon.errors import FloodWaitError, SessionPasswordNeededError
 
-TOKEN = "8966965835:AAHqdyndKmvDlxt3YEy08unwnde-qatn9w0"
+try:
+    import qrcode
+    from PIL import Image
+    HAS_QR = True
+except ImportError:
+    HAS_QR = False
 
-bot = telebot.TeleBot(TOKEN)
+BOT_TOKEN = "8422044486:AAFlxED5Er0BqUbLgI0bkSQBmtA9txaZ7Ow"
+API_ID = 36403406
+API_HASH = "ecdc945d831f24eee69eae668c6c4ad1"
+DB_PATH = "broadcast_bot.db"
+FOOTER_TEXT = "\n\n— Рассылка с помощью бота @Rasslink_bot"
 
-@bot.message_handler(func=lambda m: True, content_types=["text", "photo", "video", "document", "audio", "voice", "sticker", "location", "contact", "poll", "dice"])
-def handle_all(message):
-    bot.reply_to(message, "админы уебаны хахаа сосите нахуй я ваш повелитель хахаза назуц назуц ьлять так ты же ебаный слабак у тебя мамой лесбиянкой ебаной работает а батя чисто за ней подсасывает как кукич ебаный тебя же все булит как петушка ебаного бездушного просто ты не можешь мне что либо противопоставить о чем может идти разговор сын ебаной поблядушняой твари я в твою ебаную толстопузую матуху буду белой житкостью заливать пока она ебало свое не закроет тебя же твоя матуха назвала петухом потому что ты вырожден из коровы я тебя ебу как и твоего папу гея ебаного запомни педик у тьебя батя ебаный импотент и поэтмоу твоя матуха устраивается на 2 работу как шлюха а ты додик понять не можешь что ты ебучий выблядище ты же еще дочурка бляди слабохарактерная блядотка которую ебашут на улице как простиутку  дочурка бляди недееспособная хуесос я буду брюшко и ушко твоей матери шлюшки ломать я тебя убил как саратовцы ебали таких как ты  хачевитый пидорас чумазый  ты в натуре опухший чмошник с больным сердцом твою мать хуем терзал по животу")
+MENU_IMAGE_URL = "https://i.postimg.cc/Tw96Nv0Q/IMG-20260809-114308-926.jpg"
+AUTH_IMAGE_URL = "https://i.postimg.cc/Vsxx96z6/IMG-20260809-115038-599.jpg"
+SETTINGS_IMAGE_URL = "https://i.postimg.cc/bwWkrKQ1/IMG-20260809-115817-666.jpg"
+ACCOUNTS_IMAGE_URL = "https://i.postimg.cc/651GbD1W/IMG-20260809-115919-061.jpg"
 
+user_states = {}
+chat_filters = {}
+
+# ================== SAFE EDIT ==================
+def safe_edit_message(text, chat_id, message_id, reply_markup=None, parse_mode="HTML", **kwargs):
+    try:
+        return bot.edit_message_text(text, chat_id=chat_id, message_id=message_id, reply_markup=reply_markup, parse_mode=parse_mode, **kwargs)
+    except ApiTelegramException as e:
+        err = str(e).lower()
+        if "message is not modified" in err:
+            return None
+        if "there is no text in the message to edit" in err:
+            try:
+                return bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption=text, reply_markup=reply_markup, **kwargs)
+            except ApiTelegramException as e2:
+                if "message is not modified" in str(e2).lower():
+                    return None
+                raise
+        raise
+    except Exception as e:
+        err = str(e).lower()
+        if "message is not modified" in err:
+            return None
+        if "there is no text in the message to edit" in err:
+            try:
+                return bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption=text, reply_markup=reply_markup, **kwargs)
+            except Exception as e2:
+                if "message is not modified" in str(e2).lower():
+                    return None
+                raise
+        raise
+
+# ================== DATABASE ==================
+def init_db():
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30.0)
+    c = conn.cursor()
+    c.execute("PRAGMA journal_mode=WAL")
+    c.execute("PRAGMA synchronous=NORMAL")
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            broadcast_text TEXT DEFAULT '',
+            broadcast_interval REAL DEFAULT 1.0,
+            mentions_mode TEXT DEFAULT 'none',
+            mentions_count INTEGER DEFAULT 10,
+            send_mode TEXT DEFAULT 'all',
+            is_running INTEGER DEFAULT 0,
+            active_account_id INTEGER DEFAULT NULL,
+            broadcast_duration_hours REAL DEFAULT 0,
+            messages_per_chat INTEGER DEFAULT 1
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS accounts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            session_string TEXT,
+            phone TEXT,
+            first_name TEXT,
+            last_name TEXT,
+            created_at INTEGER DEFAULT 0
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS selected_chats (
+            user_id INTEGER,
+            account_id INTEGER,
+            chat_id INTEGER,
+            chat_name TEXT,
+            PRIMARY KEY (user_id, account_id, chat_id)
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS referrals (
+            referral_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            inviter_id INTEGER,
+            invited_id INTEGER,
+            invited_at INTEGER DEFAULT 0,
+            UNIQUE(inviter_id, invited_id)
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def db_query(query, params=(), fetchone=False):
+    with _db_lock:
+        conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30.0)
+        try:
+            c = conn.cursor()
+            c.execute(query, params)
+            if query.strip().upper().startswith("SELECT"):
+                conn.commit()
+            else:
+                conn.commit()
+            result = c.fetchone() if fetchone else c.fetchall()
+            return result
+        finally:
+            conn.close()
+
+# ================== TELETHON MANAGER ==================
+class TelethonManager:
+    def __init__(self):
+        self.clients = {}
+        self.loops = {}
+        self.threads = {}
+        self.dialogs_cache = {}
+        self.dialogs_cache_ttl = 300
+
+    def _start_loop(self, account_id, session_string):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        client = TelegramClient(StringSession(session_string), API_ID, API_HASH, loop=loop)
+        loop.run_until_complete(client.connect())
+        self.clients[account_id] = client
+        self.loops[account_id] = loop
+        loop.run_forever()
+
+    def start_client(self, account_id, session_string=None):
+        client = self.clients.get(account_id)
+        if client:
+            try:
+                authorized = self.run_sync(account_id, client.is_user_authorized(), timeout=15)
+                if authorized:
+                    return True
+            except Exception:
+                pass
+            self.disconnect(account_id)
+        if account_id in self.threads and self.threads[account_id].is_alive():
+            self.disconnect(account_id)
+        t = threading.Thread(target=self._start_loop, args=(account_id, session_string), daemon=True)
+        t.start()
+        self.threads[account_id] = t
+        for _ in range(50):
+            if account_id in self.clients:
+                try:
+                    auth = self.run_sync(account_id, self.clients[account_id].is_user_authorized(), timeout=15)
+                    if auth:
+                        return True
+                except:
+                    pass
+            time.sleep(0.1)
+        return False
+
+    def get_client(self, account_id):
+        client = self.clients.get(account_id)
+        if not client:
+            return None
+        try:
+            authorized = self.run_sync(account_id, client.is_user_authorized(), timeout=10)
+            if authorized:
+                return client
+        except Exception:
+            pass
+        self.disconnect(account_id)
+        return None
+
+    def run_sync(self, account_id, coro, timeout=30):
+        loop = self.loops.get(account_id)
+        if not loop:
+            return None
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+        try:
+            return future.result(timeout=timeout)
+        except Exception as e:
+            raise e
+
+    def disconnect(self, account_id):
+        if account_id in self.clients:
+            try:
+                self.run_sync(account_id, self.clients[account_id].disconnect(), timeout=10)
+            except:
+                pass
+            del self.clients[account_id]
+        if account_id in self.loops:
+            try:
+                self.loops[account_id].stop()
+            except:
+                pass
+            del self.loops[account_id]
+        self.dialogs_cache.pop(account_id, None)
+
+    def get_dialogs_cached(self, account_id, client, me_id, force_refresh=False):
+        now = time.time()
+        if not force_refresh and account_id in self.dialogs_cache:
+            ts, dialogs = self.dialogs_cache[account_id]
+            if now - ts < self.dialogs_cache_ttl:
+                return dialogs
+        dialogs = self.run_sync(account_id, fetch_all_group_dialogs(client, me_id), timeout=600)
+        self.dialogs_cache[account_id] = (now, dialogs)
+        return dialogs
+
+    def invalidate_dialogs_cache(self, account_id):
+        self.dialogs_cache.pop(account_id, None)
+
+manager = TelethonManager()
+
+async def fetch_all_group_dialogs(client, me_id):
+    result = []
+    async for dialog in client.iter_dialogs():
+        if dialog.id == me_id:
+            continue
+        entity = dialog.entity
+        if entity is None:
+            continue
+        if isinstance(entity, types.Chat):
+            result.append(dialog)
+        elif isinstance(entity, types.Channel) and getattr(entity, 'megagroup', False):
+            result.append(dialog)
+    return result
+
+# ================== PHONE AUTH ==================
+class PhoneAuthManager:
+    def __init__(self):
+        self.pending = {}
+
+    def start_auth(self, user_id, chat_id, bot_instance):
+        if user_id in self.pending:
+            bot_instance.send_message(chat_id, "⏳ Авторизация уже идёт.")
+            return
+        self.pending[user_id] = {
+            'chat_id': chat_id, 'phone': None, 'client': None, 'loop': None,
+            'code_event': threading.Event(), 'code_value': None,
+            'password_event': threading.Event(), 'password_value': None,
+            'cancelled': False
+        }
+        security_text = (
+            "📱 <b>Авторизация по номеру</b>\n\n"
+            "Введите номер телефона в формате <code>+79991234567</code>:\n\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "🔒 <b>ПОЛНАЯ БЕЗОПАСНОСТЬ ВАШЕГО АККАУНТА:</b>\n"
+            "• ✅ Бот НЕ имеет доступа к вашим личным сообщениям\n"
+            "• ✅ Бот НЕ может читать ваши чаты и переписки\n"
+            "• ✅ Сессия хранится в зашифрованном виде в базе бота\n"
+            "• ✅ Это стандартный официальный Telegram API\n"
+            "• ✅ Вы можете удалить сессию в любой момент через Telegram → Настройки → Устройства\n"
+            "• ✅ Мы НЕ запрашиваем и НЕ видим ваш пароль 2FA (если есть)\n"
+            "• ✅ Ваш аккаунт принадлежит только ВАМ\n\n"
+            "⚠️ <b>Важно:</b> сессия НЕ истекает через сутки — она работает постоянно, пока вы её не удалите вручную."
+        )
+        bot_instance.send_message(chat_id, security_text, reply_markup=cancel_auth_keyboard())
+        user_states[user_id] = 'phone_input'
+
+    def submit_phone(self, user_id, phone):
+        if user_id not in self.pending or self.pending[user_id].get('cancelled'):
+            return False
+        self.pending[user_id]['phone'] = phone
+        threading.Thread(target=self._auth_thread, args=(user_id,), daemon=True).start()
+        return True
+
+    def submit_code(self, user_id, code):
+        if user_id in self.pending and not self.pending[user_id].get('cancelled'):
+            self.pending[user_id]['code_value'] = code
+            self.pending[user_id]['code_event'].set()
+            return True
+        return False
+
+    def submit_password(self, user_id, password):
+        if user_id in self.pending and not self.pending[user_id].get('cancelled'):
+            self.pending[user_id]['password_value'] = password
+            self.pending[user_id]['password_event'].set()
+            return True
+        return False
+
+    def cancel(self, user_id):
+        if user_id in self.pending:
+            self.pending[user_id]['cancelled'] = True
+            self.pending[user_id]['code_event'].set()
+            self.pending[user_id]['password_event'].set()
+            p = self.pending[user_id]
+            if p.get('client') and p.get('loop'):
+                try:
+                    asyncio.run_coroutine_threadsafe(p['client'].disconnect(), p['loop']).result(timeout=5)
+                except:
+                    pass
+            del self.pending[user_id]
+            return True
+        return False
+
+    def _auth_thread(self, user_id):
+        p = self.pending[user_id]
+        phone = p['phone']
+        chat_id = p['chat_id']
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        session = StringSession()
+        client = TelegramClient(session, API_ID, API_HASH, loop=loop)
+        p['client'] = client
+        p['loop'] = loop
+
+        async def do_auth():
+            try:
+                await client.connect()
+                await client.send_code_request(phone)
+                if p['cancelled']:
+                    return
+                bot.send_message(chat_id, f"✅ Код подтверждения отправлен!\n\n📱 Номер: <code>{phone}</code>\n\n━━━━━━━━━━━━━━━━━━━━\n⚠️ ВАЖНО\n✏️ Введите код так:\n• Поставьте точку внутри: 56.785\n\n🔒 Сессия сохраняется в зашифрованном виде и НЕ истекает через сутки.", reply_markup=cancel_auth_keyboard())
+                user_states[user_id] = 'phone_code_input'
+                p['code_event'].wait()
+                if p['cancelled']:
+                    return
+                clean_code = p['code_value'].replace('.', '').replace(' ', '').replace('-', '')
+                try:
+                    await client.sign_in(phone, clean_code)
+                except SessionPasswordNeededError:
+                    bot.send_message(chat_id, "🔒 <b>Требуется пароль 2FA</b>\n\nВведите пароль от аккаунта:", reply_markup=cancel_auth_keyboard())
+                    user_states[user_id] = 'phone_2fa_input'
+                    p['password_event'].wait()
+                    if p['cancelled']:
+                        return
+                    await client.sign_in(password=p['password_value'])
+                if await client.is_user_authorized():
+                    me = await client.get_me()
+                    ss = client.session.save()
+                    created_at = int(time.time())
+                    db_query("INSERT INTO accounts (user_id, session_string, phone, first_name, last_name, created_at) VALUES (?,?,?,?,?,?)",
+                             (user_id, ss, me.phone or phone, me.first_name or '', me.last_name or '', created_at))
+                    row = db_query("SELECT id FROM accounts WHERE user_id=? ORDER BY id DESC LIMIT 1", (user_id,), fetchone=True)
+                    account_id = row[0] if row else None
+                    existing = db_query("SELECT COUNT(*) FROM accounts WHERE user_id=?", (user_id,), fetchone=True)
+                    if existing and existing[0] == 1 and account_id:
+                        db_query("UPDATE users SET active_account_id=? WHERE user_id=?", (account_id, user_id))
+                    user_states.pop(user_id, None)
+                    name = me.first_name + (f" {me.last_name}" if me.last_name else "")
+                    bot.send_message(chat_id, f"✅ <b>Аккаунт добавлен!</b>\n\n👤 {name}\n📱 <code>{me.phone or phone}</code>\n\n🔒 Сессия сохранена в зашифрованном виде.\n✅ Сессия НЕ истекает через сутки — работает постоянно.\n✅ Вы можете удалить сессию в любое время через Telegram → Настройки → Устройства.\n\nТеперь вы можете использовать его для рассылки.", reply_markup=main_menu_keyboard(True))
+                else:
+                    if not p['cancelled']:
+                        bot.send_message(chat_id, "❌ Авторизация не удалась.", reply_markup=main_menu_keyboard(has_accounts(user_id)))
+            except Exception as e:
+                if not p['cancelled']:
+                    bot.send_message(chat_id, f"❌ Ошибка: {str(e)}", reply_markup=main_menu_keyboard(has_accounts(user_id)))
+            finally:
+                try:
+                    await client.disconnect()
+                except:
+                    pass
+                if user_id in self.pending:
+                    del self.pending[user_id]
+
+        loop.run_until_complete(do_auth())
+
+phone_auth_manager = PhoneAuthManager()
+
+# ================== QR AUTH ==================
+class QRAuthManager:
+    def __init__(self):
+        self.pending = {}
+
+    def start_auth(self, user_id, chat_id, bot_instance):
+        if user_id in self.pending:
+            bot_instance.send_message(chat_id, "⏳ Авторизация уже идёт.")
+            return
+        if not HAS_QR:
+            bot_instance.send_message(chat_id, "❌ Установи: pip install qrcode[pil]")
+            return
+        self.pending[user_id] = {
+            'password_event': threading.Event(), 'password_value': None,
+            'email_event': threading.Event(), 'email_value': None,
+            'cancelled': False, 'needs_email': False
+        }
+
+        def auth_thread():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            session = StringSession()
+            client = TelegramClient(session, API_ID, API_HASH, loop=loop)
+
+            async def do_auth():
+                try:
+                    await client.connect()
+                    if await client.is_user_authorized():
+                        me = await client.get_me()
+                        ss = client.session.save()
+                        created_at = int(time.time())
+                        db_query("INSERT INTO accounts (user_id, session_string, phone, first_name, last_name, created_at) VALUES (?,?,?,?,?,?)",
+                                 (user_id, ss, me.phone or '', me.first_name or '', me.last_name or '', created_at))
+                        row = db_query("SELECT id FROM accounts WHERE user_id=? ORDER BY id DESC LIMIT 1", (user_id,), fetchone=True)
+                        account_id = row[0] if row else None
+                        existing = db_query("SELECT COUNT(*) FROM accounts WHERE user_id=?", (user_id,), fetchone=True)
+                        if existing and existing[0] == 1 and account_id:
+                            db_query("UPDATE users SET active_account_id=? WHERE user_id=?", (account_id, user_id))
+                        user_states.pop(user_id, None)
+                        name = me.first_name + (f" {me.last_name}" if me.last_name else "")
+                        bot_instance.send_message(chat_id, f"✅ <b>Аккаунт добавлен!</b>\n\n👤 {name}\n📱 <code>{me.phone or 'не указан'}</code>\n\n🔒 Сессия сохранена в зашифрованном виде.\n✅ Сессия НЕ истекает через сутки — работает постоянно.\n✅ Вы можете удалить сессию в любое время через Telegram → Настройки → Устройства.\n\nТеперь вы можете использовать его для рассылки.", reply_markup=main_menu_keyboard(True))
+                        return
+
+                    qr_login = await client.qr_login()
+                    url = qr_login.url
+                    qr = qrcode.QRCode(version=1, box_size=10, border=2)
+                    qr.add_data(url)
+                    qr.make(fit=True)
+                    img = qr.make_image(fill_color="black", back_color="white")
+                    buf = io.BytesIO()
+                    img.save(buf, format='PNG')
+                    buf.seek(0)
+                    bot_instance.send_photo(chat_id, buf, caption="🔐 <b>Авторизация через QR</b>\n\n1. Откройте Telegram на телефоне\n2. Настройки → Устройства → Подключить десктопное устройство\n3. Отсканируйте этот QR-код\n\n⏳ Ожидание сканирования (до 2 минут)...\n\n🔒 <b>ПОЛНАЯ БЕЗОПАСНОСТЬ:</b>\n• ✅ Бот НЕ имеет доступа к вашим сообщениям\n• ✅ Бот НЕ может читать ваши чаты\n• ✅ Сессия хранится в зашифрованном виде в базе бота\n• ✅ Сессия НЕ истекает через сутки\n• ✅ Вы можете удалить сессию в любой момент через Telegram → Устройства", reply_markup=cancel_auth_keyboard())
+
+                    try:
+                        await asyncio.wait_for(qr_login.wait(), timeout=120)
+                    except asyncio.TimeoutError:
+                        if not self.pending[user_id]['cancelled']:
+                            bot_instance.send_message(chat_id, "❌ <b>Время ожидания истекло</b>\n\nQR-код был активен 2 минуты.", reply_markup=main_menu_keyboard(has_accounts(user_id)))
+                        return
+
+                except SessionPasswordNeededError:
+                    if self.pending[user_id]['cancelled']:
+                        return
+                    bot_instance.send_message(chat_id, "🔒 <b>Требуется пароль 2FA</b>\n\nВведите пароль от аккаунта:", reply_markup=cancel_auth_keyboard())
+                    self.pending[user_id]['password_event'].wait()
+                    if self.pending[user_id].get('cancelled'):
+                        return
+                    password = self.pending[user_id]['password_value']
+                    try:
+                        await client.sign_in(password=password)
+                    except Exception as e:
+                        if self.pending[user_id]['cancelled']:
+                            return
+                        error_text = str(e).lower()
+                        if 'email' in error_text or 'e-mail' in error_text or 'код' in error_text:
+                            bot_instance.send_message(chat_id, "📧 <b>Требуется код из Email</b>\n\nВведите код:", reply_markup=cancel_auth_keyboard())
+                            self.pending[user_id]['needs_email'] = True
+                            self.pending[user_id]['email_event'].wait()
+                            if self.pending[user_id].get('cancelled'):
+                                return
+                            email_code = self.pending[user_id]['email_value']
+                            try:
+                                await client.sign_in(code=email_code)
+                            except Exception as e2:
+                                if not self.pending[user_id]['cancelled']:
+                                    bot_instance.send_message(chat_id, f"❌ Ошибка: {str(e2)}", reply_markup=main_menu_keyboard(has_accounts(user_id)))
+                                return
+                        else:
+                            if not self.pending[user_id]['cancelled']:
+                                bot_instance.send_message(chat_id, f"❌ Ошибка пароля: {str(e)}", reply_markup=main_menu_keyboard(has_accounts(user_id)))
+                            return
+                except Exception as e:
+                    if not self.pending[user_id]['cancelled']:
+                        bot_instance.send_message(chat_id, f"❌ Ошибка: {str(e)}", reply_markup=main_menu_keyboard(has_accounts(user_id)))
+                    return
+
+                if await client.is_user_authorized():
+                    me = await client.get_me()
+                    ss = client.session.save()
+                    created_at = int(time.time())
+                    db_query("INSERT INTO accounts (user_id, session_string, phone, first_name, last_name, created_at) VALUES (?,?,?,?,?,?)",
+                             (user_id, ss, me.phone or '', me.first_name or '', me.last_name or '', created_at))
+                    row = db_query("SELECT id FROM accounts WHERE user_id=? ORDER BY id DESC LIMIT 1", (user_id,), fetchone=True)
+                    account_id = row[0] if row else None
+                    existing = db_query("SELECT COUNT(*) FROM accounts WHERE user_id=?", (user_id,), fetchone=True)
+                    if existing and existing[0] == 1 and account_id:
+                        db_query("UPDATE users SET active_account_id=? WHERE user_id=?", (account_id, user_id))
+                    user_states.pop(user_id, None)
+                    name = me.first_name + (f" {me.last_name}" if me.last_name else "")
+                    bot_instance.send_message(chat_id, f"✅ <b>Аккаунт добавлен!</b>\n\n👤 {name}\n📱 <code>{me.phone or 'не указан'}</code>\n\n🔒 Сессия сохранена в зашифрованном виде.\n✅ Сессия НЕ истекает через сутки — работает постоянно.\n✅ Вы можете удалить сессию в любое время через Telegram → Настройки → Устройства.\n\nТеперь вы можете использовать его для рассылки.", reply_markup=main_menu_keyboard(True))
+                else:
+                    if not self.pending[user_id]['cancelled']:
+                        bot_instance.send_message(chat_id, "❌ Авторизация не удалась.", reply_markup=main_menu_keyboard(has_accounts(user_id)))
+                await client.disconnect()
+
+            try:
+                loop.run_until_complete(do_auth())
+            finally:
+                try:
+                    loop.run_until_complete(client.disconnect())
+                except:
+                    pass
+            if user_id in self.pending:
+                del self.pending[user_id]
+
+        threading.Thread(target=auth_thread, daemon=True).start()
+
+    def submit_password(self, user_id, password):
+        if user_id in self.pending:
+            self.pending[user_id]['password_value'] = password
+            self.pending[user_id]['password_event'].set()
+            return True
+        return False
+
+    def submit_email(self, user_id, code):
+        if user_id in self.pending:
+            self.pending[user_id]['email_value'] = code
+            self.pending[user_id]['email_event'].set()
+            return True
+        return False
+
+    def cancel(self, user_id):
+        if user_id in self.pending:
+            self.pending[user_id]['cancelled'] = True
+            self.pending[user_id]['password_event'].set()
+            self.pending[user_id]['email_event'].set()
+            del self.pending[user_id]
+            return True
+        return False
+
+qr_manager = QRAuthManager()
+
+# ================== BOT ==================
+bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
+
+# ================== KEYBOARDS ==================
+def main_menu_keyboard(has_accounts=False):
+    kb = InlineKeyboardMarkup(row_width=2)
+    if not has_accounts:
+        kb.add(InlineKeyboardButton("🔐 Добавить аккаунт (QR)", callback_data="auth_start"))
+        kb.add(InlineKeyboardButton("📱 Добавить аккаунт (номер)", callback_data="phone_auth_start"))
+    else:
+        kb.add(
+            InlineKeyboardButton("📨 Настройки рассылки", callback_data="broadcast_settings"),
+            InlineKeyboardButton("▶️ Запустить рассылку", callback_data="broadcast_start"),
+        )
+        kb.add(
+            InlineKeyboardButton("📋 Чаты для рассылки", callback_data="select_chats"),
+            InlineKeyboardButton("👥 Упоминания", callback_data="mentions_settings"),
+        )
+        kb.add(InlineKeyboardButton("👤 Мои аккаунты", callback_data="my_accounts"))
+        kb.add(InlineKeyboardButton("🔗 Реферальная программа", callback_data="referral_program"))
+    return kb
+
+def back_keyboard(callback="main_menu"):
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("◀️ Назад", callback_data=callback))
+    return kb
+
+def cancel_auth_keyboard():
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("❌ Отменить авторизацию", callback_data="auth_cancel"))
+    return kb
+
+def stop_keyboard():
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("⏹ Остановить рассылку", callback_data="broadcast_stop"))
+    return kb
+
+def broadcast_settings_keyboard():
+    kb = InlineKeyboardMarkup(row_width=1)
+    kb.add(
+        InlineKeyboardButton("📝 Изменить текст сообщения", callback_data="set_text"),
+        InlineKeyboardButton("⏱ Изменить интервал отправки", callback_data="set_interval"),
+        InlineKeyboardButton("⏳ Длительность рассылки", callback_data="set_duration"),
+        InlineKeyboardButton("📬 Сообщений на чат", callback_data="set_msgs_per_chat"),
+        InlineKeyboardButton("◀️ Вернуться в главное меню", callback_data="main_menu"),
+    )
+    return kb
+
+def accounts_keyboard(user_id):
+    kb = InlineKeyboardMarkup(row_width=1)
+    accounts = get_accounts(user_id)
+    active = get_active_account(user_id)
+    active_id = active[0] if active else None
+    for acc in accounts:
+        aid = acc[0]
+        name = f"{acc[4]} {acc[5]}".strip() or "Аккаунт"
+        phone = acc[3] or "без номера"
+        mark = "✅ " if aid == active_id else ""
+        kb.add(InlineKeyboardButton(f"{mark}{name} ({phone})", callback_data=f"select_account:{aid}"))
+        kb.row(
+            InlineKeyboardButton("❌ Удалить", callback_data=f"confirm_delete_account:{aid}"),
+            InlineKeyboardButton("ℹ️ Инфо", callback_data=f"account_info:{aid}")
+        )
+    kb.add(InlineKeyboardButton("➕ Добавить аккаунт", callback_data="add_account_menu"))
+    kb.add(InlineKeyboardButton("◀️ В главное меню", callback_data="main_menu"))
+    return kb
+
+def add_account_menu_keyboard():
+    kb = InlineKeyboardMarkup(row_width=1)
+    kb.add(
+        InlineKeyboardButton("🔐 Авторизоваться через QR", callback_data="auth_start"),
+        InlineKeyboardButton("📱 Авторизоваться по номеру", callback_data="phone_auth_start"),
+        InlineKeyboardButton("◀️ Назад", callback_data="my_accounts")
+    )
+    return kb
+
+def confirm_delete_keyboard(account_id):
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        InlineKeyboardButton("✅ Да, удалить", callback_data=f"delete_account:{account_id}"),
+        InlineKeyboardButton("❌ Нет, отмена", callback_data="my_accounts")
+    )
+    return kb
+
+# ================== HELPERS ==================
+def get_user(user_id):
+    row = db_query("SELECT * FROM users WHERE user_id=?", (user_id,), fetchone=True)
+    if not row:
+        db_query("INSERT INTO users (user_id) VALUES (?)", (user_id,))
+        row = db_query("SELECT * FROM users WHERE user_id=?", (user_id,), fetchone=True)
+    return row
+
+def get_accounts(user_id):
+    return db_query("SELECT * FROM accounts WHERE user_id=? ORDER BY id", (user_id,))
+
+def get_account(account_id):
+    return db_query("SELECT * FROM accounts WHERE id=?", (account_id,), fetchone=True)
+
+def get_active_account(user_id):
+    user = get_user(user_id)
+    aid = user[7] if len(user) > 7 else None
+    if not aid:
+        return None
+    return get_account(aid)
+
+def set_active_account(user_id, account_id):
+    db_query("UPDATE users SET active_account_id=? WHERE user_id=?", (account_id, user_id))
+
+def delete_account(account_id):
+    acc = get_account(account_id)
+    if not acc:
+        return
+    user_id = acc[1]
+    manager.disconnect(account_id)
+    db_query("DELETE FROM selected_chats WHERE account_id=?", (account_id,))
+    db_query("DELETE FROM accounts WHERE id=?", (account_id,))
+    remaining = get_accounts(user_id)
+    if remaining:
+        set_active_account(user_id, remaining[0][0])
+    else:
+        db_query("UPDATE users SET active_account_id=NULL WHERE user_id=?", (user_id,))
+
+def has_accounts(user_id):
+    c = db_query("SELECT COUNT(*) FROM accounts WHERE user_id=?", (user_id,), fetchone=True)
+    return c and c[0] > 0
+
+def get_selected_chats(user_id, account_id):
+    return db_query("SELECT chat_id, chat_name FROM selected_chats WHERE user_id=? AND account_id=?", (user_id, account_id))
+
+def toggle_chat_selection(user_id, account_id, chat_id, chat_name):
+    existing = db_query("SELECT 1 FROM selected_chats WHERE user_id=? AND account_id=? AND chat_id=?", (user_id, account_id, chat_id), fetchone=True)
+    if existing:
+        db_query("DELETE FROM selected_chats WHERE user_id=? AND account_id=? AND chat_id=?", (user_id, account_id, chat_id))
+        return False
+    else:
+        db_query("INSERT OR REPLACE INTO selected_chats (user_id, account_id, chat_id, chat_name) VALUES (?,?,?,?)", (user_id, account_id, chat_id, chat_name))
+        return True
+
+def clear_selected_chats(user_id, account_id):
+    db_query("DELETE FROM selected_chats WHERE user_id=? AND account_id=?", (user_id, account_id))
+
+def get_referral_count(user_id):
+    row = db_query("SELECT COUNT(*) FROM referrals WHERE inviter_id=?", (user_id,), fetchone=True)
+    return row[0] if row else 0
+
+def add_referral(inviter_id, invited_id):
+    existing = db_query("SELECT 1 FROM referrals WHERE inviter_id=? AND invited_id=?", (inviter_id, invited_id), fetchone=True)
+    if not existing:
+        db_query("INSERT INTO referrals (inviter_id, invited_id, invited_at) VALUES (?,?,?)", (inviter_id, invited_id, int(time.time())))
+        return True
+    return False
+
+def get_referral_link(user_id):
+    return f"https://t.me/Rasslink_bot?start=ref{user_id}"
+
+def has_premium_footer(user_id):
+    return get_referral_count(user_id) >= 5
+
+
+# ================== BROADCAST KEYBOARDS ==================
+def duration_keyboard():
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        InlineKeyboardButton("1 час", callback_data="dur_1"),
+        InlineKeyboardButton("24 часа", callback_data="dur_24"),
+        InlineKeyboardButton("168 часов (неделя)", callback_data="dur_168"),
+        InlineKeyboardButton("♾ Бесконечно (0)", callback_data="dur_0"),
+        InlineKeyboardButton("✏️ Свое значение", callback_data="dur_custom"),
+        InlineKeyboardButton("◀️ Назад", callback_data="broadcast_settings")
+    )
+    return kb
+
+def mentions_keyboard():
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        InlineKeyboardButton("❌ Без упоминаний", callback_data="mentions_none"),
+        InlineKeyboardButton("5 чел", callback_data="mentions_5"),
+        InlineKeyboardButton("10 чел", callback_data="mentions_10"),
+        InlineKeyboardButton("25 чел", callback_data="mentions_25"),
+        InlineKeyboardButton("50 чел", callback_data="mentions_50"),
+        InlineKeyboardButton("✏️ Свое число", callback_data="mentions_custom"),
+        InlineKeyboardButton("◀️ Назад", callback_data="main_menu")
+    )
+    return kb
+
+def msgs_per_chat_keyboard():
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        InlineKeyboardButton("1 сообщение", callback_data="mpc_1"),
+        InlineKeyboardButton("3 сообщения", callback_data="mpc_3"),
+        InlineKeyboardButton("5 сообщений", callback_data="mpc_5"),
+        InlineKeyboardButton("10 сообщений", callback_data="mpc_10"),
+        InlineKeyboardButton("✏️ Свое число", callback_data="mpc_custom"),
+        InlineKeyboardButton("◀️ Назад", callback_data="broadcast_settings")
+    )
+    return kb
+
+# ================== BROADCAST LOGIC ==================
+async def get_members_for_mentions(client, chat_id, count):
+    members = []
+    try:
+        async for user in client.iter_participants(chat_id, limit=count * 3):
+            if user.bot:
+                continue
+            if user.deleted:
+                continue
+            members.append(user)
+            if len(members) >= count:
+                break
+    except Exception:
+        pass
+    random.shuffle(members)
+    return members[:count]
+
+def build_mention_text(client, members):
+    parts = []
+    for m in members:
+        if m.username:
+            parts.append(f"@{m.username}")
+        else:
+            name = (m.first_name or '') + (f" {m.last_name}" if m.last_name else '')
+            parts.append(f'<a href="tg://user?id={m.id}">{html.escape(name or "User")}</a>')
+    return " ".join(parts)
+
+async def send_to_chat(client, chat_id, text, mentions_mode, mentions_count):
+    final_text = text
+    if mentions_mode != 'none' and mentions_count > 0:
+        members = await get_members_for_mentions(client, chat_id, mentions_count)
+        if members:
+            mention_text = build_mention_text(client, members)
+            final_text = f"{mention_text}\n\n{text}"
+    try:
+        await client.send_message(chat_id, final_text, parse_mode='html', link_preview=False)
+        return True
+    except FloodWaitError as e:
+        await asyncio.sleep(e.seconds)
+        try:
+            await client.send_message(chat_id, final_text, parse_mode='html', link_preview=False)
+            return True
+        except:
+            return False
+    except Exception:
+        return False
+
+def broadcast_worker(user_id, account_id, chat_ids, text, interval, duration_hours, msgs_per_chat, mentions_mode, mentions_count):
+    start_time = time.time()
+    duration_seconds = duration_hours * 3600 if duration_hours > 0 else None
+    success = 0
+    failed = 0
+    while True:
+        if duration_seconds and (time.time() - start_time) >= duration_seconds:
+            break
+        user_row = db_query("SELECT is_running FROM users WHERE user_id=?", (user_id,), fetchone=True)
+        if not user_row or not user_row[0]:
+            break
+        client = manager.get_client(account_id)
+        if not client:
+            time.sleep(5)
+            continue
+        for chat_id in chat_ids:
+            user_row = db_query("SELECT is_running FROM users WHERE user_id=?", (user_id,), fetchone=True)
+            if not user_row or not user_row[0]:
+                break
+            for _ in range(msgs_per_chat):
+                user_row = db_query("SELECT is_running FROM users WHERE user_id=?", (user_id,), fetchone=True)
+                if not user_row or not user_row[0]:
+                    break
+                try:
+                    result = manager.run_sync(account_id, send_to_chat(client, chat_id, text, mentions_mode, mentions_count), timeout=60)
+                    if result:
+                        success += 1
+                    else:
+                        failed += 1
+                except Exception:
+                    failed += 1
+                time.sleep(interval)
+            if duration_seconds and (time.time() - start_time) >= duration_seconds:
+                break
+        if duration_seconds and (time.time() - start_time) >= duration_seconds:
+            break
+    db_query("UPDATE users SET is_running=0 WHERE user_id=?", (user_id,))
+    try:
+        bot.send_message(user_id, f"⏹ <b>Рассылка завершена!</b>\n\n✅ Успешно: {success}\n❌ Ошибок: {failed}", reply_markup=main_menu_keyboard(has_accounts(user_id)))
+    except:
+        pass
+
+# ================== HANDLERS ==================
+@bot.message_handler(commands=['start'])
+def cmd_start(message):
+    user_id = message.from_user.id
+    get_user(user_id)
+    has_acc = has_accounts(user_id)
+
+    # Handle referral
+    if message.text and len(message.text.split()) > 1:
+        arg = message.text.split()[1]
+        if arg.startswith("ref"):
+            try:
+                inviter_id = int(arg[3:])
+                if inviter_id != user_id:
+                    if add_referral(inviter_id, user_id):
+                        count = get_referral_count(inviter_id)
+                        try:
+                            bot.send_message(inviter_id, f"🎉 <b>Новый реферал!</b>\n\n👤 Пользователь перешёл по вашей ссылке.\n📊 Всего приглашено: {count}/5")
+                        except:
+                            pass
+            except:
+                pass
+
+    ref_count = get_referral_count(user_id)
+    footer_status = "✅ Убрана" if ref_count >= 5 else f"❌ Ещё {5 - ref_count} приглашений"
+
+    welcome_text = (
+        "👋 <b>Добро пожаловать в бота для рассылки!</b>\n\n"
+        "🔹 Добавьте свой аккаунт Telegram\n"
+        "🔹 Выберите чаты для рассылки\n"
+        "🔹 Настройте текст, интервал и упоминания\n"
+        "🔹 Запустите рассылку одной кнопкой!\n\n"
+        "🔒 <b>Ваша сессия хранится в зашифрованном виде и НЕ истекает через сутки.</b>\n\n"
+        f"🔗 <b>Рефералы:</b> {ref_count}/5\n"
+        f"📌 Подпись внизу: {footer_status}"
+    )
+    if MENU_IMAGE_URL and not has_acc:
+        bot.send_photo(message.chat.id, MENU_IMAGE_URL, caption=welcome_text, reply_markup=main_menu_keyboard(has_acc))
+    else:
+        bot.send_message(message.chat.id, welcome_text, reply_markup=main_menu_keyboard(has_acc))
+
+@bot.callback_query_handler(func=lambda call: call.data == "main_menu")
+def cb_main_menu(call):
+    user_id = call.from_user.id
+    has_acc = has_accounts(user_id)
+    safe_edit_message("👋 <b>Главное меню</b>", call.message.chat.id, call.message.message_id, reply_markup=main_menu_keyboard(has_acc))
+
+@bot.callback_query_handler(func=lambda call: call.data == "auth_start")
+def cb_auth_start(call):
+    qr_manager.start_auth(call.from_user.id, call.message.chat.id, bot)
+
+@bot.callback_query_handler(func=lambda call: call.data == "phone_auth_start")
+def cb_phone_auth_start(call):
+    phone_auth_manager.start_auth(call.from_user.id, call.message.chat.id, bot)
+
+@bot.callback_query_handler(func=lambda call: call.data == "auth_cancel")
+def cb_auth_cancel(call):
+    user_id = call.from_user.id
+    phone_auth_manager.cancel(user_id)
+    qr_manager.cancel(user_id)
+    user_states.pop(user_id, None)
+    has_acc = has_accounts(user_id)
+    safe_edit_message("❌ Авторизация отменена.", call.message.chat.id, call.message.message_id, reply_markup=main_menu_keyboard(has_acc))
+
+@bot.callback_query_handler(func=lambda call: call.data == "broadcast_settings")
+def cb_broadcast_settings(call):
+    user_id = call.from_user.id
+    user = get_user(user_id)
+    text = user[1] or "(не задан)"
+    interval = user[2] or 1.0
+    duration = user[8] if len(user) > 8 else 0
+    mpc = user[9] if len(user) > 9 else 1
+    mentions_mode = user[3] or 'none'
+    mentions_count = user[4] or 10
+    dur_str = f"{duration} ч" if duration > 0 else "♾ Бесконечно"
+    men_str = f"{mentions_count} чел" if mentions_mode != 'none' else "❌ Выключены"
+    settings_text = (
+        f"📨 <b>Настройки рассылки</b>\n\n"
+        f"📝 Текст: {text[:100]}{'...' if len(text) > 100 else ''}\n"
+        f"⏱ Интервал: {interval} сек\n"
+        f"⏳ Длительность: {dur_str}\n"
+        f"📬 Сообщений на чат: {mpc}\n"
+        f"👥 Упоминания: {men_str}"
+    )
+    safe_edit_message(settings_text, call.message.chat.id, call.message.message_id, reply_markup=broadcast_settings_keyboard())
+
+@bot.callback_query_handler(func=lambda call: call.data == "set_text")
+def cb_set_text(call):
+    user_id = call.from_user.id
+    user_states[user_id] = 'set_text'
+    safe_edit_message("📝 Введите текст сообщения для рассылки:", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard("broadcast_settings"))
+
+@bot.callback_query_handler(func=lambda call: call.data == "set_interval")
+def cb_set_interval(call):
+    user_id = call.from_user.id
+    user_states[user_id] = 'set_interval'
+    safe_edit_message("⏱ Введите интервал в секундах (например: 1.5, 2, 5):", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard("broadcast_settings"))
+
+@bot.callback_query_handler(func=lambda call: call.data == "set_duration")
+def cb_set_duration(call):
+    safe_edit_message("⏳ Выберите длительность рассылки:", call.message.chat.id, call.message.message_id, reply_markup=duration_keyboard())
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("dur_"))
+def cb_dur_preset(call):
+    user_id = call.from_user.id
+    val = call.data.split("_")[1]
+    if val == "custom":
+        user_states[user_id] = 'set_duration_custom'
+        safe_edit_message("⏳ Введите длительность в часах (например: 1, 24, 168) или 0 для бесконечной:", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard("set_duration"))
+    else:
+        hours = float(val)
+        db_query("UPDATE users SET broadcast_duration_hours=? WHERE user_id=?", (hours, user_id))
+        safe_edit_message(f"✅ Длительность установлена: {'♾ Бесконечно' if hours == 0 else f'{int(hours)} ч'}", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard("broadcast_settings"))
+
+@bot.callback_query_handler(func=lambda call: call.data == "set_msgs_per_chat")
+def cb_set_msgs_per_chat(call):
+    safe_edit_message("📬 Выберите количество сообщений на чат:", call.message.chat.id, call.message.message_id, reply_markup=msgs_per_chat_keyboard())
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("mpc_"))
+def cb_mpc_preset(call):
+    user_id = call.from_user.id
+    val = call.data.split("_")[1]
+    if val == "custom":
+        user_states[user_id] = 'set_mpc_custom'
+        safe_edit_message("📬 Введите количество сообщений на чат (от 1 до сколько угодно):", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard("set_msgs_per_chat"))
+    else:
+        count = int(val)
+        db_query("UPDATE users SET messages_per_chat=? WHERE user_id=?", (count, user_id))
+        safe_edit_message(f"✅ Сообщений на чат: {count}", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard("broadcast_settings"))
+
+@bot.callback_query_handler(func=lambda call: call.data == "mentions_settings")
+def cb_mentions_settings(call):
+    safe_edit_message("👥 Настройки упоминаний:", call.message.chat.id, call.message.message_id, reply_markup=mentions_keyboard())
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("mentions_"))
+def cb_mentions_preset(call):
+    user_id = call.from_user.id
+    val = call.data.split("_")[1]
+    if val == "none":
+        db_query("UPDATE users SET mentions_mode='none' WHERE user_id=?", (user_id,))
+        safe_edit_message("✅ Упоминания выключены.", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard("main_menu"))
+    elif val == "custom":
+        user_states[user_id] = 'set_mentions_custom'
+        safe_edit_message("👥 Введите количество упоминаемых человек (от 1 до сколько угодно):", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard("mentions_settings"))
+    else:
+        count = int(val)
+        db_query("UPDATE users SET mentions_mode='random', mentions_count=? WHERE user_id=?", (count, user_id))
+        safe_edit_message(f"✅ Упоминания: {count} чел", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard("main_menu"))
+
+@bot.callback_query_handler(func=lambda call: call.data == "select_chats")
+def cb_select_chats(call):
+    user_id = call.from_user.id
+    active = get_active_account(user_id)
+    if not active:
+        safe_edit_message("❌ Сначала добавьте и выберите аккаунт.", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard())
+        return
+    account_id = active[0]
+    started = manager.start_client(account_id, active[2])
+    if not started:
+        safe_edit_message("❌ Не удалось подключить аккаунт. Попробуйте удалить и добавить заново.", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard())
+        return
+    client = manager.get_client(account_id)
+    if not client:
+        safe_edit_message("❌ Ошибка подключения аккаунта.", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard())
+        return
+    try:
+        me = manager.run_sync(account_id, client.get_me(), timeout=15)
+        me_id = me.id
+    except:
+        safe_edit_message("❌ Ошибка получения данных аккаунта.", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard())
+        return
+    try:
+        dialogs = manager.get_dialogs_cached(account_id, client, me_id, force_refresh=True)
+    except Exception as e:
+        safe_edit_message(f"❌ Ошибка загрузки чатов: {str(e)}", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard())
+        return
+    selected = get_selected_chats(user_id, account_id)
+    selected_ids = {s[0] for s in selected}
+    kb = InlineKeyboardMarkup(row_width=1)
+    for dialog in dialogs[:50]:
+        cid = dialog.id
+        name = dialog.name or f"Chat {cid}"
+        mark = "✅ " if cid in selected_ids else "⬜ "
+        kb.add(InlineKeyboardButton(f"{mark}{name}", callback_data=f"toggle_chat:{cid}:{html.escape(name[:30])}"))
+    kb.add(InlineKeyboardButton("🔄 Обновить список", callback_data="select_chats"))
+    kb.add(InlineKeyboardButton("❌ Очистить выбор", callback_data="clear_chats"))
+    kb.add(InlineKeyboardButton("◀️ Назад", callback_data="main_menu"))
+    safe_edit_message(f"📋 Выберите чаты для рассылки (выбрано: {len(selected_ids)}):", call.message.chat.id, call.message.message_id, reply_markup=kb)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("toggle_chat:"))
+def cb_toggle_chat(call):
+    user_id = call.from_user.id
+    active = get_active_account(user_id)
+    if not active:
+        return
+    parts = call.data.split(":", 2)
+    chat_id = int(parts[1])
+    chat_name = parts[2] if len(parts) > 2 else "Chat"
+    toggle_chat_selection(user_id, active[0], chat_id, chat_name)
+    cb_select_chats(call)
+
+@bot.callback_query_handler(func=lambda call: call.data == "clear_chats")
+def cb_clear_chats(call):
+    user_id = call.from_user.id
+    active = get_active_account(user_id)
+    if active:
+        clear_selected_chats(user_id, active[0])
+    cb_select_chats(call)
+
+@bot.callback_query_handler(func=lambda call: call.data == "broadcast_start")
+def cb_broadcast_start(call):
+    user_id = call.from_user.id
+    user = get_user(user_id)
+    active = get_active_account(user_id)
+    if not active:
+        safe_edit_message("❌ Сначала добавьте аккаунт.", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard())
+        return
+    account_id = active[0]
+    text = user[1] or ""
+    interval = user[2] or 1.0
+    duration = user[8] if len(user) > 8 else 0
+    mpc = user[9] if len(user) > 9 else 1
+    mentions_mode = user[3] or 'none'
+    mentions_count = user[4] or 10
+    if not text.strip():
+        safe_edit_message("❌ Сначала задайте текст сообщения в настройках.", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard("broadcast_settings"))
+        return
+    selected = get_selected_chats(user_id, account_id)
+    if not selected:
+        safe_edit_message("❌ Сначала выберите чаты для рассылки.", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard("select_chats"))
+        return
+    started = manager.start_client(account_id, active[2])
+    if not started:
+        safe_edit_message("❌ Не удалось подключить аккаунт.", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard())
+        return
+    chat_ids = [s[0] for s in selected]
+    db_query("UPDATE users SET is_running=1 WHERE user_id=?", (user_id,))
+    dur_str = f"{duration} ч" if duration > 0 else "♾ Бесконечно"
+    men_str = f"{mentions_count} чел" if mentions_mode != 'none' else "❌ Выключены"
+    safe_edit_message(
+        f"▶️ <b>Рассылка запущена!</b>\n\n"
+        f"📝 Текст: {text[:50]}{'...' if len(text) > 50 else ''}\n"
+        f"📋 Чатов: {len(chat_ids)}\n"
+        f"📬 Сообщений на чат: {mpc}\n"
+        f"⏱ Интервал: {interval} сек\n"
+        f"⏳ Длительность: {dur_str}\n"
+        f"👥 Упоминания: {men_str}",
+        call.message.chat.id, call.message.message_id, reply_markup=stop_keyboard()
+    )
+    footer = "" if has_premium_footer(user_id) else FOOTER_TEXT
+    t = threading.Thread(target=broadcast_worker, args=(user_id, account_id, chat_ids, text + footer, interval, duration, mpc, mentions_mode, mentions_count), daemon=True)
+    t.start()
+
+@bot.callback_query_handler(func=lambda call: call.data == "broadcast_stop")
+def cb_broadcast_stop(call):
+    user_id = call.from_user.id
+    db_query("UPDATE users SET is_running=0 WHERE user_id=?", (user_id,))
+    safe_edit_message("⏹ Рассылка останавливается...", call.message.chat.id, call.message.message_id, reply_markup=main_menu_keyboard(has_accounts(user_id)))
+
+@bot.callback_query_handler(func=lambda call: call.data == "my_accounts")
+def cb_my_accounts(call):
+    user_id = call.from_user.id
+    accounts = get_accounts(user_id)
+    if not accounts:
+        safe_edit_message("👤 У вас пока нет аккаунтов.", call.message.chat.id, call.message.message_id, reply_markup=add_account_menu_keyboard())
+        return
+    safe_edit_message("👤 <b>Ваши аккаунты</b>:", call.message.chat.id, call.message.message_id, reply_markup=accounts_keyboard(user_id))
+
+@bot.callback_query_handler(func=lambda call: call.data == "add_account_menu")
+def cb_add_account_menu(call):
+    safe_edit_message("➕ <b>Добавить аккаунт</b>", call.message.chat.id, call.message.message_id, reply_markup=add_account_menu_keyboard())
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("select_account:"))
+def cb_select_account(call):
+    user_id = call.from_user.id
+    account_id = int(call.data.split(":")[1])
+    set_active_account(user_id, account_id)
+    safe_edit_message("✅ Аккаунт выбран.", call.message.chat.id, call.message.message_id, reply_markup=accounts_keyboard(user_id))
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("confirm_delete_account:"))
+def cb_confirm_delete(call):
+    account_id = int(call.data.split(":")[1])
+    safe_edit_message("❓ Вы уверены, что хотите удалить этот аккаунт?", call.message.chat.id, call.message.message_id, reply_markup=confirm_delete_keyboard(account_id))
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("delete_account:"))
+def cb_delete_account(call):
+    user_id = call.from_user.id
+    account_id = int(call.data.split(":")[1])
+    delete_account(account_id)
+    safe_edit_message("✅ Аккаунт удалён.", call.message.chat.id, call.message.message_id, reply_markup=accounts_keyboard(user_id))
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("account_info:"))
+def cb_account_info(call):
+    account_id = int(call.data.split(":")[1])
+    acc = get_account(account_id)
+    if not acc:
+        safe_edit_message("❌ Аккаунт не найден.", call.message.chat.id, call.message.message_id, reply_markup=back_keyboard("my_accounts"))
+        return
+    name = f"{acc[4]} {acc[5]}".strip() or "Аккаунт"
+    phone = acc[3] or "не указан"
+    created = time.strftime('%d.%m.%Y %H:%M', time.localtime(acc[6])) if acc[6] else "неизвестно"
+    info = f"ℹ️ <b>Информация об аккаунте</b>\n\n👤 {name}\n📱 <code>{phone}</code>\n📅 Добавлен: {created}"
+    safe_edit_message(info, call.message.chat.id, call.message.message_id, reply_markup=back_keyboard("my_accounts"))
+
+# ================== MESSAGE HANDLERS ==================
+@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == 'phone_input')
+def handle_phone_input(message):
+    user_id = message.from_user.id
+    phone = message.text.strip()
+    if phone_auth_manager.submit_phone(user_id, phone):
+        bot.delete_message(message.chat.id, message.message_id)
+    else:
+        bot.send_message(message.chat.id, "❌ Ошибка. Попробуйте снова /start")
+
+@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == 'phone_code_input')
+def handle_phone_code(message):
+    user_id = message.from_user.id
+    code = message.text.strip()
+    if phone_auth_manager.submit_code(user_id, code):
+        bot.delete_message(message.chat.id, message.message_id)
+    else:
+        bot.send_message(message.chat.id, "❌ Ошибка. Попробуйте снова /start")
+
+@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == 'phone_2fa_input')
+def handle_phone_2fa(message):
+    user_id = message.from_user.id
+    password = message.text.strip()
+    if phone_auth_manager.submit_password(user_id, password):
+        bot.delete_message(message.chat.id, message.message_id)
+    else:
+        bot.send_message(message.chat.id, "❌ Ошибка. Попробуйте снова /start")
+
+@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == 'set_text')
+def handle_set_text(message):
+    user_id = message.from_user.id
+    text = message.text
+    db_query("UPDATE users SET broadcast_text=? WHERE user_id=?", (text, user_id))
+    user_states.pop(user_id, None)
+    bot.send_message(message.chat.id, "✅ Текст сохранён.", reply_markup=main_menu_keyboard(has_accounts(user_id)))
+
+@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == 'set_interval')
+def handle_set_interval(message):
+    user_id = message.from_user.id
+    try:
+        interval = float(message.text.replace(',', '.'))
+        if interval < 0.5:
+            interval = 0.5
+        db_query("UPDATE users SET broadcast_interval=? WHERE user_id=?", (interval, user_id))
+        user_states.pop(user_id, None)
+        bot.send_message(message.chat.id, f"✅ Интервал установлен: {interval} сек", reply_markup=main_menu_keyboard(has_accounts(user_id)))
+    except ValueError:
+        bot.send_message(message.chat.id, "❌ Введите число, например 1.5 или 2")
+
+@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == 'set_duration_custom')
+def handle_set_duration_custom(message):
+    user_id = message.from_user.id
+    try:
+        hours = float(message.text.replace(',', '.'))
+        if hours < 0:
+            hours = 0
+        db_query("UPDATE users SET broadcast_duration_hours=? WHERE user_id=?", (hours, user_id))
+        user_states.pop(user_id, None)
+        dur_str = "♾ Бесконечно" if hours == 0 else f"{hours} ч"
+        bot.send_message(message.chat.id, f"✅ Длительность установлена: {dur_str}", reply_markup=main_menu_keyboard(has_accounts(user_id)))
+    except ValueError:
+        bot.send_message(message.chat.id, "❌ Введите число, например 1, 24, 168 или 0")
+
+@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == 'set_mpc_custom')
+def handle_set_mpc_custom(message):
+    user_id = message.from_user.id
+    try:
+        count = int(message.text.strip())
+        if count < 1:
+            count = 1
+        db_query("UPDATE users SET messages_per_chat=? WHERE user_id=?", (count, user_id))
+        user_states.pop(user_id, None)
+        bot.send_message(message.chat.id, f"✅ Сообщений на чат: {count}", reply_markup=main_menu_keyboard(has_accounts(user_id)))
+    except ValueError:
+        bot.send_message(message.chat.id, "❌ Введите целое число от 1 и выше")
+
+@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == 'set_mentions_custom')
+def handle_set_mentions_custom(message):
+    user_id = message.from_user.id
+    try:
+        count = int(message.text.strip())
+        if count < 1:
+            count = 1
+        db_query("UPDATE users SET mentions_mode='random', mentions_count=? WHERE user_id=?", (count, user_id))
+        user_states.pop(user_id, None)
+        bot.send_message(message.chat.id, f"✅ Упоминания: {count} чел", reply_markup=main_menu_keyboard(has_accounts(user_id)))
+    except ValueError:
+        bot.send_message(message.chat.id, "❌ Введите целое число от 1 и выше")
+
+@bot.callback_query_handler(func=lambda call: call.data == "referral_program")
+def cb_referral_program(call):
+    user_id = call.from_user.id
+    count = get_referral_count(user_id)
+    link = get_referral_link(user_id)
+    remaining = max(0, 5 - count)
+    status = "✅ <b>Подпись убрана!</b>" if count >= 5 else f"❌ Осталось пригласить: <b>{remaining}</b>"
+    text = (
+        f"🔗 <b>Реферальная программа</b>\n\n"
+        f"📊 Приглашено: <b>{count}/5</b>\n"
+        f"{status}\n\n"
+        f"📎 Ваша ссылка:\n<code>{link}</code>\n\n"
+        f"📌 Отправьте эту ссылку друзьям. Когда 5 человек перейдут по ней и запустят бота — "
+        f"подпись «{FOOTER_TEXT.strip()}» больше не будет добавляться к вашим сообщениям."
+    )
+    safe_edit_message(text, call.message.chat.id, call.message.message_id, reply_markup=back_keyboard("main_menu"))
+
+# ================== MAIN ==================
 if __name__ == "__main__":
-    print("Бот запущен")
-    bot.polling(non_stop=True, timeout=1, long_polling_timeout=1)
+    init_db()
+    # Auto-reconnect existing accounts on startup
+    accounts = db_query("SELECT id, session_string FROM accounts")
+    for acc in accounts:
+        aid = acc[0]
+        ss = acc[1]
+        if ss:
+            try:
+                manager.start_client(aid, ss)
+                print(f"Auto-connected account {aid}")
+            except Exception as e:
+                print(f"Auto-connect failed for account {aid}: {e}")
+    print("Bot started!")
+    bot.polling(none_stop=True, interval=0.5)

@@ -1004,15 +1004,14 @@ def cb_select_chats(call):
     kb.add(InlineKeyboardButton("◀️ Назад", callback_data="main_menu"))
     safe_edit_message(f"📋 Выберите чаты для рассылки (выбрано: {len(selected_ids)}):", call.message.chat.id, call.message.message_id, reply_markup=kb)
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("toggle_chat:"))
+@bot.callback_query_handler(func=lambda call: call.data.startswith("t:"))
 def cb_toggle_chat(call):
     user_id = call.from_user.id
     active = get_active_account(user_id)
     if not active:
         return
-    parts = call.data.split(":", 2)
-    chat_id = int(parts[1])
-    chat_name = parts[2] if len(parts) > 2 else "Chat"
+    chat_id = int(call.data.split(":")[1])
+    chat_name = chat_filters.get(user_id, {}).get(chat_id, "Chat")
     toggle_chat_selection(user_id, active[0], chat_id, chat_name)
     cb_select_chats(call)
 

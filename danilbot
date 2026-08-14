@@ -36,6 +36,7 @@ ACCOUNTS_IMAGE_URL = "https://i.postimg.cc/651GbD1W/IMG-20260809-115919-061.jpg"
 
 user_states = {}
 chat_filters = {}
+user_chat_pages = {}
 
 # ================== SAFE EDIT ==================
 def safe_edit_message(text, chat_id, message_id, reply_markup=None, parse_mode="HTML", **kwargs):
@@ -998,13 +999,43 @@ def cb_select_chats(call):
     selected = get_selected_chats(user_id, account_id)
     selected_ids = {s[0] for s in selected}
     chat_filters[user_id] = {}
-    kb = InlineKeyboardMarkup(row_width=3)
-    for dialog in dialogs[:50]:
-        cid = dialog.id
-        name = dialog.name or f"Chat {cid}"
-        chat_filters[user_id][cid] = name
-        mark = "✅ " if cid in selected_ids else "⬜ "
-        kb.add(InlineKeyboardButton(f"{mark}{name}", callback_data=f"t:{cid}"))
+
+    # Pagination: 9 chats per page (3x3 grid)
+    page = user_chat_pages.get(user_id, 0)
+    per_page = 9
+    total_pages = max(1, (len(dialogs) + per_page - 1) // per_page)
+    if page >= total_pages:
+        page = total_pages - 1
+        user_chat_pages[user_id] = page
+    start = page * per_page
+    end = start + per_page
+    page_dialogs = dialogs[start:end]
+
+    kb = InlineKeyboardMarkup()
+    for i in range(0, len(page_dialogs), 3):
+        row = []
+        for j in range(3):
+            if i + j < len(page_dialogs):
+                dialog = page_dialogs[i + j]
+                cid = dialog.id
+                name = dialog.name or f"Chat {cid}"
+                chat_filters[user_id][cid] = name
+                mark = "✅ " if cid in selected_ids else "⬜ "
+                short = name[:12] + "..." if len(name) > 12 else name
+                row.append(InlineKeyboardButton(f"{mark}{short}", callback_data=f"t:{cid}"))
+        if row:
+            kb.row(*row)
+
+    # Pagination nav
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("⬅️ Назад", callback_data="chat_page_prev"))
+    nav_row.append(InlineKeyboardButton(f"📄 {page + 1}/{total_pages}", callback_data="noop"))
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton("Вперёд ➡️", callback_data="chat_page_next"))
+    if nav_row:
+        kb.row(*nav_row)
+
     kb.row(InlineKeyboardButton("🔄 Обновить список", callback_data="select_chats"))
     kb.row(InlineKeyboardButton("❌ Очистить выбор", callback_data="clear_chats"))
     kb.row(InlineKeyboardButton("◀️ Назад", callback_data="main_menu"))
@@ -1028,6 +1059,22 @@ def cb_clear_chats(call):
     if active:
         clear_selected_chats(user_id, active[0])
     cb_select_chats(call)
+
+@bot.callback_query_handler(func=lambda call: call.data == "chat_page_prev")
+def cb_chat_page_prev(call):
+    user_id = call.from_user.id
+    user_chat_pages[user_id] = max(0, user_chat_pages.get(user_id, 0) - 1)
+    cb_select_chats(call)
+
+@bot.callback_query_handler(func=lambda call: call.data == "chat_page_next")
+def cb_chat_page_next(call):
+    user_id = call.from_user.id
+    user_chat_pages[user_id] = user_chat_pages.get(user_id, 0) + 1
+    cb_select_chats(call)
+
+@bot.callback_query_handler(func=lambda call: call.data == "noop")
+def cb_noop(call):
+    bot.answer_callback_query(call.id)
 
 @bot.callback_query_handler(func=lambda call: call.data == "broadcast_start")
 def cb_broadcast_start(call):
@@ -1246,3 +1293,4 @@ if __name__ == "__main__":
                 print(f"Auto-connect failed for account {aid}: {e}")
     print("Bot started!")
     bot.polling(none_stop=True, interval=0.5)
+

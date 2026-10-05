@@ -1,19 +1,24 @@
 # -*- coding: utf-8 -*-
 """
-CASINO BOT
+CASINO BOT v2
 Telegram-казино на pyTelegramBotAPI (telebot).
 
-Установка:
-    pip install pyTelegramBotAPI
-
+Установка:  pip install pyTelegramBotAPI
 Запуск:
-    1. Впишите токен от @BotFather в TOKEN.
-    2. Укажите свой Telegram ID в ADMIN_ID (узнать: @userinfobot).
-    3. python casino_bot.py
+    export BOT_TOKEN="токен_от_BotFather"     (Windows: set BOT_TOKEN=...)
+    python casino_bot.py
 
-Меню команд (кнопка "Menu" сбоку в поле ввода) бот установит сам при запуске.
+Главные принципы v2:
+  1. ЧЕМ МЕНЬШЕ ШАНС — ТЕМ БОЛЬШЕ ДЕНЕГ. Все множители считаются из вероятности
+     по формуле  множитель = RTP / шанс  (слоты, колесо, риск, рулетка, краш).
+  2. НЕВЕЗЕНИЕ ПРИНОСИТ УДАЧУ. Каждое поражение подряд копит «серию»:
+     - к следующему выигрышу добавляется бонус (+5% к прибыли за каждое поражение, до +100%);
+     - каждое 5-е поражение подряд возвращает часть ставки (кэшбэк);
+     - каждое поражение пополняет общий ДЖЕКПОТ, который забирает тройка 777 в слотах.
 """
 
+import math
+import os
 import random
 import sqlite3
 import threading
@@ -24,44 +29,77 @@ from telebot import types
 
 # ============================ КОНФИГУРАЦИЯ ============================
 
-TOKEN = "8342187777:AAEU6H1x5Irr-xRENqZ05S_t8XoqdzgFlIA"
-ADMIN_ID = 0  # ваш Telegram ID
+TOKEN = os.getenv("BOT_TOKEN", "ВСТАВЬТЕ_ТОКЕН_СЮДА")
+ADMIN_ID = 0  # ваш Telegram ID (узнать: @userinfobot)
 
-START_BALANCE = 1000          # стартовый баланс нового игрока
-DAILY_BONUS = 500             # ежедневный бонус
-MIN_BET = 10                  # минимальная ставка
-MAX_BET = 100_000             # максимальная ставка
+START_BALANCE = 1000
+DAILY_BONUS = 500
+MIN_BET = 10
+MAX_BET = 100_000
 
-CMD_COOLDOWN = 1.5            # минимальный интервал между командами, сек
-FLOOD_LIMIT = 5               # столько команд за FLOOD_WINDOW -> блокировка
-FLOOD_WINDOW = 10             # окно подсчёта, сек
-FLOOD_BLOCK = 60              # длительность блокировки, сек
+RESCUE_AMOUNT = 200           # «подачка» для тех, у кого кончились деньги
+RESCUE_INTERVAL = 3 * 3600
+
+RTP = 0.96                    # возврат игроку в играх с одним шансом (96%)
+
+# --- Механика невезения ---
+LUCK_STEP = 0.05              # +5% к прибыли за каждое поражение подряд
+LUCK_MAX = 1.0                # потолок бонуса: +100%
+CASHBACK_EVERY = 5            # каждое N-е поражение подряд -> кэшбэк
+CASHBACK_PCT = 0.25           # 25% от ставки
+JACKPOT_CUT = 0.03            # 3% от каждого проигрыша уходит в джекпот
+JACKPOT_START = 5000
+
+CMD_COOLDOWN = 1.5
+FLOOD_LIMIT = 5
+FLOOD_WINDOW = 10
+FLOOD_BLOCK = 60
+PENDING_TTL = 120             # сек. на выбор после принятия ставки, потом возврат
 
 DAILY_INTERVAL = 24 * 3600
 DB_PATH = "casino.db"
 
-# Барабаны слотов: чем реже символ, тем выше выплата
+# ---------- Слоты: множители считаются из вероятности символа ----------
 REEL = ["7", "$", "%", "&", "*", "X"]
 REEL_WEIGHTS = [1, 2, 3, 4, 5, 6]
-SLOT_PAYTABLE = {
-    ("7", "7", "7"): 15,
-    ("$", "$", "$"): 10,
-    ("%", "%", "%"): 7,
-    ("&", "&", "&"): 5,
-    ("*", "*", "*"): 3,
-    ("X", "X", "X"): 2,
-}
+SLOT_TRIPLE_SHARE = 0.70      # доля RTP, приходящаяся на тройки
+SLOT_PAIR_MULT = 0.5          # любая пара возвращает половину ставки
+SLOT_MAX_MULT = 500
+
+_W = sum(REEL_WEIGHTS)
+SLOT_PAYTABLE = {}
+for _s, _w in zip(REEL, REEL_WEIGHTS):
+    _p = (_w / _W) ** 3
+    SLOT_PAYTABLE[_s] = max(2, min(SLOT_MAX_MULT, round(SLOT_TRIPLE_SHARE / len(REEL) / _p)))
+
+# ---------- Колесо удачи: чем больше множитель, тем реже сектор ----------
+WHEEL_MULTS = [0.5, 1.5, 3, 6, 15, 50, 200]
+WHEEL_SECTORS = []            # (множитель, вероятность)
+_share = 0.95 / len(WHEEL_MULTS)
+for _m in WHEEL_MULTS:
+    WHEEL_SECTORS.append((_m, _share / _m))
+WHEEL_SECTORS.insert(0, (0, 1 - sum(p for _, p in WHEEL_SECTORS)))
+
+# ---------- Риск: игрок сам выбирает шанс ----------
+RISK_CHANCES = [5, 10, 25, 50, 75, 90]
+
+
+def risk_mult(chance):
+    return round(RTP * 100 / chance, 2)
+
 
 ROULETTE_REDS = {1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36}
 
 GAMES = {
-    "slots":    ("Слоты",            "Три барабана. Комбинация из таблицы выплат. Три семёрки — х15."),
-    "coin":     ("Орёл или решка",   "Угадайте сторону монеты. Выплата х1.9."),
-    "dice":     ("Кости",            "Чёт/нечет или мало (1-3)/много (4-6). Выплата х2."),
-    "roulette": ("Рулетка",          "Красное/чёрное — х2, зеро и число — х36."),
-    "bj":       ("21 очко",          "Наберите больше очков, чем дилер, но не больше 21."),
-    "crash":    ("Краш",             "Множитель растёт. Заберите выигрыш до краха."),
-    "guess":    ("Угадай число",     "Число от 1 до 10. Угадали — х9."),
+    "slots":    ("Слоты",          "Три барабана. Тройка — по таблице (777 — х{} + ДЖЕКПОТ), пара — х0.5.".format(SLOT_PAYTABLE["7"])),
+    "wheel":    ("Колесо удачи",   "Чем реже сектор, тем выше множитель: от х0.5 до х200."),
+    "risk":     ("Риск",           "Сами выбираете шанс от 5% до 90%. Меньше шанс — больше выигрыш."),
+    "coin":     ("Орёл или решка", "Угадайте сторону монеты. Выплата х1.9."),
+    "dice":     ("Кости",          "Чёт/нечет или мало/много. Выплата х2."),
+    "roulette": ("Рулетка",        "Цвет х2, дюжина х3, зеро и число х36."),
+    "bj":       ("21 очко",        "Обыграйте дилера. Есть удвоение ставки."),
+    "crash":    ("Краш",           "Множитель растёт. Заберите выигрыш до краха."),
+    "guess":    ("Угадай число",   "Число от 1 до 10. Угадали — х9."),
 }
 
 GREETINGS = [
@@ -75,9 +113,14 @@ GREETINGS = [
     "И снова вы, {name}. Присаживайтесь.",
 ]
 
+TITLES = ["Новичок", "Игрок", "Азартный", "Хайроллер", "Шулер", "Легенда", "Магнат"]
+
 # ============================ БАЗА ДАННЫХ ============================
 
 _db_lock = threading.Lock()
+
+U_BAL, U_WINS, U_LOSS, U_GAMES, U_EARN, U_DAILY = 2, 3, 4, 5, 6, 7
+U_STREAK, U_BEST, U_XP, U_DSTREAK, U_RESCUE = 8, 9, 10, 11, 12
 
 
 def db_query(sql, params=(), fetch=None):
@@ -89,6 +132,8 @@ def db_query(sql, params=(), fetch=None):
             result = cur.fetchone()
         elif fetch == "all":
             result = cur.fetchall()
+        elif fetch == "rows":
+            result = cur.rowcount
         else:
             result = None
         con.commit()
@@ -106,9 +151,24 @@ def init_db():
             losses      INTEGER DEFAULT 0,
             games       INTEGER DEFAULT 0,
             earned      INTEGER DEFAULT 0,
-            last_daily  REAL DEFAULT 0
+            last_daily  REAL DEFAULT 0,
+            loss_streak INTEGER DEFAULT 0,
+            best_streak INTEGER DEFAULT 0,
+            xp          INTEGER DEFAULT 0,
+            daily_streak INTEGER DEFAULT 0,
+            last_rescue REAL DEFAULT 0
         )
     """)
+    # миграция для старой базы (порядок важен — колонки добавляются в конец)
+    for col in ("loss_streak INTEGER DEFAULT 0", "best_streak INTEGER DEFAULT 0",
+                "xp INTEGER DEFAULT 0", "daily_streak INTEGER DEFAULT 0",
+                "last_rescue REAL DEFAULT 0"):
+        try:
+            db_query("ALTER TABLE users ADD COLUMN " + col)
+        except sqlite3.OperationalError:
+            pass
+    db_query("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value INTEGER)")
+    db_query("INSERT OR IGNORE INTO meta (key, value) VALUES ('jackpot', ?)", (JACKPOT_START,))
 
 
 def get_user(uid):
@@ -128,23 +188,112 @@ def add_balance(uid, delta):
     db_query("UPDATE users SET balance = balance + ? WHERE user_id=?", (delta, uid))
 
 
-def add_stats(uid, won, profit):
-    if won:
-        db_query("UPDATE users SET wins=wins+1, games=games+1, earned=earned+? WHERE user_id=?",
-                 (profit, uid))
+def try_charge(uid, amount):
+    """Атомарно списывает ставку. True, если средств хватило."""
+    return db_query("UPDATE users SET balance = balance - ? WHERE user_id=? AND balance >= ?",
+                    (amount, uid, amount), "rows") == 1
+
+
+def get_jackpot():
+    row = db_query("SELECT value FROM meta WHERE key='jackpot'", fetch="one")
+    return row[0] if row else JACKPOT_START
+
+
+def add_jackpot(n):
+    db_query("UPDATE meta SET value = value + ? WHERE key='jackpot'", (n,))
+
+
+def take_jackpot():
+    amount = get_jackpot()
+    db_query("UPDATE meta SET value=? WHERE key='jackpot'", (JACKPOT_START,))
+    return amount
+
+
+def level_of(xp):
+    return int(math.sqrt(xp / 40)) + 1
+
+
+def title_of(level):
+    return TITLES[min((level - 1) // 2, len(TITLES) - 1)]
+
+
+# ============================ ЯДРО: РАСЧЁТ РЕЗУЛЬТАТА ============================
+
+def settle(uid, bet, gross):
+    """
+    Единая точка расчёта. gross — сколько игроку возвращается ДО бонусов
+    (0 — проигрыш, bet — ничья, больше bet — выигрыш).
+    Применяет механику невезения. Возвращает (чистый_итог, [доп. строки]).
+    """
+    user = get_user(uid)
+    streak = user[U_STREAK]
+    lines = []
+
+    if gross > bet:  # ---- победа
+        profit = gross - bet
+        pct = min(streak * LUCK_STEP, LUCK_MAX)
+        bonus = int(profit * pct)
+        final = gross + bonus
+        add_balance(uid, final)
+        db_query("UPDATE users SET wins=wins+1, games=games+1, earned=earned+?, loss_streak=0 "
+                 "WHERE user_id=?", (final - bet, uid))
+        if bonus:
+            lines.append("Бонус невезения: +{} (+{}% за {} поражений подряд)".format(
+                fmt(bonus), int(pct * 100), streak))
+        net = final - bet
+
+    elif gross == bet:  # ---- ничья
+        add_balance(uid, bet)
+        db_query("UPDATE users SET games=games+1 WHERE user_id=?", (uid,))
+        net = 0
+
+    else:  # ---- поражение (возможно, частичное)
+        if gross > 0:
+            add_balance(uid, gross)
+        new_streak = streak + 1
+        db_query("UPDATE users SET losses=losses+1, games=games+1, loss_streak=?, "
+                 "best_streak=MAX(best_streak, ?) WHERE user_id=?", (new_streak, new_streak, uid))
+        add_jackpot(max(1, int((bet - gross) * JACKPOT_CUT)))
+        net = gross - bet
+        if new_streak % CASHBACK_EVERY == 0:
+            cashback = max(1, int(bet * CASHBACK_PCT))
+            add_balance(uid, cashback)
+            net += cashback
+            lines.append("Утешение за {} поражений подряд: кэшбэк +{}".format(new_streak, fmt(cashback)))
+        next_pct = min(new_streak * LUCK_STEP, LUCK_MAX)
+        lines.append("Серия поражений: {}. Бонус к следующему выигрышу: +{}%".format(
+            new_streak, int(next_pct * 100)))
+
+    # ---- опыт и уровни
+    xp_gain = max(1, bet // 20)
+    old_level = level_of(user[U_XP])
+    db_query("UPDATE users SET xp=xp+? WHERE user_id=?", (xp_gain, uid))
+    new_level = level_of(user[U_XP] + xp_gain)
+    if new_level > old_level:
+        reward = new_level * 200
+        add_balance(uid, reward)
+        lines.append("Новый уровень {} ({})! Награда: +{}".format(new_level, title_of(new_level), fmt(reward)))
+    return net, lines
+
+
+def compose(head, net, lines):
+    if net > 0:
+        res = "Итог: +{}".format(fmt(net))
+    elif net < 0:
+        res = "Итог: -{}".format(fmt(-net))
     else:
-        db_query("UPDATE users SET losses=losses+1, games=games+1 WHERE user_id=?", (uid,))
+        res = "Итог: ставка возвращена"
+    return "\n".join([head, res] + lines)
 
 
 # ============================ ЗАЩИТА ОТ СПАМА ============================
 
-_last_cmd = {}   # uid -> время последней команды
-_flood_log = {}  # uid -> список меток времени
-_blocked = {}    # uid -> время разблокировки
+_last_cmd = {}
+_flood_log = {}
+_blocked = {}
 
 
 def is_spam(uid):
-    """Возвращает текст предупреждения или None, если команда разрешена."""
     now = time.time()
     if _blocked.get(uid, 0) > now:
         return "Слишком много запросов. Повторите через {} с.".format(int(_blocked[uid] - now) + 1)
@@ -165,23 +314,27 @@ def is_spam(uid):
 
 bot = telebot.TeleBot(TOKEN, threaded=True)
 
-# Состояния игроков
-pending = {}       # uid -> {"game": ..., "bet": ..., "await": ...}  ожидание выбора/ввода
-bj_games = {}      # uid -> состояние партии в 21
-crash_rounds = {}  # uid -> состояние раунда краша
+pending = {}       # uid -> {"game","bet","paid","t","await"}
+bj_games = {}
+crash_rounds = {}
+rolling = set()    # игроки, у которых идёт анимация кубика
+crash_lock = threading.Lock()
 
 
 def fmt(n):
     return "{:,}".format(int(n)).replace(",", " ")
 
 
+def fmt_mult(m):
+    return ("{:.2f}".format(m)).rstrip("0").rstrip(".")
+
+
 def parse_amount(text):
-    """Понимает 100, 5к, 2.5к. Возвращает int или None."""
     if not text:
         return None
     text = text.lower().replace(" ", "")
     mult = 1
-    if text.endswith("к"):
+    if text.endswith("к") or text.endswith("k"):
         mult = 1000
         text = text[:-1]
     try:
@@ -201,40 +354,42 @@ def safe_edit(chat_id, msg_id, text, reply_markup=None):
         pass
 
 
-def send_result(chat_id, text, game=None, bet=None):
-    markup = again_keyboard(game, bet) if game else None
-    bot.send_message(chat_id, text, reply_markup=markup)
-
-
 def again_keyboard(game, bet):
     kb = types.InlineKeyboardMarkup(row_width=2)
-    kb.add(types.InlineKeyboardButton("Ещё раз: {}".format(fmt(bet)), callback_data="again|{}|{}".format(game, bet)),
+    kb.add(types.InlineKeyboardButton("Ещё раз: {}".format(fmt(bet)),
+                                      callback_data="again|{}|{}".format(game, bet)),
            types.InlineKeyboardButton("Все игры", callback_data="menu|games"))
     return kb
+
+
+def send_result(chat_id, text, game=None, bet=None):
+    bot.send_message(chat_id, text, reply_markup=again_keyboard(game, bet) if game else None)
+
+
+def finish(chat_id, uid, bet, gross, head, game):
+    net, lines = settle(uid, bet, gross)
+    send_result(chat_id, compose(head, net, lines), game, bet)
 
 
 # ============================ КЛАВИАТУРЫ ============================
 
 def main_keyboard():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=3)
-    kb.add("Игры", "Баланс", "Топ",
-           "Профиль", "Бонус", "Помощь")
+    kb.add("Игры", "Баланс", "Топ", "Профиль", "Бонус", "Джекпот", "Помощь")
     return kb
 
 
 def games_inline():
     kb = types.InlineKeyboardMarkup(row_width=2)
-    for key, (name, _) in GAMES.items():
-        kb.add(types.InlineKeyboardButton(name, callback_data="game|{}".format(key)))
+    kb.add(*[types.InlineKeyboardButton(name, callback_data="game|{}".format(key))
+             for key, (name, _) in GAMES.items()])
     return kb
 
 
 def bet_keyboard(game):
     kb = types.InlineKeyboardMarkup(row_width=3)
-    kb.add(*[types.InlineKeyboardButton(str(a), callback_data="bet|{}|{}".format(game, a))
-             for a in (50, 100, 250)])
-    kb.add(*[types.InlineKeyboardButton(str(a), callback_data="bet|{}|{}".format(game, a))
-             for a in (500, 1000, 5000)])
+    kb.add(*[types.InlineKeyboardButton(str(a), callback_data="bet|{}|{}".format(game, a)) for a in (50, 100, 250)])
+    kb.add(*[types.InlineKeyboardButton(str(a), callback_data="bet|{}|{}".format(game, a)) for a in (500, 1000, 5000)])
     kb.add(types.InlineKeyboardButton("Своя ставка", callback_data="bet|{}|custom".format(game)))
     return kb
 
@@ -249,8 +404,8 @@ def coin_kb():
 def dice_kb():
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(types.InlineKeyboardButton("Чёт", callback_data="dice|чет"),
-           types.InlineKeyboardButton("Нечет", callback_data="dice|нечет"))
-    kb.add(types.InlineKeyboardButton("Мало (1-3)", callback_data="dice|мало"),
+           types.InlineKeyboardButton("Нечет", callback_data="dice|нечет"),
+           types.InlineKeyboardButton("Мало (1-3)", callback_data="dice|мало"),
            types.InlineKeyboardButton("Много (4-6)", callback_data="dice|много"))
     return kb
 
@@ -259,6 +414,9 @@ def roulette_kb():
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(types.InlineKeyboardButton("Красное (х2)", callback_data="roul|red"),
            types.InlineKeyboardButton("Чёрное (х2)", callback_data="roul|black"))
+    kb.add(types.InlineKeyboardButton("1-12 (х3)", callback_data="roul|d1"),
+           types.InlineKeyboardButton("13-24 (х3)", callback_data="roul|d2"),
+           types.InlineKeyboardButton("25-36 (х3)", callback_data="roul|d3"))
     kb.add(types.InlineKeyboardButton("Зеро (х36)", callback_data="roul|green"),
            types.InlineKeyboardButton("Число 0-36 (х36)", callback_data="roul|num"))
     return kb
@@ -266,15 +424,23 @@ def roulette_kb():
 
 def guess_kb():
     kb = types.InlineKeyboardMarkup(row_width=5)
-    kb.add(*[types.InlineKeyboardButton(str(i), callback_data="gnum|{}".format(i)) for i in range(1, 6)])
-    kb.add(*[types.InlineKeyboardButton(str(i), callback_data="gnum|{}".format(i)) for i in range(6, 11)])
+    kb.add(*[types.InlineKeyboardButton(str(i), callback_data="gnum|{}".format(i)) for i in range(1, 11)])
     return kb
 
 
-def bj_kb():
+def risk_kb():
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(*[types.InlineKeyboardButton("Шанс {}% — х{}".format(c, fmt_mult(risk_mult(c))),
+                                        callback_data="risk|{}".format(c)) for c in RISK_CHANCES])
+    return kb
+
+
+def bj_kb(can_double=False):
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(types.InlineKeyboardButton("Взять карту", callback_data="bj|hit"),
            types.InlineKeyboardButton("Остановиться", callback_data="bj|stand"))
+    if can_double:
+        kb.add(types.InlineKeyboardButton("Удвоить ставку", callback_data="bj|dbl"))
     return kb
 
 
@@ -286,13 +452,28 @@ def cashout_kb():
 
 # ============================ ЛОГИКА СТАВОК ============================
 
+def expire_pending(uid):
+    """Если игрок не выбрал вариант за PENDING_TTL — возвращаем ставку."""
+    s = pending.get(uid)
+    if s and s.get("paid") and time.time() - s["t"] > PENDING_TTL:
+        pending.pop(uid, None)
+        add_balance(uid, s["bet"])
+
+
 def is_busy(uid):
-    return uid in pending or uid in bj_games or \
-           (uid in crash_rounds and crash_rounds[uid]["active"])
+    expire_pending(uid)
+    return (uid in pending or uid in bj_games or uid in rolling or
+            (uid in crash_rounds and crash_rounds[uid]["active"]))
+
+
+def set_pending(uid, game, bet):
+    pending[uid] = {"game": game, "bet": bet, "paid": True, "t": time.time()}
 
 
 def begin_game(uid, chat_id, game, bet):
-    """Проверяет ставку, списывает её и запускает игру."""
+    # ожидание ввода своей ставки не должно блокировать выбор другой игры
+    if pending.get(uid, {}).get("await") == "bet":
+        pending.pop(uid, None)
     if is_busy(uid):
         bot.send_message(chat_id, "Сначала завершите текущую игру.")
         return
@@ -308,30 +489,32 @@ def begin_game(uid, chat_id, game, bet):
     if bet > MAX_BET:
         bot.send_message(chat_id, "Максимальная ставка — {}.".format(fmt(MAX_BET)))
         return
-    if user[2] < bet:
-        bot.send_message(chat_id, "Недостаточно средств. Ваш баланс: {}.".format(fmt(user[2])))
+    if not try_charge(uid, bet):
+        tip = ""
+        if user[U_BAL] < MIN_BET:
+            tip = "\nДеньги кончились? Напишите «подачка» или заберите «бонус»."
+        bot.send_message(chat_id, "Недостаточно средств. Ваш баланс: {}.{}".format(fmt(user[U_BAL]), tip))
         return
-
-    add_balance(uid, -bet)
 
     if game == "slots":
         play_slots(uid, chat_id, bet)
-    elif game == "coin":
-        pending[uid] = {"game": "coin", "bet": bet}
-        bot.send_message(chat_id, "Ставка {} принята. Ваш выбор:".format(fmt(bet)), reply_markup=coin_kb())
-    elif game == "dice":
-        pending[uid] = {"game": "dice", "bet": bet}
-        bot.send_message(chat_id, "Ставка {} принята. Ваш прогноз:".format(fmt(bet)), reply_markup=dice_kb())
-    elif game == "roulette":
-        pending[uid] = {"game": "roulette", "bet": bet}
-        bot.send_message(chat_id, "Ставка {} принята. Ваш сектор:".format(fmt(bet)), reply_markup=roulette_kb())
-    elif game == "guess":
-        pending[uid] = {"game": "guess", "bet": bet}
-        bot.send_message(chat_id, "Ставка {} принята. Угадайте число:".format(fmt(bet)), reply_markup=guess_kb())
+    elif game == "wheel":
+        play_wheel(uid, chat_id, bet)
     elif game == "bj":
         start_bj(uid, chat_id, bet)
     elif game == "crash":
         launch_crash(uid, chat_id, bet)
+    else:
+        prompts = {
+            "coin": ("Ваш выбор:", coin_kb),
+            "dice": ("Ваш прогноз:", dice_kb),
+            "roulette": ("Ваш сектор:", roulette_kb),
+            "guess": ("Угадайте число:", guess_kb),
+            "risk": ("Выберите шанс. Чем он ниже, тем больше множитель:", risk_kb),
+        }
+        text, kb = prompts[game]
+        set_pending(uid, game, bet)
+        bot.send_message(chat_id, "Ставка {} принята. {}".format(fmt(bet), text), reply_markup=kb())
 
 
 # ============================ ИГРЫ ============================
@@ -339,19 +522,53 @@ def begin_game(uid, chat_id, game, bet):
 def play_slots(uid, chat_id, bet):
     reels = random.choices(REEL, weights=REEL_WEIGHTS, k=3)
     line = " | ".join(reels)
-    mult = SLOT_PAYTABLE.get(tuple(reels))
-    if mult:
-        total = bet * mult
-        add_balance(uid, total)
-        add_stats(uid, True, total - bet)
-        send_result(chat_id,
-                    "Слоты: [ {} ]\nКомбинация — выплата х{}. Итог: +{}".format(line, mult, fmt(total)),
-                    "slots", bet)
+    head = "Слоты: [ {} ]".format(line)
+    gross = 0
+    if reels[0] == reels[1] == reels[2]:
+        mult = SLOT_PAYTABLE[reels[0]]
+        gross = bet * mult
+        head += "\nТройка! Выплата х{}.".format(mult)
+        if reels[0] == "7":
+            jp = take_jackpot()
+            gross += jp
+            head += "\nДЖЕКПОТ! Дополнительно: +{}".format(fmt(jp))
+    elif len(set(reels)) == 2:
+        gross = int(bet * SLOT_PAIR_MULT)
+        head += "\nПара — возвращается половина ставки."
     else:
-        add_stats(uid, False, 0)
-        send_result(chat_id,
-                    "Слоты: [ {} ]\nКомбинации нет. Итог: -{}".format(line, fmt(bet)),
-                    "slots", bet)
+        head += "\nКомбинации нет."
+    finish(chat_id, uid, bet, gross, head, "slots")
+
+
+def play_wheel(uid, chat_id, bet):
+    r = random.random()
+    acc = 0.0
+    mult = 0
+    for m, p in WHEEL_SECTORS:
+        acc += p
+        if r < acc:
+            mult = m
+            break
+    gross = int(bet * mult)
+    if mult == 0:
+        head = "Колесо остановилось на х0. Мимо."
+    elif mult < 1:
+        head = "Колесо: х{}. Часть ставки вернулась.".format(fmt_mult(mult))
+    else:
+        head = "Колесо: х{}!".format(fmt_mult(mult))
+    finish(chat_id, uid, bet, gross, head, "wheel")
+
+
+def play_risk(uid, chat_id, bet, chance):
+    mult = risk_mult(chance)
+    roll = random.random() * 100
+    if roll < chance:
+        gross = int(bet * mult)
+        head = "Шанс {}%, множитель х{}. Выпало {:.2f} — удача!".format(chance, fmt_mult(mult), roll)
+    else:
+        gross = 0
+        head = "Шанс {}%, множитель х{}. Выпало {:.2f} — мимо.".format(chance, fmt_mult(mult), roll)
+    finish(chat_id, uid, bet, gross, head, "risk")
 
 
 def settle_coin(uid, chat_id, side):
@@ -360,35 +577,26 @@ def settle_coin(uid, chat_id, side):
         return
     bet = state["bet"]
     result = random.choice(["орел", "решка"])
-    if result == side:
-        total = int(bet * 1.9)
-        add_balance(uid, total)
-        add_stats(uid, True, total - bet)
-        send_result(chat_id, "Выпала {}. Ваша ставка сыграла: +{}".format(result, fmt(total)), "coin", bet)
-    else:
-        add_stats(uid, False, 0)
-        send_result(chat_id, "Выпала {}. Ставка не сыграла: -{}".format(result, fmt(bet)), "coin", bet)
+    gross = int(bet * 1.9) if result == side else 0
+    finish(chat_id, uid, bet, gross, "Выпала {}.".format(result), "coin")
 
 
 def settle_dice(uid, chat_id, bet, guess):
+    rolling.add(uid)
     msg = bot.send_dice(chat_id)
-    value = msg.dice.value  # значение известно сразу, ждём конца анимации
+    value = msg.dice.value
 
-    def finish():
-        if guess in ("чет", "нечет"):
-            ok = (value % 2 == 0) == (guess == "чет")
-        else:
-            ok = (value <= 3) == (guess == "мало")
-        if ok:
-            total = bet * 2
-            add_balance(uid, total)
-            add_stats(uid, True, total - bet)
-            send_result(chat_id, "Выпало {}. Прогноз верен: +{}".format(value, fmt(total)), "dice", bet)
-        else:
-            add_stats(uid, False, 0)
-            send_result(chat_id, "Выпало {}. Прогноз неверен: -{}".format(value, fmt(bet)), "dice", bet)
+    def finish_later():
+        try:
+            if guess in ("чет", "нечет"):
+                ok = (value % 2 == 0) == (guess == "чет")
+            else:
+                ok = (value <= 3) == (guess == "мало")
+            finish(chat_id, uid, bet, bet * 2 if ok else 0, "Выпало {}.".format(value), "dice")
+        finally:
+            rolling.discard(uid)
 
-    threading.Timer(4.0, finish).start()
+    threading.Timer(4.0, finish_later).start()
 
 
 def spin_roulette(uid, chat_id, bet, choice):
@@ -400,40 +608,32 @@ def spin_roulette(uid, chat_id, bet, choice):
     else:
         color = "чёрное"
 
-    total = 0
+    gross = 0
     if choice == "red" and color == "красное":
-        total = bet * 2
+        gross = bet * 2
     elif choice == "black" and color == "чёрное":
-        total = bet * 2
+        gross = bet * 2
+    elif choice == "d1" and 1 <= number <= 12:
+        gross = bet * 3
+    elif choice == "d2" and 13 <= number <= 24:
+        gross = bet * 3
+    elif choice == "d3" and 25 <= number <= 36:
+        gross = bet * 3
     elif choice == "green" and number == 0:
-        total = bet * 36
+        gross = bet * 36
     elif choice.startswith("num:") and int(choice[4:]) == number:
-        total = bet * 36
-
-    headline = "Выпало {} ({}).".format(number, color)
-    if total:
-        add_balance(uid, total)
-        add_stats(uid, True, total - bet)
-        send_result(chat_id, headline + " Выигрыш: +{}".format(fmt(total)), "roulette", bet)
-    else:
-        add_stats(uid, False, 0)
-        send_result(chat_id, headline + " Ставка проиграна: -{}".format(fmt(bet)), "roulette", bet)
+        gross = bet * 36
+    finish(chat_id, uid, bet, gross, "Выпало {} ({}).".format(number, color), "roulette")
 
 
-def settle_guess(uid, chat_id, bet, number):
+def settle_guess(uid, chat_id, number):
     state = pending.pop(uid, None)
     if not state:
         return
+    bet = state["bet"]
     secret = random.randint(1, 10)
-    if secret == number:
-        total = bet * 9
-        add_balance(uid, total)
-        add_stats(uid, True, total - bet)
-        send_result(chat_id, "Загадано число {}. Верно: +{}".format(secret, fmt(total)), "guess", bet)
-    else:
-        add_stats(uid, False, 0)
-        send_result(chat_id, "Загадано число {}. Вы указали {}. Итог: -{}".format(secret, number, fmt(bet)),
-                    "guess", bet)
+    gross = bet * 9 if secret == number else 0
+    finish(chat_id, uid, bet, gross, "Загадано {}, вы указали {}.".format(secret, number), "guess")
 
 
 # ---------- 21 очко ----------
@@ -452,24 +652,28 @@ def hand_value(cards):
 
 
 def bj_text(s):
-    return ("Ваши карты: {} ({})\n"
-            "Карта дилера: {}".format(hand_value(s["player"]), ", ".join(map(str, s["player"])),
-                                      s["dealer"][0]))
+    return "Ваши карты: {} ({})\nКарта дилера: {}".format(
+        hand_value(s["player"]), ", ".join(map(str, s["player"])), s["dealer"][0])
 
 
 def start_bj(uid, chat_id, bet):
     player = [draw_card(), draw_card()]
     dealer = [draw_card()]
     if hand_value(player) == 21:
-        total = int(bet * 2.5)
-        add_balance(uid, total)
-        add_stats(uid, True, total - bet)
-        send_result(chat_id, "21 с раздачи. Выплата: +{}".format(fmt(total)), "bj", bet)
+        finish(chat_id, uid, bet, int(bet * 2.5), "21 с раздачи!", "bj")
         return
     state = {"player": player, "dealer": dealer, "bet": bet, "chat": chat_id}
     bj_games[uid] = state
-    msg = bot.send_message(chat_id, bj_text(state), reply_markup=bj_kb())
+    msg = bot.send_message(chat_id, bj_text(state), reply_markup=bj_kb(can_double=True))
     state["msg"] = msg.message_id
+
+
+def bj_bust(uid, s):
+    bj_games.pop(uid, None)
+    net, lines = settle(uid, s["bet"], 0)
+    head = "Ваши карты: {} ({})\nПеребор.".format(hand_value(s["player"]), ", ".join(map(str, s["player"])))
+    safe_edit(s["chat"], s["msg"], compose(head, net, lines),
+              reply_markup=again_keyboard("bj", s["bet"] // (2 if s.get("doubled") else 1)))
 
 
 def bj_hit(uid):
@@ -477,15 +681,27 @@ def bj_hit(uid):
     if not s:
         return
     s["player"].append(draw_card())
-    value = hand_value(s["player"])
-    if value > 21:
-        add_stats(uid, False, 0)
-        safe_edit(s["chat"], s["msg"],
-                  "Ваши карты: {} ({})\nПеребор. Итог: -{}".format(value, ", ".join(map(str, s["player"])), fmt(s["bet"])),
-                  reply_markup=again_keyboard("bj", s["bet"]))
-        bj_games.pop(uid, None)
+    if hand_value(s["player"]) > 21:
+        bj_bust(uid, s)
     else:
         safe_edit(s["chat"], s["msg"], bj_text(s), reply_markup=bj_kb())
+
+
+def bj_double(uid, chat_id):
+    s = bj_games.get(uid)
+    if not s or len(s["player"]) != 2:
+        return
+    if not try_charge(uid, s["bet"]):
+        bot.send_message(chat_id, "Недостаточно средств для удвоения.")
+        return
+    s["bet"] *= 2
+    s["doubled"] = True
+    s["player"].append(draw_card())
+    if hand_value(s["player"]) > 21:
+        bj_bust(uid, s)
+    else:
+        safe_edit(s["chat"], s["msg"], bj_text(s) + "\nСтавка удвоена.")
+        bj_stand(uid)
 
 
 def bj_stand(uid):
@@ -497,31 +713,24 @@ def bj_stand(uid):
         dealer.append(draw_card())
     pv, dv = hand_value(s["player"]), hand_value(dealer)
     bet = s["bet"]
-
-    header = "У вас {} ({}), у дилера {} ({}).\n".format(pv, ", ".join(map(str, s["player"])),
-                                                          dv, ", ".join(map(str, dealer)))
+    head = "У вас {} ({}), у дилера {} ({}).".format(
+        pv, ", ".join(map(str, s["player"])), dv, ", ".join(map(str, dealer)))
     if dv > 21:
-        total = bet * 2
-        add_balance(uid, total)
-        add_stats(uid, True, total - bet)
-        send_result(s["chat"], header + "Дилер перебрал. Выигрыш: +{}".format(fmt(total)), "bj", bet)
+        gross, head = bet * 2, head + "\nДилер перебрал."
     elif pv > dv:
-        total = bet * 2
-        add_balance(uid, total)
-        add_stats(uid, True, total - bet)
-        send_result(s["chat"], header + "Ваша победа: +{}".format(fmt(total)), "bj", bet)
+        gross, head = bet * 2, head + "\nВаша победа."
     elif pv == dv:
-        add_balance(uid, bet)
-        send_result(s["chat"], header + "Ничья. Ставка возвращена.", "bj", bet)
+        gross, head = bet, head + "\nНичья."
     else:
-        add_stats(uid, False, 0)
-        send_result(s["chat"], header + "Победа дилера. Итог: -{}".format(fmt(bet)), "bj", bet)
+        gross, head = 0, head + "\nПобеда дилера."
+    base = bet // 2 if s.get("doubled") else bet
+    finish(s["chat"], uid, bet, gross, head, "bj" if base == bet else "bj")
 
 
 # ---------- Краш ----------
 
 def launch_crash(uid, chat_id, bet):
-    crash_point = max(1.01, round(0.99 / (1.0 - random.random()), 2))
+    crash_point = max(1.01, round(RTP / (1.0 - random.random()), 2))
     msg = bot.send_message(chat_id, "Раунд запущен.\nМножитель: х1.00", reply_markup=cashout_kb())
     crash_rounds[uid] = {"bet": bet, "mult": 1.0, "crash": crash_point,
                          "chat": chat_id, "msg": msg.message_id, "active": True}
@@ -531,32 +740,34 @@ def launch_crash(uid, chat_id, bet):
 def crash_loop(uid):
     while True:
         time.sleep(1)
-        r = crash_rounds.get(uid)
-        if not r or not r["active"]:
-            return
-        r["mult"] = round(r["mult"] + 0.12 + random.random() * 0.12, 2)
-        if r["mult"] >= r["crash"]:
-            r["active"] = False
-            add_stats(uid, False, 0)
-            safe_edit(r["chat"], r["msg"],
-                      "Краш на х{}.\nСтавка проиграна: -{}".format(r["crash"], fmt(r["bet"])),
+        with crash_lock:
+            r = crash_rounds.get(uid)
+            if not r or not r["active"]:
+                return
+            r["mult"] = round(r["mult"] * (1.07 + random.random() * 0.07) + 0.01, 2)
+            crashed = r["mult"] >= r["crash"]
+            if crashed:
+                r["active"] = False
+            mult = r["mult"]
+        if crashed:
+            net, lines = settle(uid, r["bet"], 0)
+            safe_edit(r["chat"], r["msg"], compose("Краш на х{}.".format(fmt_mult(r["crash"])), net, lines),
                       reply_markup=again_keyboard("crash", r["bet"]))
             return
         safe_edit(r["chat"], r["msg"],
-                  "Раунд идёт.\nМножитель: х{}".format(r["mult"]),
+                  "Раунд идёт.\nМножитель: х{}\nМожно забрать: {}".format(fmt_mult(mult), fmt(int(r["bet"] * mult))),
                   reply_markup=cashout_kb())
 
 
 def crash_cashout(uid, chat_id):
-    r = crash_rounds.get(uid)
-    if not r or not r["active"]:
-        return
-    r["active"] = False
-    total = int(r["bet"] * r["mult"])
-    add_balance(uid, total)
-    add_stats(uid, True, total - r["bet"])
-    safe_edit(chat_id, r["msg"],
-              "Вы забрали выигрыш на х{}.\nИтог: +{}".format(r["mult"], fmt(total)),
+    with crash_lock:
+        r = crash_rounds.get(uid)
+        if not r or not r["active"]:
+            return
+        r["active"] = False
+        mult = r["mult"]
+    net, lines = settle(uid, r["bet"], int(r["bet"] * mult))
+    safe_edit(chat_id, r["msg"], compose("Вы забрали выигрыш на х{}.".format(fmt_mult(mult)), net, lines),
               reply_markup=again_keyboard("crash", r["bet"]))
 
 
@@ -570,67 +781,100 @@ def cmd_start(message):
     greeting = random.choice(GREETINGS).format(name=name)
     text = (greeting + "\n\n"
             "Добро пожаловать в казино. На вашем счету: {}.\n"
-            "Выберите игру — или напишите её название со ставкой, например: слоты 250".format(fmt(get_user(uid)[2])))
-    bot.send_message(message.chat.id, text,
-                     reply_markup=main_keyboard())
+            "Особое правило: чем реже шанс — тем больше выплата, а невезение копит бонус "
+            "к следующему выигрышу.\n"
+            "Выберите игру или напишите: слоты 250".format(fmt(get_user(uid)[U_BAL])))
+    bot.send_message(message.chat.id, text, reply_markup=main_keyboard())
     bot.send_message(message.chat.id, "Список игр:", reply_markup=games_inline())
 
 
 def cmd_balance(message):
-    uid = message.from_user.id
-    user = get_user(uid)
-    name = user_display(message.from_user)
-    bot.reply_to(message, "{}, ваш баланс: {}.".format(name, fmt(user[2])))
+    user = get_user(message.from_user.id)
+    bot.reply_to(message, "{}, ваш баланс: {}.".format(user_display(message.from_user), fmt(user[U_BAL])))
 
 
 def cmd_games(message):
     lines = ["Доступные игры:", ""]
     for key, (name, desc) in GAMES.items():
         lines.append("{} — {}".format(name, desc))
-    lines.append("")
-    lines.append("Запуск: «<игра> <ставка>», например: рулетка 500")
-    lines.append("Ставки можно сокращать: 5к = 5000.")
+    lines += ["", "Джекпот сейчас: {}".format(fmt(get_jackpot())),
+              "Запуск: «<игра> <ставка>», например: рулетка 500",
+              "Ставки можно сокращать: 5к = 5000."]
     bot.send_message(message.chat.id, "\n".join(lines), reply_markup=games_inline())
 
 
+def cmd_jackpot(message):
+    bot.reply_to(message,
+                 "Джекпот: {}\nОн растёт от каждого проигрыша. Забирает тот, кто выбьет 7-7-7 в слотах.".format(
+                     fmt(get_jackpot())))
+
+
 def cmd_top(message):
-    rows = db_query("SELECT username, balance FROM users ORDER BY balance DESC LIMIT 10", fetch="all")
+    rows = db_query("SELECT username, balance, xp FROM users ORDER BY balance DESC LIMIT 10", fetch="all")
     lines = ["Топ-10 игроков по балансу:", ""]
-    for i, (username, balance) in enumerate(rows, 1):
-        lines.append("{}. {} — {}".format(i, username or "игрок", fmt(balance)))
+    for i, (username, balance, xp) in enumerate(rows, 1):
+        lines.append("{}. {} (ур. {}) — {}".format(i, username or "игрок", level_of(xp), fmt(balance)))
     if not rows:
         lines.append("Пока нет игроков.")
     bot.send_message(message.chat.id, "\n".join(lines))
 
 
 def cmd_profile(message):
-    uid = message.from_user.id
-    user = get_user(uid)
-    wins, losses = user[3], user[4]
+    user = get_user(message.from_user.id)
+    wins, losses = user[U_WINS], user[U_LOSS]
     total = wins + losses
     rate = round(wins / total * 100) if total else 0
+    level = level_of(user[U_XP])
+    luck = int(min(user[U_STREAK] * LUCK_STEP, LUCK_MAX) * 100)
     bot.reply_to(message,
                  "Профиль: {}\n"
+                 "Уровень: {} ({}), опыт {}\n"
                  "Баланс: {}\n"
                  "Побед / поражений: {} / {} ({}% побед)\n"
                  "Сыграно игр: {}\n"
-                 "Чистый выигрыш: {}".format(
-                     user_display(message.from_user), fmt(user[2]), wins, losses, rate,
-                     user[5], fmt(user[6])))
+                 "Чистый выигрыш: {}\n"
+                 "Серия поражений: {} (рекорд {})\n"
+                 "Бонус невезения к следующему выигрышу: +{}%".format(
+                     user_display(message.from_user), level, title_of(level), user[U_XP],
+                     fmt(user[U_BAL]), wins, losses, rate, user[U_GAMES], fmt(user[U_EARN]),
+                     user[U_STREAK], user[U_BEST], luck))
 
 
 def cmd_daily(message):
     uid = message.from_user.id
     user = get_user(uid)
     now = time.time()
-    if now - user[7] < DAILY_INTERVAL:
-        left = int(user[7] + DAILY_INTERVAL - now)
-        hours, minutes = left // 3600, (left % 3600) // 60
-        bot.reply_to(message, "Бонус уже получен. Следующий через {} ч {} мин.".format(hours, minutes))
+    if now - user[U_DAILY] < DAILY_INTERVAL:
+        left = int(user[U_DAILY] + DAILY_INTERVAL - now)
+        bot.reply_to(message, "Бонус уже получен. Следующий через {} ч {} мин.".format(left // 3600, (left % 3600) // 60))
         return
-    add_balance(uid, DAILY_BONUS)
-    db_query("UPDATE users SET last_daily=? WHERE user_id=?", (now, uid))
-    bot.reply_to(message, "Ежедневный бонус {} зачислен. Баланс: {}.".format(fmt(DAILY_BONUS), fmt(get_user(uid)[2])))
+    dstreak = user[U_DSTREAK] + 1 if now - user[U_DAILY] < DAILY_INTERVAL * 2 else 1
+    amount = DAILY_BONUS + min(dstreak, 7) * 100 + user[U_STREAK] * 20  # +20 за каждое поражение подряд
+    lucky = random.random() < 0.05
+    if lucky:
+        amount *= 5
+    add_balance(uid, amount)
+    db_query("UPDATE users SET last_daily=?, daily_streak=? WHERE user_id=?", (now, dstreak, uid))
+    text = "Ежедневный бонус {} зачислен (дней подряд: {}).".format(fmt(amount), dstreak)
+    if lucky:
+        text += "\nРедкая удача: бонус умножен на 5!"
+    bot.reply_to(message, text + "\nБаланс: {}.".format(fmt(get_user(uid)[U_BAL])))
+
+
+def cmd_rescue(message):
+    uid = message.from_user.id
+    user = get_user(uid)
+    now = time.time()
+    if user[U_BAL] >= MIN_BET:
+        bot.reply_to(message, "Подачка только для тех, у кого баланс меньше {}.".format(fmt(MIN_BET)))
+        return
+    if now - user[U_RESCUE] < RESCUE_INTERVAL:
+        left = int(user[U_RESCUE] + RESCUE_INTERVAL - now)
+        bot.reply_to(message, "Рано. Попробуйте через {} мин.".format(left // 60 + 1))
+        return
+    add_balance(uid, RESCUE_AMOUNT)
+    db_query("UPDATE users SET last_rescue=? WHERE user_id=?", (now, uid))
+    bot.reply_to(message, "Казино сжалилось: +{}.".format(fmt(RESCUE_AMOUNT)))
 
 
 def cmd_transfer(message, args):
@@ -646,17 +890,16 @@ def cmd_transfer(message, args):
     if target_name == (message.from_user.username or "").lower():
         bot.reply_to(message, "Нельзя передать средства самому себе.")
         return
-    row = db_query("SELECT user_id, balance FROM users WHERE username=?", (target_name,), "one")
+    row = db_query("SELECT user_id FROM users WHERE username=?", (target_name,), "one")
     if not row:
         bot.reply_to(message, "Игрок с ником @{} не найден.".format(target_name))
         return
-    if get_user(uid)[2] < amount:
+    if not try_charge(uid, amount):
         bot.reply_to(message, "Недостаточно средств.")
         return
-    add_balance(uid, -amount)
     add_balance(row[0], amount)
     bot.reply_to(message, "Передано {} игроку @{}. Ваш баланс: {}.".format(
-        fmt(amount), target_name, fmt(get_user(uid)[2])))
+        fmt(amount), target_name, fmt(get_user(uid)[U_BAL])))
 
 
 def cmd_give(message, args):
@@ -667,28 +910,34 @@ def cmd_give(message, args):
         bot.reply_to(message, "Формат: give <сумма> <@ник>")
         return
     amount = parse_amount(args[0])
-    target_name = args[1].lstrip("@").lower()
-    row = db_query("SELECT user_id FROM users WHERE username=?", (target_name,), "one")
+    row = db_query("SELECT user_id FROM users WHERE username=?", (args[1].lstrip("@").lower(),), "one")
     if amount is None or not row:
         bot.reply_to(message, "Некорректные параметры.")
         return
     add_balance(row[0], amount)
-    bot.reply_to(message, "Зачислено {} игроку @{}.".format(fmt(amount), target_name))
+    bot.reply_to(message, "Зачислено {} игроку {}.".format(fmt(amount), args[1]))
 
 
 HELP_TEXT = (
-    "Команды (русские слова и сокращения работают без слэша):\n\n"
-    "баланс (б, бал) — ваш баланс\n"
+    "Команды (работают и без слэша):\n\n"
+    "баланс (б) — ваш баланс\n"
     "игры (иг) — список игр\n"
-    "топ (лидеры) — рейтинг игроков\n"
-    "бонус (ежа) — ежедневный бонус\n"
-    "профиль (проф, стата) — статистика\n"
-    "передать <сумма> <@ник> — перевод средств\n\n"
-    "Запуск игры: «<игра> <ставка>», например:\n"
-    "слоты 250, рулетка 1к, кости 100, монетка 500, 21 200, краш 300, угадай 50\n\n"
-    "Ставки: свои, любые от {} до {}. Сокращение: к = тысяча (5к = 5000).\n"
-    "Сума указывается числом или через кнопки под игрой."
-).format(fmt(MIN_BET), fmt(MAX_BET))
+    "топ — рейтинг игроков\n"
+    "бонус — ежедневный бонус (растёт с серией дней)\n"
+    "профиль (проф) — статистика и уровень\n"
+    "джекпот — размер джекпота\n"
+    "подачка — помощь, если баланс меньше {min}\n"
+    "передать <сумма> <@ник> — перевод\n\n"
+    "Запуск игры: «<игра> <ставка>»:\n"
+    "слоты 250, колесо 500, риск 1к, рулетка 1к, кости 100,\n"
+    "монетка 500, 21 200, краш 300, угадай 50\n\n"
+    "ПРАВИЛА УДАЧИ\n"
+    "- Чем меньше шанс, тем больше множитель (в Риске вы выбираете шанс сами).\n"
+    "- Каждое поражение подряд даёт +5% к прибыли следующего выигрыша (до +100%).\n"
+    "- Каждое 5-е поражение подряд возвращает 25% ставки.\n"
+    "- Каждый проигрыш пополняет джекпот; его забирает 7-7-7 в слотах.\n\n"
+    "Ставки: от {min} до {max}. Сокращение: к = тысяча (5к = 5000)."
+).format(min=fmt(MIN_BET), max=fmt(MAX_BET))
 
 
 def cmd_help(message):
@@ -703,11 +952,15 @@ ALIASES = {
     "games": "games", "игры": "games", "иг": "games", "играть": "games",
     "top": "top", "топ": "top", "лидеры": "top",
     "help": "help", "помощь": "help", "хелп": "help", "п": "help", "команды": "help",
-    "daily": "daily", "бонус": "daily", "ежа": "daily",
+    "daily": "daily", "bonus": "daily", "бонус": "daily", "ежа": "daily",
     "profile": "profile", "профиль": "profile", "проф": "profile", "стата": "profile",
+    "jackpot": "jackpot", "джекпот": "jackpot", "джек": "jackpot",
+    "rescue": "rescue", "подачка": "rescue",
     "transfer": "transfer", "передать": "transfer", "дать": "transfer", "перевод": "transfer",
     "give": "give",
     "slots": "slots", "слоты": "slots", "слот": "slots",
+    "wheel": "wheel", "колесо": "wheel", "фортуна": "wheel",
+    "risk": "risk", "риск": "risk",
     "coin": "coin", "монетка": "coin", "монета": "coin", "орел": "coin", "орёл": "coin",
     "dice": "dice", "кости": "dice", "кубик": "dice",
     "roulette": "roulette", "рулетка": "roulette",
@@ -716,34 +969,25 @@ ALIASES = {
     "guess": "guess", "угадай": "guess", "число": "guess",
 }
 
+CANCEL_WORDS = ("отмена", "отменить", "cancel", "стоп")
 
-def handle_awaiting(message, word):
-    """Обработка ввода, когда бот ждёт данные от пользователя."""
+
+def handle_awaiting(message, word, state):
     uid = message.from_user.id
-    state = pending.get(uid)
-    if not state:
-        return False
-    if word in ("отмена", "отменить", "cancel", "стоп"):
-        pending.pop(uid, None)
-        bot.reply_to(message, "Действие отменено.")
-        return True
-    if state.get("await") == "num":  # число для рулетки
+    if state.get("await") == "num":
         number = parse_amount(word)
         if number is None or not (0 <= number <= 36):
             bot.reply_to(message, "Введите число от 0 до 36 (или «отмена»).")
-            return True
+            return
         pending.pop(uid, None)
         spin_roulette(uid, message.chat.id, state["bet"], "num:{}".format(number))
-        return True
-    # своя ставка
-    amount = parse_amount(word)
+        return
+    amount = parse_amount(word)  # своя ставка
     if amount is None:
-        bot.reply_to(message, "Введите сумму числом, например: 500 или 2к.")
-        return True
-    game = state["game"]
+        bot.reply_to(message, "Введите сумму числом, например: 500 или 2к (или «отмена»).")
+        return
     pending.pop(uid, None)
-    begin_game(uid, message.chat.id, game, amount)
-    return True
+    begin_game(uid, message.chat.id, state["game"], amount)
 
 
 @bot.message_handler(content_types=["text"])
@@ -753,22 +997,32 @@ def on_text(message):
     uid = message.from_user.id
     touch_username(uid, message.from_user.username)
 
-    text = message.text.strip()
-    parts = text.split()
+    parts = message.text.strip().split()
     if not parts:
         return
     word = parts[0].lower().lstrip("/").rstrip(",.!?")
     if "@" in word:
-        word = word.split("@", 1)[0]  # /start@Frogluda_bot -> start
+        word = word.split("@", 1)[0]
     args = parts[1:]
 
-    if uid in pending:
-        handle_awaiting(message, word)
-        return
+    expire_pending(uid)
+    state = pending.get(uid)
+    if state:
+        if word in CANCEL_WORDS:
+            pending.pop(uid, None)
+            if state.get("paid"):
+                add_balance(uid, state["bet"])
+                bot.reply_to(message, "Действие отменено, ставка возвращена.")
+            else:
+                bot.reply_to(message, "Действие отменено.")
+            return
+        if state.get("await") in ("bet", "num"):
+            handle_awaiting(message, word, state)
+            return
 
     cmd = ALIASES.get(word)
     if cmd is None:
-        return  # неизвестные сообщения игнорируем молча, без ответа и без записи в спам-лог
+        return
 
     warning = is_spam(uid)
     if warning:
@@ -789,6 +1043,10 @@ def on_text(message):
         cmd_daily(message)
     elif cmd == "profile":
         cmd_profile(message)
+    elif cmd == "jackpot":
+        cmd_jackpot(message)
+    elif cmd == "rescue":
+        cmd_rescue(message)
     elif cmd == "transfer":
         cmd_transfer(message, args)
     elif cmd == "give":
@@ -803,10 +1061,15 @@ def on_text(message):
 def on_callback(call):
     uid = call.from_user.id
     chat_id = call.message.chat.id
-    bot.answer_callback_query(call.id)
+    try:
+        bot.answer_callback_query(call.id)
+    except Exception:
+        pass
 
     if _blocked.get(uid, 0) > time.time():
         return
+    get_user(uid)
+    expire_pending(uid)
 
     parts = call.data.split("|")
     tag = parts[0]
@@ -820,7 +1083,10 @@ def on_callback(call):
     elif tag == "bet":
         game, amount = parts[1], parts[2]
         if amount == "custom":
-            pending[uid] = {"game": game}
+            if is_busy(uid) and pending.get(uid, {}).get("await") != "bet":
+                bot.send_message(chat_id, "Сначала завершите текущую игру.")
+                return
+            pending[uid] = {"game": game, "await": "bet"}
             bot.send_message(chat_id, "Введите вашу ставку (или «отмена»):")
         else:
             begin_game(uid, chat_id, game, int(amount))
@@ -829,16 +1095,17 @@ def on_callback(call):
         begin_game(uid, chat_id, parts[1], int(parts[2]))
 
     elif tag == "side":
-        settle_coin(uid, chat_id, parts[1])
+        if pending.get(uid, {}).get("game") == "coin":
+            settle_coin(uid, chat_id, parts[1])
 
     elif tag == "dice":
-        state = pending.pop(uid, None)
-        if state:
+        if pending.get(uid, {}).get("game") == "dice":
+            state = pending.pop(uid)
             settle_dice(uid, chat_id, state["bet"], parts[1])
 
     elif tag == "roul":
         state = pending.get(uid)
-        if not state:
+        if not state or state.get("game") != "roulette":
             return
         if parts[1] == "num":
             state["await"] = "num"
@@ -848,11 +1115,20 @@ def on_callback(call):
             spin_roulette(uid, chat_id, state["bet"], parts[1])
 
     elif tag == "gnum":
-        settle_guess(uid, chat_id, 0, int(parts[1]))  # ставка возьмётся из pending
+        if pending.get(uid, {}).get("game") == "guess":
+            settle_guess(uid, chat_id, int(parts[1]))
+
+    elif tag == "risk":
+        state = pending.get(uid)
+        if state and state.get("game") == "risk":
+            pending.pop(uid, None)
+            play_risk(uid, chat_id, state["bet"], int(parts[1]))
 
     elif tag == "bj":
         if parts[1] == "hit":
             bj_hit(uid)
+        elif parts[1] == "dbl":
+            bj_double(uid, chat_id)
         else:
             bj_stand(uid)
 
@@ -863,14 +1139,15 @@ def on_callback(call):
 # ============================ ЗАПУСК ============================
 
 def setup_menu():
-    """Меню команд сбоку (кнопка Menu рядом с полем ввода)."""
     commands = [
         types.BotCommand("start", "начать"),
         types.BotCommand("balance", "баланс (б)"),
         types.BotCommand("games", "список игр (иг)"),
         types.BotCommand("top", "топ игроков"),
-        types.BotCommand("bonus", "ежедневный бонус (бонус)"),
-        types.BotCommand("profile", "профиль (проф)"),
+        types.BotCommand("bonus", "ежедневный бонус"),
+        types.BotCommand("jackpot", "размер джекпота"),
+        types.BotCommand("profile", "профиль и уровень"),
+        types.BotCommand("rescue", "помощь при банкротстве"),
         types.BotCommand("help", "помощь (п)"),
     ]
     try:
@@ -880,6 +1157,8 @@ def setup_menu():
 
 
 if __name__ == "__main__":
+    if TOKEN.startswith("ВСТАВЬТЕ"):
+        raise SystemExit("Задайте токен: export BOT_TOKEN=... (или впишите в TOKEN)")
     init_db()
     setup_menu()
     print("Бот запущен.")

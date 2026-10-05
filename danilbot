@@ -5,7 +5,7 @@ Telegram-казино на pyTelegramBotAPI (telebot).
 
 Установка:  pip install pyTelegramBotAPI
 Запуск:
-    export BOT_TOKEN= "8342187777:AAEU6H1x5Irr-xRENqZ05S_t8XoqdzgFlIA"     (Windows: set BOT_TOKEN=...)
+    export BOT_TOKEN=""     (Windows: set BOT_TOKEN=...)
     python casino_bot.py
 
 Главные принципы v2:
@@ -29,7 +29,7 @@ from telebot import types
 
 # ============================ КОНФИГУРАЦИЯ ============================
 
-TOKEN = os.getenv("BOT_TOKEN", "ВСТАВЬТЕ_ТОКЕН_СЮДА")
+TOKEN = os.getenv("BOT_TOKEN", "8342187777:AAEU6H1x5Irr-xRENqZ05S_t8XoqdzgFlIA")
 ADMIN_ID = 0  # ваш Telegram ID (узнать: @userinfobot)
 
 START_BALANCE = 1000

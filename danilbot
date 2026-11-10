@@ -707,11 +707,20 @@ $('capsMode').addEventListener('change',toggleCaps);
 refresh();setInterval(()=>{if(peer!==null)loadMessages();refreshQueue()},5000);
 </script></body></html>"""
 
-if __name__ == "__main__":
+ if __name__ == "__main__":
     import uvicorn
-    print("\n" + "=" * 48)
+
+    host = "0.0.0.0"
+    port = int(os.environ.get("PORT", 8000))
+
+    print("=" * 48)
     print(" Telegram Desk запущен!")
-    print(" Откройте на телефоне: http://127.0.0.1:8000")
-    print(" Остановка: Ctrl+C")
-    print("=" * 48 + "\n")
-    uvicorn.run(app, host="127.0.0.1", port=8000, log_level="warning")
+    print(f" Порт: {port}")
+    print("=" * 48)
+
+    uvicorn.run(
+        app,
+        host=host,
+        port=port,
+        log_level="info"
+    )

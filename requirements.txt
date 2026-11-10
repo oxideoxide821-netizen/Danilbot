@@ -8,3 +8,5 @@ groq
 python-telegram-bot
 telethon
 qrcode
+requests
+fastapi

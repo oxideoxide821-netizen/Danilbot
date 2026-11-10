@@ -1,1165 +1,717 @@
-# -*- coding: utf-8 -*-
-"""
-CASINO BOT v2
-Telegram-казино на pyTelegramBotAPI (telebot).
+import json
+from pathlib import Path
+from typing import Optional
+import asyncio, random, time
+from fastapi import UploadFile, File
+from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
+from pydantic import BaseModel
+from telethon import TelegramClient
+from telethon.errors import SessionPasswordNeededError
 
-Установка:  pip install pyTelegramBotAPI
-Запуск:
-    export BOT_TOKEN=""     (Windows: set BOT_TOKEN=...)
-    python casino_bot.py
+ROOT = Path(__file__).resolve().parent
+CONFIG_FILE = ROOT / "tg_config.json"
+SESSION_DIR = ROOT / "sessions"
+SESSION_DIR.mkdir(exist_ok=True)
+app = FastAPI(title="Telegram Desk")
+accounts = {}
+pending = {}
+api_id = None
+api_hash = None
+queue_state = {"task": None, "paused": False, "stop": False, "remaining": 0, "pending": 0,
+               "sent": 0, "total": 0, "account": None, "peer": None,
+               "chat_name": "", "last_error": "", "caps": False, "randomized": True}
+DOWNLOAD_DIR = ROOT / "downloads"
+DOWNLOAD_DIR.mkdir(exist_ok=True)
 
-Главные принципы v2:
-  1. ЧЕМ МЕНЬШЕ ШАНС — ТЕМ БОЛЬШЕ ДЕНЕГ. Все множители считаются из вероятности
-     по формуле  множитель = RTP / шанс  (слоты, колесо, риск, рулетка, краш).
-  2. НЕВЕЗЕНИЕ ПРИНОСИТ УДАЧУ. Каждое поражение подряд копит «серию»:
-     - к следующему выигрышу добавляется бонус (+5% к прибыли за каждое поражение, до +100%);
-     - каждое 5-е поражение подряд возвращает часть ставки (кэшбэк);
-     - каждое поражение пополняет общий ДЖЕКПОТ, который забирает тройка 777 в слотах.
-"""
+class QueueRequest(BaseModel):
+    text: str
+    words_per_message: int = 1
+    delay: float = 0.3
+    random_max: int = 5
+    reply_to: Optional[int] = None
 
-import math
-import os
-import random
-import sqlite3
-import threading
-import time
-
-import telebot
-from telebot import types
-
-# ============================ КОНФИГУРАЦИЯ ============================
-
-TOKEN = os.getenv("BOT_TOKEN", "8342187777:AAEU6H1x5Irr-xRENqZ05S_t8XoqdzgFlIA")
-ADMIN_ID = 0  # ваш Telegram ID (узнать: @userinfobot)
-
-START_BALANCE = 1000
-DAILY_BONUS = 500
-MIN_BET = 10
-MAX_BET = 100_000
-
-RESCUE_AMOUNT = 200           # «подачка» для тех, у кого кончились деньги
-RESCUE_INTERVAL = 3 * 3600
-
-RTP = 0.96                    # возврат игроку в играх с одним шансом (96%)
-
-# --- Механика невезения ---
-LUCK_STEP = 0.05              # +5% к прибыли за каждое поражение подряд
-LUCK_MAX = 1.0                # потолок бонуса: +100%
-CASHBACK_EVERY = 5            # каждое N-е поражение подряд -> кэшбэк
-CASHBACK_PCT = 0.25           # 25% от ставки
-JACKPOT_CUT = 0.03            # 3% от каждого проигрыша уходит в джекпот
-JACKPOT_START = 5000
-
-CMD_COOLDOWN = 1.5
-FLOOD_LIMIT = 5
-FLOOD_WINDOW = 10
-FLOOD_BLOCK = 60
-PENDING_TTL = 120             # сек. на выбор после принятия ставки, потом возврат
-
-DAILY_INTERVAL = 24 * 3600
-DB_PATH = "casino.db"
-
-# ---------- Слоты: множители считаются из вероятности символа ----------
-REEL = ["7", "$", "%", "&", "*", "X"]
-REEL_WEIGHTS = [1, 2, 3, 4, 5, 6]
-SLOT_TRIPLE_SHARE = 0.70      # доля RTP, приходящаяся на тройки
-SLOT_PAIR_MULT = 0.5          # любая пара возвращает половину ставки
-SLOT_MAX_MULT = 500
-
-_W = sum(REEL_WEIGHTS)
-SLOT_PAYTABLE = {}
-for _s, _w in zip(REEL, REEL_WEIGHTS):
-    _p = (_w / _W) ** 3
-    SLOT_PAYTABLE[_s] = max(2, min(SLOT_MAX_MULT, round(SLOT_TRIPLE_SHARE / len(REEL) / _p)))
-
-# ---------- Колесо удачи: чем больше множитель, тем реже сектор ----------
-WHEEL_MULTS = [0.5, 1.5, 3, 6, 15, 50, 200]
-WHEEL_SECTORS = []            # (множитель, вероятность)
-_share = 0.95 / len(WHEEL_MULTS)
-for _m in WHEEL_MULTS:
-    WHEEL_SECTORS.append((_m, _share / _m))
-WHEEL_SECTORS.insert(0, (0, 1 - sum(p for _, p in WHEEL_SECTORS)))
-
-# ---------- Риск: игрок сам выбирает шанс ----------
-RISK_CHANCES = [5, 10, 25, 50, 75, 90]
-
-
-def risk_mult(chance):
-    return round(RTP * 100 / chance, 2)
-
-
-ROULETTE_REDS = {1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36}
-
-GAMES = {
-    "slots":    ("Слоты",          "Три барабана. Тройка — по таблице (777 — х{} + ДЖЕКПОТ), пара — х0.5.".format(SLOT_PAYTABLE["7"])),
-    "wheel":    ("Колесо удачи",   "Чем реже сектор, тем выше множитель: от х0.5 до х200."),
-    "risk":     ("Риск",           "Сами выбираете шанс от 5% до 90%. Меньше шанс — больше выигрыш."),
-    "coin":     ("Орёл или решка", "Угадайте сторону монеты. Выплата х1.9."),
-    "dice":     ("Кости",          "Чёт/нечет или мало/много. Выплата х2."),
-    "roulette": ("Рулетка",        "Цвет х2, дюжина х3, зеро и число х36."),
-    "bj":       ("21 очко",        "Обыграйте дилера. Есть удвоение ставки."),
-    "crash":    ("Краш",           "Множитель растёт. Заберите выигрыш до краха."),
-    "guess":    ("Угадай число",   "Число от 1 до 10. Угадали — х9."),
-}
-
-GREETINGS = [
-    "Ну снова привет, {name}.",
-    "С возвращением, {name}.",
-    "О, {name}. Столы уже открыты.",
-    "{name}, решили испытать удачу?",
-    "Рады видеть вас, {name}.",
-    "{name}, ваш баланс вас ждёт.",
-    "Заходите, {name}. Удача любит смелых.",
-    "И снова вы, {name}. Присаживайтесь.",
-]
-
-TITLES = ["Новичок", "Игрок", "Азартный", "Хайроллер", "Шулер", "Легенда", "Магнат"]
-
-# ============================ БАЗА ДАННЫХ ============================
-
-_db_lock = threading.Lock()
-
-U_BAL, U_WINS, U_LOSS, U_GAMES, U_EARN, U_DAILY = 2, 3, 4, 5, 6, 7
-U_STREAK, U_BEST, U_XP, U_DSTREAK, U_RESCUE = 8, 9, 10, 11, 12
-
-
-def db_query(sql, params=(), fetch=None):
-    with _db_lock:
-        con = sqlite3.connect(DB_PATH)
-        cur = con.cursor()
-        cur.execute(sql, params)
-        if fetch == "one":
-            result = cur.fetchone()
-        elif fetch == "all":
-            result = cur.fetchall()
-        elif fetch == "rows":
-            result = cur.rowcount
-        else:
-            result = None
-        con.commit()
-        con.close()
-    return result
-
-
-def init_db():
-    db_query("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id     INTEGER PRIMARY KEY,
-            username    TEXT DEFAULT '',
-            balance     INTEGER DEFAULT 0,
-            wins        INTEGER DEFAULT 0,
-            losses      INTEGER DEFAULT 0,
-            games       INTEGER DEFAULT 0,
-            earned      INTEGER DEFAULT 0,
-            last_daily  REAL DEFAULT 0,
-            loss_streak INTEGER DEFAULT 0,
-            best_streak INTEGER DEFAULT 0,
-            xp          INTEGER DEFAULT 0,
-            daily_streak INTEGER DEFAULT 0,
-            last_rescue REAL DEFAULT 0
-        )
-    """)
-    # миграция для старой базы (порядок важен — колонки добавляются в конец)
-    for col in ("loss_streak INTEGER DEFAULT 0", "best_streak INTEGER DEFAULT 0",
-                "xp INTEGER DEFAULT 0", "daily_streak INTEGER DEFAULT 0",
-                "last_rescue REAL DEFAULT 0"):
+def load_config():
+    global api_id, api_hash
+    if CONFIG_FILE.exists():
         try:
-            db_query("ALTER TABLE users ADD COLUMN " + col)
-        except sqlite3.OperationalError:
+            c = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+            api_id, api_hash = int(c["api_id"]), c["api_hash"]
+        except Exception:
             pass
-    db_query("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value INTEGER)")
-    db_query("INSERT OR IGNORE INTO meta (key, value) VALUES ('jackpot', ?)", (JACKPOT_START,))
 
+def save_config(i, h):
+    global api_id, api_hash
+    api_id, api_hash = int(i), h.strip()
+    CONFIG_FILE.write_text(json.dumps({"api_id": api_id, "api_hash": api_hash}), encoding="utf-8")
 
-def get_user(uid):
-    row = db_query("SELECT * FROM users WHERE user_id=?", (uid,), "one")
-    if row is None:
-        db_query("INSERT INTO users (user_id, balance) VALUES (?, ?)", (uid, START_BALANCE))
-        row = db_query("SELECT * FROM users WHERE user_id=?", (uid,), "one")
-    return row
+def require_config():
+    if not api_id or not api_hash:
+        raise HTTPException(400, "Сначала сохраните API ID и API Hash в настройках.")
 
+def acc_or_404(i):
+    if i not in accounts:
+        raise HTTPException(404, "Аккаунт не найден.")
+    return accounts[i]
 
-def touch_username(uid, username):
-    if username:
-        db_query("UPDATE users SET username=? WHERE user_id=?", (username.lower(), uid))
+def name_of(me):
+    return (f"@{me.username}" if me.username else " ".join(x for x in [me.first_name, me.last_name] if x)) or "Telegram"
 
+class Config(BaseModel):
+    api_id: int
+    api_hash: str
+class Phone(BaseModel):
+    phone: str
+class Code(BaseModel):
+    phone: str
+    code: str
+class Password(BaseModel):
+    password: str
+class Message(BaseModel):
+    text: str
+    reply_to: Optional[int] = None
 
-def add_balance(uid, delta):
-    db_query("UPDATE users SET balance = balance + ? WHERE user_id=?", (delta, uid))
+@app.on_event("startup")
+async def startup():
+    load_config()
+    if not api_id or not api_hash:
+        return
+    import shutil
+    for i in range(15):
+        old = ROOT / f"console_acc_{i}.session"
+        session = SESSION_DIR / f"acc_{i}.session"
+        if old.exists() and not session.exists():
+            shutil.copy2(old, session)
+        if session.exists():
+            try:
+                client = TelegramClient(str(SESSION_DIR / f"acc_{i}"), api_id, api_hash)
+                await client.connect()
+                if await client.is_user_authorized():
+                    me = await client.get_me()
+                    accounts[i] = {"client": client, "name": name_of(me)}
+                else:
+                    await client.disconnect()
+            except Exception as e:
+                print(f"Не удалось загрузить аккаунт {i}: {e}")
 
+@app.get("/", response_class=HTMLResponse)
+async def home():
+    return HTML
 
-def try_charge(uid, amount):
-    """Атомарно списывает ставку. True, если средств хватило."""
-    return db_query("UPDATE users SET balance = balance - ? WHERE user_id=? AND balance >= ?",
-                    (amount, uid, amount), "rows") == 1
-
-
-def get_jackpot():
-    row = db_query("SELECT value FROM meta WHERE key='jackpot'", fetch="one")
-    return row[0] if row else JACKPOT_START
-
-
-def add_jackpot(n):
-    db_query("UPDATE meta SET value = value + ? WHERE key='jackpot'", (n,))
-
-
-def take_jackpot():
-    amount = get_jackpot()
-    db_query("UPDATE meta SET value=? WHERE key='jackpot'", (JACKPOT_START,))
-    return amount
-
-
-def level_of(xp):
-    return int(math.sqrt(xp / 40)) + 1
-
-
-def title_of(level):
-    return TITLES[min((level - 1) // 2, len(TITLES) - 1)]
-
-
-# ============================ ЯДРО: РАСЧЁТ РЕЗУЛЬТАТА ============================
-
-def settle(uid, bet, gross):
-    """
-    Единая точка расчёта. gross — сколько игроку возвращается ДО бонусов
-    (0 — проигрыш, bet — ничья, больше bet — выигрыш).
-    Применяет механику невезения. Возвращает (чистый_итог, [доп. строки]).
-    """
-    user = get_user(uid)
-    streak = user[U_STREAK]
-    lines = []
-
-    if gross > bet:  # ---- победа
-        profit = gross - bet
-        pct = min(streak * LUCK_STEP, LUCK_MAX)
-        bonus = int(profit * pct)
-        final = gross + bonus
-        add_balance(uid, final)
-        db_query("UPDATE users SET wins=wins+1, games=games+1, earned=earned+?, loss_streak=0 "
-                 "WHERE user_id=?", (final - bet, uid))
-        if bonus:
-            lines.append("Бонус невезения: +{} (+{}% за {} поражений подряд)".format(
-                fmt(bonus), int(pct * 100), streak))
-        net = final - bet
-
-    elif gross == bet:  # ---- ничья
-        add_balance(uid, bet)
-        db_query("UPDATE users SET games=games+1 WHERE user_id=?", (uid,))
-        net = 0
-
-    else:  # ---- поражение (возможно, частичное)
-        if gross > 0:
-            add_balance(uid, gross)
-        new_streak = streak + 1
-        db_query("UPDATE users SET losses=losses+1, games=games+1, loss_streak=?, "
-                 "best_streak=MAX(best_streak, ?) WHERE user_id=?", (new_streak, new_streak, uid))
-        add_jackpot(max(1, int((bet - gross) * JACKPOT_CUT)))
-        net = gross - bet
-        if new_streak % CASHBACK_EVERY == 0:
-            cashback = max(1, int(bet * CASHBACK_PCT))
-            add_balance(uid, cashback)
-            net += cashback
-            lines.append("Утешение за {} поражений подряд: кэшбэк +{}".format(new_streak, fmt(cashback)))
-        next_pct = min(new_streak * LUCK_STEP, LUCK_MAX)
-        lines.append("Серия поражений: {}. Бонус к следующему выигрышу: +{}%".format(
-            new_streak, int(next_pct * 100)))
-
-    # ---- опыт и уровни
-    xp_gain = max(1, bet // 20)
-    old_level = level_of(user[U_XP])
-    db_query("UPDATE users SET xp=xp+? WHERE user_id=?", (xp_gain, uid))
-    new_level = level_of(user[U_XP] + xp_gain)
-    if new_level > old_level:
-        reward = new_level * 200
-        add_balance(uid, reward)
-        lines.append("Новый уровень {} ({})! Награда: +{}".format(new_level, title_of(new_level), fmt(reward)))
-    return net, lines
-
-
-def compose(head, net, lines):
-    if net > 0:
-        res = "Итог: +{}".format(fmt(net))
-    elif net < 0:
-        res = "Итог: -{}".format(fmt(-net))
-    else:
-        res = "Итог: ставка возвращена"
-    return "\n".join([head, res] + lines)
-
-
-# ============================ ЗАЩИТА ОТ СПАМА ============================
-
-_last_cmd = {}
-_flood_log = {}
-_blocked = {}
-
-
-def is_spam(uid):
-    now = time.time()
-    if _blocked.get(uid, 0) > now:
-        return "Слишком много запросов. Повторите через {} с.".format(int(_blocked[uid] - now) + 1)
-    log = _flood_log.setdefault(uid, [])
-    log.append(now)
-    log[:] = [t for t in log if now - t < FLOOD_WINDOW]
-    if len(log) > FLOOD_LIMIT:
-        _blocked[uid] = now + FLOOD_BLOCK
-        _flood_log.pop(uid, None)
-        return "Обнаружен флуд. Команды заблокированы на {} с.".format(FLOOD_BLOCK)
-    if now - _last_cmd.get(uid, 0) < CMD_COOLDOWN:
-        return "Не так быстро. Подождите немного."
-    _last_cmd[uid] = now
-    return None
-
-
-# ============================ ВСПОМОГАТЕЛЬНОЕ ============================
-
-bot = telebot.TeleBot(TOKEN, threaded=True)
-
-pending = {}       # uid -> {"game","bet","paid","t","await"}
-bj_games = {}
-crash_rounds = {}
-rolling = set()    # игроки, у которых идёт анимация кубика
-crash_lock = threading.Lock()
-
-
-def fmt(n):
-    return "{:,}".format(int(n)).replace(",", " ")
-
-
-def fmt_mult(m):
-    return ("{:.2f}".format(m)).rstrip("0").rstrip(".")
-
-
-def parse_amount(text):
-    if not text:
-        return None
-    text = text.lower().replace(" ", "")
-    mult = 1
-    if text.endswith("к") or text.endswith("k"):
-        mult = 1000
-        text = text[:-1]
+@app.post("/api/accounts/import-session")
+async def import_session(file: UploadFile = File(...)):
+    require_config()
+    if not (file.filename or "").lower().endswith(".session"):
+        raise HTTPException(400, "Выберите файл Telegram .session")
+    idx = next((i for i in range(15) if i not in accounts and not (SESSION_DIR / f"acc_{i}.session").exists()), None)
+    if idx is None:
+        raise HTTPException(409, "Нет свободного слота аккаунта (максимум 15).")
+    session_path = SESSION_DIR / f"acc_{idx}.session"
     try:
-        return int(float(text) * mult)
-    except ValueError:
-        return None
-
-
-def user_display(user):
-    return user.username or "игрок"
-
-
-def safe_edit(chat_id, msg_id, text, reply_markup=None):
-    try:
-        bot.edit_message_text(text, chat_id, msg_id, reply_markup=reply_markup)
-    except Exception:
-        pass
-
-
-def again_keyboard(game, bet):
-    kb = types.InlineKeyboardMarkup(row_width=2)
-    kb.add(types.InlineKeyboardButton("Ещё раз: {}".format(fmt(bet)),
-                                      callback_data="again|{}|{}".format(game, bet)),
-           types.InlineKeyboardButton("Все игры", callback_data="menu|games"))
-    return kb
-
-
-def send_result(chat_id, text, game=None, bet=None):
-    bot.send_message(chat_id, text, reply_markup=again_keyboard(game, bet) if game else None)
-
-
-def finish(chat_id, uid, bet, gross, head, game):
-    net, lines = settle(uid, bet, gross)
-    send_result(chat_id, compose(head, net, lines), game, bet)
-
-
-# ============================ КЛАВИАТУРЫ ============================
-
-def main_keyboard():
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=3)
-    kb.add("Игры", "Баланс", "Топ", "Профиль", "Бонус", "Джекпот", "Помощь")
-    return kb
-
-
-def games_inline():
-    kb = types.InlineKeyboardMarkup(row_width=2)
-    kb.add(*[types.InlineKeyboardButton(name, callback_data="game|{}".format(key))
-             for key, (name, _) in GAMES.items()])
-    return kb
-
-
-def bet_keyboard(game):
-    kb = types.InlineKeyboardMarkup(row_width=3)
-    kb.add(*[types.InlineKeyboardButton(str(a), callback_data="bet|{}|{}".format(game, a)) for a in (50, 100, 250)])
-    kb.add(*[types.InlineKeyboardButton(str(a), callback_data="bet|{}|{}".format(game, a)) for a in (500, 1000, 5000)])
-    kb.add(types.InlineKeyboardButton("Своя ставка", callback_data="bet|{}|custom".format(game)))
-    return kb
-
-
-def coin_kb():
-    kb = types.InlineKeyboardMarkup(row_width=2)
-    kb.add(types.InlineKeyboardButton("Орёл", callback_data="side|орел"),
-           types.InlineKeyboardButton("Решка", callback_data="side|решка"))
-    return kb
-
-
-def dice_kb():
-    kb = types.InlineKeyboardMarkup(row_width=2)
-    kb.add(types.InlineKeyboardButton("Чёт", callback_data="dice|чет"),
-           types.InlineKeyboardButton("Нечет", callback_data="dice|нечет"),
-           types.InlineKeyboardButton("Мало (1-3)", callback_data="dice|мало"),
-           types.InlineKeyboardButton("Много (4-6)", callback_data="dice|много"))
-    return kb
-
-
-def roulette_kb():
-    kb = types.InlineKeyboardMarkup(row_width=2)
-    kb.add(types.InlineKeyboardButton("Красное (х2)", callback_data="roul|red"),
-           types.InlineKeyboardButton("Чёрное (х2)", callback_data="roul|black"))
-    kb.add(types.InlineKeyboardButton("1-12 (х3)", callback_data="roul|d1"),
-           types.InlineKeyboardButton("13-24 (х3)", callback_data="roul|d2"),
-           types.InlineKeyboardButton("25-36 (х3)", callback_data="roul|d3"))
-    kb.add(types.InlineKeyboardButton("Зеро (х36)", callback_data="roul|green"),
-           types.InlineKeyboardButton("Число 0-36 (х36)", callback_data="roul|num"))
-    return kb
-
-
-def guess_kb():
-    kb = types.InlineKeyboardMarkup(row_width=5)
-    kb.add(*[types.InlineKeyboardButton(str(i), callback_data="gnum|{}".format(i)) for i in range(1, 11)])
-    return kb
-
-
-def risk_kb():
-    kb = types.InlineKeyboardMarkup(row_width=2)
-    kb.add(*[types.InlineKeyboardButton("Шанс {}% — х{}".format(c, fmt_mult(risk_mult(c))),
-                                        callback_data="risk|{}".format(c)) for c in RISK_CHANCES])
-    return kb
-
-
-def bj_kb(can_double=False):
-    kb = types.InlineKeyboardMarkup(row_width=2)
-    kb.add(types.InlineKeyboardButton("Взять карту", callback_data="bj|hit"),
-           types.InlineKeyboardButton("Остановиться", callback_data="bj|stand"))
-    if can_double:
-        kb.add(types.InlineKeyboardButton("Удвоить ставку", callback_data="bj|dbl"))
-    return kb
-
-
-def cashout_kb():
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("Забрать выигрыш", callback_data="cashout"))
-    return kb
-
-
-# ============================ ЛОГИКА СТАВОК ============================
-
-def expire_pending(uid):
-    """Если игрок не выбрал вариант за PENDING_TTL — возвращаем ставку."""
-    s = pending.get(uid)
-    if s and s.get("paid") and time.time() - s["t"] > PENDING_TTL:
-        pending.pop(uid, None)
-        add_balance(uid, s["bet"])
-
-
-def is_busy(uid):
-    expire_pending(uid)
-    return (uid in pending or uid in bj_games or uid in rolling or
-            (uid in crash_rounds and crash_rounds[uid]["active"]))
-
-
-def set_pending(uid, game, bet):
-    pending[uid] = {"game": game, "bet": bet, "paid": True, "t": time.time()}
-
-
-def begin_game(uid, chat_id, game, bet):
-    # ожидание ввода своей ставки не должно блокировать выбор другой игры
-    if pending.get(uid, {}).get("await") == "bet":
-        pending.pop(uid, None)
-    if is_busy(uid):
-        bot.send_message(chat_id, "Сначала завершите текущую игру.")
-        return
-    user = get_user(uid)
-    if bet is None:
-        name, desc = GAMES[game]
-        bot.send_message(chat_id, "{}\n{}\n\nВыберите ставку:".format(name, desc),
-                         reply_markup=bet_keyboard(game))
-        return
-    if bet < MIN_BET:
-        bot.send_message(chat_id, "Минимальная ставка — {}.".format(fmt(MIN_BET)))
-        return
-    if bet > MAX_BET:
-        bot.send_message(chat_id, "Максимальная ставка — {}.".format(fmt(MAX_BET)))
-        return
-    if not try_charge(uid, bet):
-        tip = ""
-        if user[U_BAL] < MIN_BET:
-            tip = "\nДеньги кончились? Напишите «подачка» или заберите «бонус»."
-        bot.send_message(chat_id, "Недостаточно средств. Ваш баланс: {}.{}".format(fmt(user[U_BAL]), tip))
-        return
-
-    if game == "slots":
-        play_slots(uid, chat_id, bet)
-    elif game == "wheel":
-        play_wheel(uid, chat_id, bet)
-    elif game == "bj":
-        start_bj(uid, chat_id, bet)
-    elif game == "crash":
-        launch_crash(uid, chat_id, bet)
-    else:
-        prompts = {
-            "coin": ("Ваш выбор:", coin_kb),
-            "dice": ("Ваш прогноз:", dice_kb),
-            "roulette": ("Ваш сектор:", roulette_kb),
-            "guess": ("Угадайте число:", guess_kb),
-            "risk": ("Выберите шанс. Чем он ниже, тем больше множитель:", risk_kb),
-        }
-        text, kb = prompts[game]
-        set_pending(uid, game, bet)
-        bot.send_message(chat_id, "Ставка {} принята. {}".format(fmt(bet), text), reply_markup=kb())
-
-
-# ============================ ИГРЫ ============================
-
-def play_slots(uid, chat_id, bet):
-    reels = random.choices(REEL, weights=REEL_WEIGHTS, k=3)
-    line = " | ".join(reels)
-    head = "Слоты: [ {} ]".format(line)
-    gross = 0
-    if reels[0] == reels[1] == reels[2]:
-        mult = SLOT_PAYTABLE[reels[0]]
-        gross = bet * mult
-        head += "\nТройка! Выплата х{}.".format(mult)
-        if reels[0] == "7":
-            jp = take_jackpot()
-            gross += jp
-            head += "\nДЖЕКПОТ! Дополнительно: +{}".format(fmt(jp))
-    elif len(set(reels)) == 2:
-        gross = int(bet * SLOT_PAIR_MULT)
-        head += "\nПара — возвращается половина ставки."
-    else:
-        head += "\nКомбинации нет."
-    finish(chat_id, uid, bet, gross, head, "slots")
-
-
-def play_wheel(uid, chat_id, bet):
-    r = random.random()
-    acc = 0.0
-    mult = 0
-    for m, p in WHEEL_SECTORS:
-        acc += p
-        if r < acc:
-            mult = m
-            break
-    gross = int(bet * mult)
-    if mult == 0:
-        head = "Колесо остановилось на х0. Мимо."
-    elif mult < 1:
-        head = "Колесо: х{}. Часть ставки вернулась.".format(fmt_mult(mult))
-    else:
-        head = "Колесо: х{}!".format(fmt_mult(mult))
-    finish(chat_id, uid, bet, gross, head, "wheel")
-
-
-def play_risk(uid, chat_id, bet, chance):
-    mult = risk_mult(chance)
-    roll = random.random() * 100
-    if roll < chance:
-        gross = int(bet * mult)
-        head = "Шанс {}%, множитель х{}. Выпало {:.2f} — удача!".format(chance, fmt_mult(mult), roll)
-    else:
-        gross = 0
-        head = "Шанс {}%, множитель х{}. Выпало {:.2f} — мимо.".format(chance, fmt_mult(mult), roll)
-    finish(chat_id, uid, bet, gross, head, "risk")
-
-
-def settle_coin(uid, chat_id, side):
-    state = pending.pop(uid, None)
-    if not state:
-        return
-    bet = state["bet"]
-    result = random.choice(["орел", "решка"])
-    gross = int(bet * 1.9) if result == side else 0
-    finish(chat_id, uid, bet, gross, "Выпала {}.".format(result), "coin")
-
-
-def settle_dice(uid, chat_id, bet, guess):
-    rolling.add(uid)
-    msg = bot.send_dice(chat_id)
-    value = msg.dice.value
-
-    def finish_later():
+        content = await file.read()
+        if not content:
+            raise HTTPException(400, "Файл сессии пустой.")
+        session_path.write_bytes(content)
+        client = TelegramClient(str(SESSION_DIR / f"acc_{idx}"), api_id, api_hash)
+        await client.connect()
+        if not await client.is_user_authorized():
+            await client.disconnect()
+            session_path.unlink(missing_ok=True)
+            raise HTTPException(401, "Сессия не авторизована или несовместима. Проверьте файл и API ID/Hash.")
+        me = await client.get_me()
+        accounts[idx] = {"client": client, "name": name_of(me)}
+        return {"ok": True, "id": idx, "name": accounts[idx]["name"]}
+    except HTTPException:
+        raise
+    except Exception as e:
         try:
-            if guess in ("чет", "нечет"):
-                ok = (value % 2 == 0) == (guess == "чет")
-            else:
-                ok = (value <= 3) == (guess == "мало")
-            finish(chat_id, uid, bet, bet * 2 if ok else 0, "Выпало {}.".format(value), "dice")
-        finally:
-            rolling.discard(uid)
+            if session_path.exists(): session_path.unlink()
+        except Exception: pass
+        raise HTTPException(400, f"Не удалось импортировать сессию: {e}")
+    finally:
+        await file.close()
 
-    threading.Timer(4.0, finish_later).start()
+@app.get("/api/status")
+async def status():
+    return {"configured": bool(api_id and api_hash),
+            "accounts": [{"id": i, "name": a["name"]} for i, a in sorted(accounts.items())]}
+
+@app.post("/api/config")
+async def config(data: Config):
+    if data.api_id <= 0 or len(data.api_hash.strip()) < 20:
+        raise HTTPException(400, "Проверьте API ID и API Hash.")
+    if accounts:
+        raise HTTPException(409, "Сначала отключите подключённые аккаунты.")
+    save_config(data.api_id, data.api_hash)
+    return {"ok": True}
+
+@app.post("/api/accounts/{idx}/request-code")
+async def request_code(idx: int, data: Phone):
+    require_config()
+    if not 0 <= idx < 15:
+        raise HTTPException(400, "Номер аккаунта должен быть от 0 до 14.")
+    if idx in accounts:
+        raise HTTPException(409, "Этот слот уже занят подключённым аккаунтом. Отключите его в разделе «Аккаунты».")
+    # Повторный запрос кода заменяет незавершённую попытку входа в этом слоте.
+    old_pending = pending.pop(idx, None)
+    if old_pending:
+        try:
+            await old_pending["client"].disconnect()
+        except Exception:
+            pass
+    client = TelegramClient(str(SESSION_DIR / f"acc_{idx}"), api_id, api_hash)
+    try:
+        await client.connect()
+        sent = await client.send_code_request(data.phone.strip())
+        pending[idx] = {"client": client, "phone": data.phone.strip(), "hash": sent.phone_code_hash}
+        return {"ok": True}
+    except Exception as e:
+        await client.disconnect()
+        raise HTTPException(400, str(e))
+
+@app.delete("/api/accounts/{idx}/pending")
+async def cancel_pending(idx: int):
+    p = pending.pop(idx, None)
+    if p:
+        await p["client"].disconnect()
+    return {"ok": True}
+
+@app.post("/api/accounts/{idx}/sign-in")
+async def sign_in(idx: int, data: Code):
+    p = pending.get(idx)
+    if not p:
+        raise HTTPException(400, "Сначала запросите код.")
+    if data.phone.strip() != p["phone"]:
+        raise HTTPException(400, "Номер телефона не совпадает.")
+    try:
+        await p["client"].sign_in(phone=p["phone"], code=data.code.strip(), phone_code_hash=p["hash"])
+        me = await p["client"].get_me()
+        accounts[idx] = {"client": p["client"], "name": name_of(me)}
+        pending.pop(idx, None)
+        return {"ok": True, "name": accounts[idx]["name"]}
+    except SessionPasswordNeededError:
+        raise HTTPException(428, "Нужен пароль двухэтапной аутентификации.")
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+@app.post("/api/accounts/{idx}/password")
+async def password(idx: int, data: Password):
+    p = pending.get(idx)
+    if not p:
+        raise HTTPException(400, "Нет ожидающей авторизации.")
+    try:
+        await p["client"].sign_in(password=data.password)
+        me = await p["client"].get_me()
+        accounts[idx] = {"client": p["client"], "name": name_of(me)}
+        pending.pop(idx, None)
+        return {"ok": True, "name": accounts[idx]["name"]}
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+@app.get("/api/accounts/{idx}/dialogs")
+async def get_dialogs(idx: int):
+    a = acc_or_404(idx)
+    try:
+        ds = await a["client"].get_dialogs(limit=200)
+        return [{"id": d.id, "name": d.name or "Без названия",
+                 "unread": d.unread_count or 0,
+                 "preview": ((d.message.message or "Медиа")[:100] if d.message else "")}
+                for d in ds if d.is_user or d.is_group or d.is_channel]
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+@app.get("/api/accounts/{idx}/dialogs/{peer}/messages")
+async def get_messages(idx: int, peer: int):
+    a = acc_or_404(idx)
+    try:
+        entity = await a["client"].get_input_entity(peer)
+        ms = await a["client"].get_messages(entity, limit=60)
+        result = []
+        for m in reversed(ms):
+            mime = getattr(getattr(m, "file", None), "mime_type", None) or ""
+            media_kind = ""
+            if mime.startswith("video/"):
+                media_kind = "video"
+            elif mime.startswith("image/"):
+                media_kind = "image"
+            elif "tgsticker" in mime or "webm" in mime:
+                media_kind = "sticker"
+            elif m.media:
+                media_kind = "file"
+            reply_preview = ""
+            if m.reply_to_msg_id:
+                try:
+                    replied = await m.get_reply_message()
+                    if replied:
+                        reply_preview = (replied.message or "[Медиа]")[:100]
+                except Exception:
+                    pass
+            sender = None
+            try:
+                sender_obj = await m.get_sender()
+                if sender_obj:
+                    sender_name = " ".join(x for x in [getattr(sender_obj, "first_name", ""), getattr(sender_obj, "last_name", "")] if x) or getattr(sender_obj, "title", "") or "Пользователь"
+                    sender = {"id": sender_obj.id, "name": sender_name,
+                              "username": getattr(sender_obj, "username", None),
+                              "is_bot": bool(getattr(sender_obj, "bot", False))}
+            except Exception:
+                pass
+            result.append({
+                "id": m.id,
+                "sender": sender,
+                "text": m.message or ("[Стикер]" if media_kind == "sticker" else "[Медиа]" if m.media else ""),
+                "out": bool(m.out),
+                "date": m.date.isoformat() if m.date else "",
+                "media_kind": media_kind,
+                "media_url": f"/api/accounts/{idx}/dialogs/{peer}/messages/{m.id}/media" if m.media else "",
+                "reply_to": m.reply_to_msg_id,
+                "reply_preview": reply_preview
+            })
+        return result
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+@app.get("/api/accounts/{idx}/profile/{user_id}")
+async def get_peer_profile(idx: int, user_id: int):
+    a = acc_or_404(idx)
+    try:
+        entity = await a["client"].get_entity(user_id)
+        first = getattr(entity, "first_name", "") or ""
+        last = getattr(entity, "last_name", "") or ""
+        title = getattr(entity, "title", "") or ""
+        name = " ".join(x for x in [first, last] if x) or title or "Профиль"
+        return {"id": entity.id, "name": name, "username": getattr(entity, "username", None),
+                "phone": getattr(entity, "phone", None), "bio": getattr(entity, "about", None),
+                "is_bot": bool(getattr(entity, "bot", False)),
+                "avatar_url": f"/api/accounts/{idx}/avatar/{entity.id}"}
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+@app.get("/api/accounts/{idx}/avatar/{user_id}")
+async def get_avatar(idx: int, user_id: int):
+    a = acc_or_404(idx)
+    try:
+        entity = await a["client"].get_entity(user_id)
+        data = await a["client"].download_profile_photo(entity, file=bytes)
+        if not data:
+            raise HTTPException(404, "У пользователя нет фотографии.")
+        from fastapi.responses import Response
+        return Response(content=data, media_type="image/jpeg", headers={"Cache-Control":"public, max-age=3600"})
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(404, "Не удалось загрузить аватар.")
+
+@app.get("/api/accounts/{idx}/dialogs/{peer}/messages/{message_id}/media")
+async def get_message_media(idx: int, peer: int, message_id: int):
+    a = acc_or_404(idx)
+    try:
+        entity = await a["client"].get_input_entity(peer)
+        msg = await a["client"].get_messages(entity, ids=message_id)
+        if not msg or not msg.media:
+            raise HTTPException(404, "Медиа не найдено.")
+        target = DOWNLOAD_DIR / f"acc{idx}_chat{peer}_msg{message_id}"
+        existing = list(DOWNLOAD_DIR.glob(target.name + ".*"))
+        if existing:
+            path = existing[0]
+        else:
+            downloaded = await msg.download_media(file=str(target))
+            if not downloaded:
+                raise HTTPException(404, "Не удалось загрузить медиа.")
+            path = Path(downloaded)
+        return FileResponse(path, filename=path.name)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(400, str(e))
 
 
-def spin_roulette(uid, chat_id, bet, choice):
-    number = random.randint(0, 36)
-    if number == 0:
-        color = "зеро"
-    elif number in ROULETTE_REDS:
-        color = "красное"
+@app.post("/api/accounts/{idx}/dialogs/{peer}/send")
+async def send_message(idx: int, peer: int, data: Message):
+    a = acc_or_404(idx)
+    text = data.text.strip()
+    if not text:
+        raise HTTPException(400, "Пустое сообщение.")
+    if len(text) > 4096:
+        raise HTTPException(400, "Максимум 4096 символов.")
+    try:
+        entity = await a["client"].get_input_entity(peer)
+        sent = await a["client"].send_message(entity, text, reply_to=data.reply_to)
+        return {"ok": True, "id": sent.id}
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+
+def split_words(text: str, count: int):
+    words = text.split()
+    count = max(1, min(int(count), 100))
+    return [" ".join(words[i:i + count]) for i in range(0, len(words), count)]
+
+async def queue_worker(idx: int, peer: int, chunks: list, delay: float, reply_to):
+    global queue_state
+    a = accounts.get(idx)
+    if not a:
+        queue_state["last_error"] = "Аккаунт отключён."
+        queue_state["task"] = None
+        return
+    try:
+        entity = await a["client"].get_input_entity(peer)
+        # Apply the user's delay setting equally in private chats and groups.
+        # Telegram-side FloodWait limits are still handled below.
+        effective_delay = float(delay)
+        for chunk in chunks:
+            while queue_state["paused"] and not queue_state["stop"]:
+                await asyncio.sleep(0.2)
+            if queue_state["stop"]:
+                break
+            if queue_state["caps"]:
+                chunk = chunk.upper()
+            try:
+                # Как в оригинале: запускаем отправку без ожидания ответа Telegram.
+                # Интервал между постановками отправок регулируется delay ниже.
+                async def _send_and_track(client, target, message, reply):
+                    try:
+                        await client.send_message(target, message, reply_to=reply)
+                        queue_state["sent"] += 1
+                    except Exception as send_error:
+                        queue_state["last_error"] = str(send_error)
+                    finally:
+                        queue_state["pending"] = max(0, queue_state.get("pending", 0) - 1)
+                        queue_state["remaining"] = max(0, queue_state["total"] - queue_state["sent"] - queue_state.get("pending", 0))
+                queue_state["pending"] = queue_state.get("pending", 0) + 1
+                queue_state["remaining"] = max(0, queue_state["total"] - queue_state["sent"] - queue_state["pending"])
+                asyncio.create_task(_send_and_track(a["client"], entity, chunk, reply_to))
+            except Exception as e:
+                try:
+                    from telethon.errors import FloodWaitError
+                    if isinstance(e, FloodWaitError):
+                        queue_state["last_error"] = (
+                            f"Telegram ограничил отправку (FloodWait {e.seconds} сек.). "
+                            "Очередь остановлена — дождитесь срока и запустите продолжение."
+                        )
+                    else:
+                        queue_state["last_error"] = str(e)
+                except Exception:
+                    queue_state["last_error"] = str(e)
+                queue_state["paused"] = True
+                break
+            base_delay = max(0.05, min(float(effective_delay), 60.0))
+            # В оригинале rand-режим слегка меняет задержку для каждой части.
+            cur_delay = random.uniform(base_delay * 0.5, base_delay * 1.5) if queue_state.get("randomized") else base_delay
+            await asyncio.sleep(cur_delay)
+        if queue_state["stop"]:
+            queue_state["last_error"] = "Очередь остановлена."
+        elif not queue_state["last_error"]:
+            queue_state["last_error"] = "Очередь завершена."
+    finally:
+        queue_state["task"] = None
+        queue_state["paused"] = False
+        queue_state["stop"] = False
+
+@app.post("/api/accounts/{idx}/dialogs/{peer}/queue")
+async def start_queue(idx: int, peer: int, data: QueueRequest):
+    if idx not in accounts:
+        raise HTTPException(404, "Аккаунт не найден.")
+    if queue_state["task"] is not None:
+        raise HTTPException(409, "Уже есть активная очередь. Дождитесь завершения или остановите её.")
+    text = data.text.strip()
+    if not text:
+        raise HTTPException(400, "Введите текст.")
+    words = text.split()
+    chunks = []
+    if data.random_max > 0:
+        pos = 0
+        while pos < len(words):
+            n = random.randint(1, max(1, min(data.random_max, 20)))
+            chunks.append(" ".join(words[pos:pos+n]))
+            pos += n
     else:
-        color = "чёрное"
+        chunks = split_words(text, data.words_per_message)
+    if any(len(c) > 4096 for c in chunks):
+        raise HTTPException(400, "Одна часть превышает лимит Telegram в 4096 символов.")
+    queue_state.update({"paused": False, "stop": False, "remaining": len(chunks), "pending": 0,
+                        "sent": 0, "total": len(chunks), "account": idx, "peer": peer,
+                        "chat_name": str(peer), "last_error": "", "randomized": data.random_max > 0})
+    queue_state["task"] = asyncio.create_task(queue_worker(idx, peer, chunks, data.delay, data.reply_to))
+    return {"ok": True, "parts": len(chunks)}
 
-    gross = 0
-    if choice == "red" and color == "красное":
-        gross = bet * 2
-    elif choice == "black" and color == "чёрное":
-        gross = bet * 2
-    elif choice == "d1" and 1 <= number <= 12:
-        gross = bet * 3
-    elif choice == "d2" and 13 <= number <= 24:
-        gross = bet * 3
-    elif choice == "d3" and 25 <= number <= 36:
-        gross = bet * 3
-    elif choice == "green" and number == 0:
-        gross = bet * 36
-    elif choice.startswith("num:") and int(choice[4:]) == number:
-        gross = bet * 36
-    finish(chat_id, uid, bet, gross, "Выпало {} ({}).".format(number, color), "roulette")
+@app.get("/api/queue")
+async def get_queue():
+    return {k: v for k, v in queue_state.items() if k != "task"} | {"active": queue_state["task"] is not None}
 
+@app.post("/api/queue/pause")
+async def pause_queue():
+    if queue_state["task"] is None:
+        raise HTTPException(400, "Очередь не запущена.")
+    queue_state["paused"] = True
+    return {"ok": True}
 
-def settle_guess(uid, chat_id, number):
-    state = pending.pop(uid, None)
-    if not state:
-        return
-    bet = state["bet"]
-    secret = random.randint(1, 10)
-    gross = bet * 9 if secret == number else 0
-    finish(chat_id, uid, bet, gross, "Загадано {}, вы указали {}.".format(secret, number), "guess")
+@app.post("/api/queue/resume")
+async def resume_queue():
+    if queue_state["task"] is None:
+        raise HTTPException(400, "Очередь не запущена.")
+    queue_state["last_error"] = ""
+    queue_state["paused"] = False
+    return {"ok": True}
 
+@app.post("/api/queue/stop")
+async def stop_queue():
+    queue_state["stop"] = True
+    queue_state["paused"] = False
+    return {"ok": True}
 
-# ---------- 21 очко ----------
+@app.post("/api/queue/caps")
+async def toggle_caps():
+    queue_state["caps"] = not queue_state["caps"]
+    return {"caps": queue_state["caps"]}
 
-def draw_card():
-    return random.choice([2, 3, 4, 5, 6, 7, 8, 9, 10, 10, 10, 10, 11])
+@app.post("/api/accounts/{idx}/dialogs/{peer}/photo")
+async def download_photo(idx: int, peer: int):
+    a = acc_or_404(idx)
+    try:
+        entity = await a["client"].get_input_entity(peer)
+        msgs = await a["client"].get_messages(entity, limit=50)
+        for msg in msgs:
+            if msg.photo:
+                path = await msg.download_media(file=str(DOWNLOAD_DIR) + os.sep)
+                if path:
+                    return {"ok": True, "filename": Path(path).name, "url": "/downloads/" + Path(path).name}
+        raise HTTPException(404, "Фото в последних 50 сообщениях не найдено.")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(400, str(e))
 
+@app.get("/downloads/{filename}")
+async def download_file(filename: str):
+    path = (DOWNLOAD_DIR / Path(filename).name).resolve()
+    if not path.exists() or DOWNLOAD_DIR.resolve() not in path.parents:
+        raise HTTPException(404, "Файл не найден.")
+    return FileResponse(path, filename=path.name)
 
-def hand_value(cards):
-    total = sum(cards)
-    aces = cards.count(11)
-    while total > 21 and aces:
-        total -= 10
-        aces -= 1
-    return total
+@app.delete("/api/accounts/{idx}")
+async def remove_account(idx: int):
+    a = accounts.pop(idx, None)
+    if a:
+        await a["client"].disconnect()
+    p = pending.pop(idx, None)
+    if p:
+        await p["client"].disconnect()
+    return {"ok": True}
 
+HTML = r"""<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Telegram Desk</title>
+<style>
+:root{--bg:#080f1e;--panel:#111c30;--panel2:#16243b;--line:#253653;--txt:#eef4ff;--muted:#91a4c2;--blue:#72b7ff;--violet:#9b8cff;--good:#61d6ae}
+*{box-sizing:border-box}html,body{height:100%;margin:0}body{background:radial-gradient(ellipse at 10% 0%,#18294a 0%,var(--bg) 52%);color:var(--txt);font:14px system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}button,input,textarea{font:inherit}button{border:1px solid #304566;background:#1b2b46;color:var(--txt);border-radius:13px;padding:10px 14px;cursor:pointer;transition:transform .18s,border-color .18s,background .18s,box-shadow .18s}button:hover{border-color:var(--blue);box-shadow:0 5px 20px #0003}button:active{transform:scale(.96)}button.primary{background:linear-gradient(135deg,#73c4ff,#9385ff);color:#071426;font-weight:800;border:0;box-shadow:0 6px 22px #638dff33}
+input,textarea{width:100%;background:#0b1629;color:var(--txt);border:1px solid #2b3e5e;border-radius:13px;padding:12px;outline:none;transition:border-color .2s,box-shadow .2s}input:focus,textarea:focus{border-color:var(--blue);box-shadow:0 0 0 3px #72b7ff20}
+.layout{height:100dvh;min-height:0;display:grid;grid-template-columns:190px 290px minmax(0,1fr);gap:1px;background:var(--line);overflow:hidden}
+aside,main{min-width:0;min-height:0;background:var(--panel);display:flex;flex-direction:column}.brand{padding:20px 18px;border-bottom:1px solid var(--line);font-size:18px;font-weight:850;letter-spacing:.2px}.logo{display:inline-grid;place-items:center;background:linear-gradient(135deg,#74d2ff,#8875ff);color:#071426;width:36px;height:36px;border-radius:12px;margin-right:9px;box-shadow:0 6px 20px #638dff44}
+.nav{padding:13px 15px;margin:5px 9px;color:#b7c6dd;cursor:pointer;border-radius:12px;transition:background .2s,color .2s,transform .2s}.nav.active,.nav:hover{background:linear-gradient(100deg,#294a70,#302f61);color:white}.nav:active{transform:scale(.98)}.spacer{flex:1}.muted{color:var(--muted)}.head{padding:16px;border-bottom:1px solid var(--line)}.head h3{margin:0 0 12px;font-size:16px}.list{overflow:auto;padding:8px;overscroll-behavior:contain}.item{display:flex;gap:11px;padding:11px 9px;border-radius:13px;cursor:pointer;transition:background .18s,transform .18s}.item:hover,.item.active{background:#203755}.item:active{transform:scale(.985)}.avatar{width:42px;height:42px;border-radius:15px;display:grid;place-items:center;background:linear-gradient(145deg,#345d8d,#514a91);flex-shrink:0;font-weight:800;color:#fff}.itemtext{min-width:0;flex:1}.preview{font-size:12px;color:var(--muted);margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chathead{padding:13px 17px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:11px;background:#121f34}.chathead b{font-size:15px}.chatbody{flex:1;min-height:0;overflow:auto;padding:20px;display:flex;flex-direction:column;gap:10px;background:linear-gradient(180deg,#0b172a,#0b1425);overscroll-behavior:contain}.bubble{max-width:78%;padding:11px 14px;background:#1b304e;border:1px solid #2b4262;border-radius:17px 17px 17px 5px;overflow-wrap:anywhere;white-space:pre-wrap;box-shadow:0 3px 12px #0002;animation:pop .22s ease-out}.bubble.mine{align-self:flex-end;background:linear-gradient(135deg,#245b88,#394a86);border-color:#426b9a;border-radius:17px 17px 5px 17px}.stamp{font-size:10px;color:#b3c5df;text-align:right;margin-top:5px}.composer{padding:12px;border-top:1px solid var(--line);display:flex;gap:9px;background:#121f34}.composer textarea{resize:none;height:48px;max-height:120px;min-width:0;flex:1}.composer button{min-width:49px;font-size:18px}.empty{margin:auto;text-align:center;color:var(--muted);padding:24px;line-height:1.6}
+.modal{position:fixed;inset:0;background:#020817bb;backdrop-filter:blur(7px);display:none;place-items:center;padding:16px;z-index:20}.modal.open{display:grid;animation:fade .18s}.dialog{width:min(440px,100%);max-height:min(85dvh,720px);overflow:auto;background:linear-gradient(145deg,#172741,#101b2e);border:1px solid #344968;border-radius:22px;padding:21px;box-shadow:0 22px 70px #0009;animation:rise .22s ease-out}.dialog h3{margin-top:0;font-size:19px}.field{margin:13px 0}.field label{display:block;color:var(--muted);font-size:12px;margin-bottom:6px}.actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}.toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);padding:12px 17px;background:#24466b;border:1px solid #4776a7;border-radius:14px;display:none;z-index:30;box-shadow:0 8px 30px #0007}.toast.show{display:block;animation:rise .2s}.backbtn{display:none}.mobile-tools{border-top:1px solid var(--line);background:#111f34}
+@keyframes fade{from{opacity:0}to{opacity:1}}@keyframes rise{from{opacity:0;transform:translateY(12px) scale(.98)}to{opacity:1;transform:translateY(0) scale(1)}}@keyframes pop{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}
+@media(max-width:760px){
+ html,body{height:100%;overflow:hidden}.layout{height:100dvh;grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr);gap:0;background:var(--bg)}
+ .layout>aside:first-child{grid-row:1;flex-direction:row;align-items:center;min-height:58px;padding:5px 8px;border-bottom:1px solid var(--line);background:#101b2e;z-index:5}
+ .brand{padding:0 8px;border:0;font-size:0}.logo{width:34px;height:34px;margin:0}.layout>aside:first-child .nav{font-size:12px;padding:9px 11px;margin:0 3px;white-space:nowrap}.layout>aside:first-child .spacer{display:none}.layout>aside:first-child #server{display:none}
+ .layout>aside:nth-child(2){grid-row:2;display:flex;min-height:0;border:0}.layout>main{grid-row:2;display:none;min-height:0;border:0}
+ .layout.chat-open>aside:nth-child(2){display:none}.layout.chat-open>main{display:flex}
+ .head{padding:13px 14px}.head h3{font-size:17px}.head input{padding:12px;font-size:16px}.list{padding:8px 10px}.item{padding:12px 9px}.avatar{width:44px;height:44px;border-radius:15px}.itemtext{display:block}.preview{font-size:12px}
+ .chathead{padding:10px 12px;min-height:61px}.backbtn{display:block;padding:9px 12px;font-size:19px;border-radius:12px}.chathead .avatar{width:39px;height:39px;cursor:pointer;overflow:hidden}.avatar img{width:100%;height:100%;object-fit:cover;border-radius:inherit}.senderline{font-size:12px;font-weight:700;color:var(--accent);margin-bottom:3px}.bubble:not(.mine) .senderline{display:block}.chatbody{padding:13px 11px;gap:9px}.bubble{max-width:88%;font-size:14px}
+ .mobile-tools{padding:10px!important;max-height:31dvh;overflow:auto;display:flex;gap:8px!important;align-items:center}.mobile-tools label{font-size:11px;display:flex;align-items:center;gap:5px;white-space:nowrap}.mobile-tools input[type=number]{width:70px!important;padding:8px!important;font-size:14px}.mobile-tools button{padding:9px 11px;white-space:nowrap;font-size:12px}.mobile-tools #queuePanel{padding:0 10px 9px!important;overflow-x:auto;flex-wrap:nowrap!important}.mobile-tools #queuePanel button{flex-shrink:0}
+ .composer{padding:9px 10px calc(9px + env(safe-area-inset-bottom));gap:8px}.composer textarea{height:46px;font-size:16px;padding:11px}.composer button{min-width:48px;border-radius:14px}
+ .dialog{border-radius:20px;padding:19px}.toast{bottom:calc(14px + env(safe-area-inset-bottom));max-width:90%;text-align:center}
+}
+@media(min-width:761px){.layout.chat-open>aside:nth-child(2){display:flex}.layout.chat-open>main{display:flex}}
 
-def bj_text(s):
-    return "Ваши карты: {} ({})\nКарта дилера: {}".format(
-        hand_value(s["player"]), ", ".join(map(str, s["player"])), s["dealer"][0])
-
-
-def start_bj(uid, chat_id, bet):
-    player = [draw_card(), draw_card()]
-    dealer = [draw_card()]
-    if hand_value(player) == 21:
-        finish(chat_id, uid, bet, int(bet * 2.5), "21 с раздачи!", "bj")
-        return
-    state = {"player": player, "dealer": dealer, "bet": bet, "chat": chat_id}
-    bj_games[uid] = state
-    msg = bot.send_message(chat_id, bj_text(state), reply_markup=bj_kb(can_double=True))
-    state["msg"] = msg.message_id
-
-
-def bj_bust(uid, s):
-    bj_games.pop(uid, None)
-    net, lines = settle(uid, s["bet"], 0)
-    head = "Ваши карты: {} ({})\nПеребор.".format(hand_value(s["player"]), ", ".join(map(str, s["player"])))
-    safe_edit(s["chat"], s["msg"], compose(head, net, lines),
-              reply_markup=again_keyboard("bj", s["bet"] // (2 if s.get("doubled") else 1)))
-
-
-def bj_hit(uid):
-    s = bj_games.get(uid)
-    if not s:
-        return
-    s["player"].append(draw_card())
-    if hand_value(s["player"]) > 21:
-        bj_bust(uid, s)
-    else:
-        safe_edit(s["chat"], s["msg"], bj_text(s), reply_markup=bj_kb())
-
-
-def bj_double(uid, chat_id):
-    s = bj_games.get(uid)
-    if not s or len(s["player"]) != 2:
-        return
-    if not try_charge(uid, s["bet"]):
-        bot.send_message(chat_id, "Недостаточно средств для удвоения.")
-        return
-    s["bet"] *= 2
-    s["doubled"] = True
-    s["player"].append(draw_card())
-    if hand_value(s["player"]) > 21:
-        bj_bust(uid, s)
-    else:
-        safe_edit(s["chat"], s["msg"], bj_text(s) + "\nСтавка удвоена.")
-        bj_stand(uid)
-
-
-def bj_stand(uid):
-    s = bj_games.pop(uid, None)
-    if not s:
-        return
-    dealer = s["dealer"]
-    while hand_value(dealer) < 17:
-        dealer.append(draw_card())
-    pv, dv = hand_value(s["player"]), hand_value(dealer)
-    bet = s["bet"]
-    head = "У вас {} ({}), у дилера {} ({}).".format(
-        pv, ", ".join(map(str, s["player"])), dv, ", ".join(map(str, dealer)))
-    if dv > 21:
-        gross, head = bet * 2, head + "\nДилер перебрал."
-    elif pv > dv:
-        gross, head = bet * 2, head + "\nВаша победа."
-    elif pv == dv:
-        gross, head = bet, head + "\nНичья."
-    else:
-        gross, head = 0, head + "\nПобеда дилера."
-    base = bet // 2 if s.get("doubled") else bet
-    finish(s["chat"], uid, bet, gross, head, "bj" if base == bet else "bj")
-
-
-# ---------- Краш ----------
-
-def launch_crash(uid, chat_id, bet):
-    crash_point = max(1.01, round(RTP / (1.0 - random.random()), 2))
-    msg = bot.send_message(chat_id, "Раунд запущен.\nМножитель: х1.00", reply_markup=cashout_kb())
-    crash_rounds[uid] = {"bet": bet, "mult": 1.0, "crash": crash_point,
-                         "chat": chat_id, "msg": msg.message_id, "active": True}
-    threading.Thread(target=crash_loop, args=(uid,), daemon=True).start()
-
-
-def crash_loop(uid):
-    while True:
-        time.sleep(1)
-        with crash_lock:
-            r = crash_rounds.get(uid)
-            if not r or not r["active"]:
-                return
-            r["mult"] = round(r["mult"] * (1.07 + random.random() * 0.07) + 0.01, 2)
-            crashed = r["mult"] >= r["crash"]
-            if crashed:
-                r["active"] = False
-            mult = r["mult"]
-        if crashed:
-            net, lines = settle(uid, r["bet"], 0)
-            safe_edit(r["chat"], r["msg"], compose("Краш на х{}.".format(fmt_mult(r["crash"])), net, lines),
-                      reply_markup=again_keyboard("crash", r["bet"]))
-            return
-        safe_edit(r["chat"], r["msg"],
-                  "Раунд идёт.\nМножитель: х{}\nМожно забрать: {}".format(fmt_mult(mult), fmt(int(r["bet"] * mult))),
-                  reply_markup=cashout_kb())
-
-
-def crash_cashout(uid, chat_id):
-    with crash_lock:
-        r = crash_rounds.get(uid)
-        if not r or not r["active"]:
-            return
-        r["active"] = False
-        mult = r["mult"]
-    net, lines = settle(uid, r["bet"], int(r["bet"] * mult))
-    safe_edit(chat_id, r["msg"], compose("Вы забрали выигрыш на х{}.".format(fmt_mult(mult)), net, lines),
-              reply_markup=again_keyboard("crash", r["bet"]))
-
-
-# ============================ КОМАНДЫ ============================
-
-def cmd_start(message):
-    uid = message.from_user.id
-    get_user(uid)
-    touch_username(uid, message.from_user.username)
-    name = message.from_user.username or message.from_user.first_name or "игрок"
-    greeting = random.choice(GREETINGS).format(name=name)
-    text = (greeting + "\n\n"
-            "Добро пожаловать в казино. На вашем счету: {}.\n"
-            "Особое правило: чем реже шанс — тем больше выплата, а невезение копит бонус "
-            "к следующему выигрышу.\n"
-            "Выберите игру или напишите: слоты 250".format(fmt(get_user(uid)[U_BAL])))
-    bot.send_message(message.chat.id, text, reply_markup=main_keyboard())
-    bot.send_message(message.chat.id, "Список игр:", reply_markup=games_inline())
-
-
-def cmd_balance(message):
-    user = get_user(message.from_user.id)
-    bot.reply_to(message, "{}, ваш баланс: {}.".format(user_display(message.from_user), fmt(user[U_BAL])))
-
-
-def cmd_games(message):
-    lines = ["Доступные игры:", ""]
-    for key, (name, desc) in GAMES.items():
-        lines.append("{} — {}".format(name, desc))
-    lines += ["", "Джекпот сейчас: {}".format(fmt(get_jackpot())),
-              "Запуск: «<игра> <ставка>», например: рулетка 500",
-              "Ставки можно сокращать: 5к = 5000."]
-    bot.send_message(message.chat.id, "\n".join(lines), reply_markup=games_inline())
-
-
-def cmd_jackpot(message):
-    bot.reply_to(message,
-                 "Джекпот: {}\nОн растёт от каждого проигрыша. Забирает тот, кто выбьет 7-7-7 в слотах.".format(
-                     fmt(get_jackpot())))
-
-
-def cmd_top(message):
-    rows = db_query("SELECT username, balance, xp FROM users ORDER BY balance DESC LIMIT 10", fetch="all")
-    lines = ["Топ-10 игроков по балансу:", ""]
-    for i, (username, balance, xp) in enumerate(rows, 1):
-        lines.append("{}. {} (ур. {}) — {}".format(i, username or "игрок", level_of(xp), fmt(balance)))
-    if not rows:
-        lines.append("Пока нет игроков.")
-    bot.send_message(message.chat.id, "\n".join(lines))
-
-
-def cmd_profile(message):
-    user = get_user(message.from_user.id)
-    wins, losses = user[U_WINS], user[U_LOSS]
-    total = wins + losses
-    rate = round(wins / total * 100) if total else 0
-    level = level_of(user[U_XP])
-    luck = int(min(user[U_STREAK] * LUCK_STEP, LUCK_MAX) * 100)
-    bot.reply_to(message,
-                 "Профиль: {}\n"
-                 "Уровень: {} ({}), опыт {}\n"
-                 "Баланс: {}\n"
-                 "Побед / поражений: {} / {} ({}% побед)\n"
-                 "Сыграно игр: {}\n"
-                 "Чистый выигрыш: {}\n"
-                 "Серия поражений: {} (рекорд {})\n"
-                 "Бонус невезения к следующему выигрышу: +{}%".format(
-                     user_display(message.from_user), level, title_of(level), user[U_XP],
-                     fmt(user[U_BAL]), wins, losses, rate, user[U_GAMES], fmt(user[U_EARN]),
-                     user[U_STREAK], user[U_BEST], luck))
-
-
-def cmd_daily(message):
-    uid = message.from_user.id
-    user = get_user(uid)
-    now = time.time()
-    if now - user[U_DAILY] < DAILY_INTERVAL:
-        left = int(user[U_DAILY] + DAILY_INTERVAL - now)
-        bot.reply_to(message, "Бонус уже получен. Следующий через {} ч {} мин.".format(left // 3600, (left % 3600) // 60))
-        return
-    dstreak = user[U_DSTREAK] + 1 if now - user[U_DAILY] < DAILY_INTERVAL * 2 else 1
-    amount = DAILY_BONUS + min(dstreak, 7) * 100 + user[U_STREAK] * 20  # +20 за каждое поражение подряд
-    lucky = random.random() < 0.05
-    if lucky:
-        amount *= 5
-    add_balance(uid, amount)
-    db_query("UPDATE users SET last_daily=?, daily_streak=? WHERE user_id=?", (now, dstreak, uid))
-    text = "Ежедневный бонус {} зачислен (дней подряд: {}).".format(fmt(amount), dstreak)
-    if lucky:
-        text += "\nРедкая удача: бонус умножен на 5!"
-    bot.reply_to(message, text + "\nБаланс: {}.".format(fmt(get_user(uid)[U_BAL])))
-
-
-def cmd_rescue(message):
-    uid = message.from_user.id
-    user = get_user(uid)
-    now = time.time()
-    if user[U_BAL] >= MIN_BET:
-        bot.reply_to(message, "Подачка только для тех, у кого баланс меньше {}.".format(fmt(MIN_BET)))
-        return
-    if now - user[U_RESCUE] < RESCUE_INTERVAL:
-        left = int(user[U_RESCUE] + RESCUE_INTERVAL - now)
-        bot.reply_to(message, "Рано. Попробуйте через {} мин.".format(left // 60 + 1))
-        return
-    add_balance(uid, RESCUE_AMOUNT)
-    db_query("UPDATE users SET last_rescue=? WHERE user_id=?", (now, uid))
-    bot.reply_to(message, "Казино сжалилось: +{}.".format(fmt(RESCUE_AMOUNT)))
-
-
-def cmd_transfer(message, args):
-    uid = message.from_user.id
-    if len(args) < 2:
-        bot.reply_to(message, "Формат: передать <сумма> <@ник>")
-        return
-    amount = parse_amount(args[0])
-    if amount is None or amount < 1:
-        bot.reply_to(message, "Некорректная сумма.")
-        return
-    target_name = args[1].lstrip("@").lower()
-    if target_name == (message.from_user.username or "").lower():
-        bot.reply_to(message, "Нельзя передать средства самому себе.")
-        return
-    row = db_query("SELECT user_id FROM users WHERE username=?", (target_name,), "one")
-    if not row:
-        bot.reply_to(message, "Игрок с ником @{} не найден.".format(target_name))
-        return
-    if not try_charge(uid, amount):
-        bot.reply_to(message, "Недостаточно средств.")
-        return
-    add_balance(row[0], amount)
-    bot.reply_to(message, "Передано {} игроку @{}. Ваш баланс: {}.".format(
-        fmt(amount), target_name, fmt(get_user(uid)[U_BAL])))
-
-
-def cmd_give(message, args):
-    if message.from_user.id != ADMIN_ID:
-        bot.reply_to(message, "Команда доступна только администратору.")
-        return
-    if len(args) < 2:
-        bot.reply_to(message, "Формат: give <сумма> <@ник>")
-        return
-    amount = parse_amount(args[0])
-    row = db_query("SELECT user_id FROM users WHERE username=?", (args[1].lstrip("@").lower(),), "one")
-    if amount is None or not row:
-        bot.reply_to(message, "Некорректные параметры.")
-        return
-    add_balance(row[0], amount)
-    bot.reply_to(message, "Зачислено {} игроку {}.".format(fmt(amount), args[1]))
-
-
-HELP_TEXT = (
-    "Команды (работают и без слэша):\n\n"
-    "баланс (б) — ваш баланс\n"
-    "игры (иг) — список игр\n"
-    "топ — рейтинг игроков\n"
-    "бонус — ежедневный бонус (растёт с серией дней)\n"
-    "профиль (проф) — статистика и уровень\n"
-    "джекпот — размер джекпота\n"
-    "подачка — помощь, если баланс меньше {min}\n"
-    "передать <сумма> <@ник> — перевод\n\n"
-    "Запуск игры: «<игра> <ставка>»:\n"
-    "слоты 250, колесо 500, риск 1к, рулетка 1к, кости 100,\n"
-    "монетка 500, 21 200, краш 300, угадай 50\n\n"
-    "ПРАВИЛА УДАЧИ\n"
-    "- Чем меньше шанс, тем больше множитель (в Риске вы выбираете шанс сами).\n"
-    "- Каждое поражение подряд даёт +5% к прибыли следующего выигрыша (до +100%).\n"
-    "- Каждое 5-е поражение подряд возвращает 25% ставки.\n"
-    "- Каждый проигрыш пополняет джекпот; его забирает 7-7-7 в слотах.\n\n"
-    "Ставки: от {min} до {max}. Сокращение: к = тысяча (5к = 5000)."
-).format(min=fmt(MIN_BET), max=fmt(MAX_BET))
-
-
-def cmd_help(message):
-    bot.send_message(message.chat.id, HELP_TEXT, reply_markup=games_inline())
-
-
-# ============================ МАРШРУТИЗАЦИЯ ============================
-
-ALIASES = {
-    "start": "start", "старт": "start", "начать": "start",
-    "balance": "balance", "баланс": "balance", "бал": "balance", "б": "balance",
-    "games": "games", "игры": "games", "иг": "games", "играть": "games",
-    "top": "top", "топ": "top", "лидеры": "top",
-    "help": "help", "помощь": "help", "хелп": "help", "п": "help", "команды": "help",
-    "daily": "daily", "bonus": "daily", "бонус": "daily", "ежа": "daily",
-    "profile": "profile", "профиль": "profile", "проф": "profile", "стата": "profile",
-    "jackpot": "jackpot", "джекпот": "jackpot", "джек": "jackpot",
-    "rescue": "rescue", "подачка": "rescue",
-    "transfer": "transfer", "передать": "transfer", "дать": "transfer", "перевод": "transfer",
-    "give": "give",
-    "slots": "slots", "слоты": "slots", "слот": "slots",
-    "wheel": "wheel", "колесо": "wheel", "фортуна": "wheel",
-    "risk": "risk", "риск": "risk",
-    "coin": "coin", "монетка": "coin", "монета": "coin", "орел": "coin", "орёл": "coin",
-    "dice": "dice", "кости": "dice", "кубик": "dice",
-    "roulette": "roulette", "рулетка": "roulette",
-    "bj": "bj", "блекджек": "bj", "двадцатьодно": "bj", "двадцать": "bj", "21": "bj",
-    "crash": "crash", "краш": "crash",
-    "guess": "guess", "угадай": "guess", "число": "guess",
+/* Requested chat controls */
+.chatbody{position:relative}
+#scrollDown{position:absolute;right:18px;bottom:18px;z-index:4;display:none;width:42px;height:42px;padding:0;border-radius:50%;font-size:20px;box-shadow:0 4px 14px #0005}
+#scrollDown.visible{display:block}
+.composer textarea{height:auto;min-height:46px;max-height:35vh;overflow-y:auto;resize:none;line-height:1.4}
+.tools-grip{display:none}
+@media(max-width:760px){
+ .tools-grip{display:flex;justify-content:center;align-items:center;height:22px;min-height:22px;cursor:ns-resize;touch-action:pan-y;width:100%;border-radius:10px 10px 0 0}
+ .tools-grip:after{content:'';width:42px;height:4px;border-radius:4px;background:var(--muted);opacity:.7}
+ .mobile-tools.collapsed{max-height:22px!important;height:22px!important;overflow:hidden!important;padding:0 10px!important;gap:0!important}
+ .mobile-tools.collapsed>*:not(.tools-grip){display:none!important}
+ .mobile-tools:not(.collapsed){max-height:31dvh;overflow:auto}
 }
 
-CANCEL_WORDS = ("отмена", "отменить", "cancel", "стоп")
+/* Requested chat controls */
+.chatbody{position:relative}
+#scrollDown{position:absolute;right:18px;bottom:18px;z-index:4;display:none;width:42px;height:42px;padding:0;border-radius:50%;font-size:20px;box-shadow:0 4px 14px #0005}
+#scrollDown.visible{display:block}
+.composer textarea{height:auto;min-height:46px;max-height:35vh;overflow-y:auto;resize:none;line-height:1.4}
+.tools-grip{display:none}
+@media(max-width:760px){
+ .tools-grip{display:flex;justify-content:center;align-items:center;height:22px;min-height:22px;cursor:ns-resize;touch-action:pan-y;width:100%;border-radius:10px 10px 0 0}
+ .tools-grip:after{content:'';width:42px;height:4px;border-radius:4px;background:var(--muted);opacity:.7}
+ .mobile-tools.collapsed{max-height:22px!important;height:22px!important;overflow:hidden!important;padding:0 10px!important;gap:0!important}
+ .mobile-tools.collapsed>*:not(.tools-grip){display:none!important}
+ .mobile-tools:not(.collapsed){max-height:31dvh;overflow:auto}
+}
+</style></head><body>
+<div class="layout"><aside><div class="brand"><span class="logo">T</span>Telegram Desk</div><div class="nav active" onclick="nav(this,'chats')">▣　Сообщения</div><div class="nav" onclick="nav(this,'accounts')">♙　Аккаунты</div><div class="nav" onclick="nav(this,'settings')">⚙　Настройки</div><div class="spacer"></div><div class="muted" style="padding:14px;font-size:11px" id="server">Проверка сервера…</div></aside>
+<aside><div class="head"><h3 id="listTitle">Диалоги</h3><input id="search" placeholder="Поиск…" oninput="filterList()"></div><div class="list" id="list"><div class="empty">Загрузка…</div></div><div style="padding:12px"><button class="primary" style="width:100%" onclick="addAccount()">＋ Аккаунт</button></div></aside>
+<main><div class="chathead"><button class="backbtn" onclick="backToDialogs()" aria-label="Назад">←</button><div class="avatar" id="peerAvatar">T</div><div><b id="peerName">Выберите диалог</b><div class="muted" id="peerInfo" style="font-size:12px">Telegram Desk</div></div><div class="spacer"></div><button onclick="loadMessages()">↻</button></div><div class="chatbody" id="messages"><button id="scrollDown" title="Вниз" onclick="scrollToLatest()">↓</button><div class="empty">Добавьте аккаунт, чтобы начать.</div></div><div class="mobile-tools" id="mobileTools" style="padding:10px 13px;border-top:1px solid var(--line);display:flex;gap:8px;flex-wrap:wrap;align-items:center"><div class="tools-grip" id="toolsGrip" title="Свернуть / развернуть настройки"></div><div class="tools-grip" id="toolsGrip" title="Свернуть / развернуть настройки"></div>
+<label class="muted">Слов/часть <input id="wordsPart" type="number" min="1" max="100" value="1" style="width:58px;padding:7px"></label>
+<label class="muted">Задержка, сек <input id="delay" type="number" min="0.05" max="60" step="0.05" value="0.3" style="width:68px;padding:7px"></label>
+<label class="muted">Rand max <input id="randMax" type="number" min="0" max="20" value="0" style="width:58px;padding:7px"></label>
+<span class="muted">Скорость:</span><button type="button" onclick="setPreset(1)">.m1 · 5</button><button type="button" onclick="setPreset(2)">.m2 · 15</button><button type="button" onclick="setPreset(3)">.m3 · 40</button>
+<label class="muted">Сл/мин <input id="wpm" type="number" min="1" max="1200" value="200" style="width:68px;padding:7px" onchange="setWpm()"></label>
+<label class="muted">Ответ # <input id="replyTo" type="number" placeholder="—" style="width:75px;padding:7px"></label>
+<label class="muted"><input id="autoChunk" type="checkbox" checked style="width:auto"> Очередь частями</label>
+<label class="muted"><input id="capsMode" type="checkbox" style="width:auto"> CAPS</label>
+<button onclick="pickTextFile()">Файл .txt</button><button onclick="getPhoto()">Скачать фото</button>
+</div>
+<div id="queuePanel" style="padding:0 13px 9px;display:flex;gap:7px;align-items:center;flex-wrap:wrap"><span class="muted" id="queueInfo">Очередь не запущена</span><button onclick="queueAction('pause')">Пауза</button><button onclick="queueAction('resume')">Продолжить</button><button onclick="queueAction('stop')">Стоп</button></div>
+<div id="replyBanner" style="display:none;padding:8px 13px;background:var(--panel);border-top:1px solid var(--line);font-size:13px"><span id="replyLabel"></span><button onclick="clearReply()" style="float:right">✕</button></div>
+<div class="composer"><textarea id="msg" placeholder="Сообщение…" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();send()}"></textarea><button class="primary" onclick="send()">➤</button><input id="filePicker" type="file" accept=".txt,.md,text/plain" style="display:none" onchange="readTextFile(this)"></div></main></div>
+<div class="modal" id="modal"><div class="dialog" id="dialog"></div></div><div class="toast" id="toast"></div>
+<script>
+let accounts=[],aid=null,dialogs=[],peer=null,loginIdx=null;
+const $=x=>document.getElementById(x);
+const speedPresets={1:5,2:15,3:40};
+function setWpm(){let n=Math.max(1,Number($('wpm').value)||1);$('delay').value=(60/n).toFixed(3)}
+function setPreset(n){$('wpm').value=speedPresets[n];setWpm();toast('Скорость .m'+n+': '+speedPresets[n]+' слов/мин')}
+$('delay').addEventListener('change',()=>{$('wpm').value=Math.max(1,Math.round(60/(Number($('delay').value)||0.3)))})
+async function api(url,opt={}){let r=await fetch(url,{headers:{'Content-Type':'application/json'},...opt}),d=await r.json().catch(()=>({detail:'Ошибка сервера'}));if(!r.ok)throw Error(d.detail||'Ошибка');return d}
+function toast(t){const el=$('toast');if(!el)return;el.textContent=t;el.classList.add('show');setTimeout(()=>el.classList.remove('show'),2800)}
+function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function modal(s){$('dialog').innerHTML=s;$('modal').classList.add('open')}
+function closeModal(){ $('modal').classList.remove('open') }
+$('modal').addEventListener('click',e=>{if(e.target===$('modal'))closeModal()});
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal()});
+async function refresh(){try{let s=await api('/api/status');accounts=s.accounts;$('server').textContent='● Сервер подключён';if(!s.configured){$('list').innerHTML='<div class="empty">Откройте настройки и введите API ID и Hash.</div>';return}renderAccounts();if(aid===null&&accounts.length)chooseAccount(accounts[0].id)}catch(e){$('server').textContent='Сервер недоступен';$('list').innerHTML='<div class="empty">Запустите main.py в Pydroid.</div>'}}
+function renderAccounts(){$('listTitle').textContent='Аккаунты';$('list').innerHTML=accounts.map(a=>`<div class="item ${a.id===aid?'active':''}" onclick="chooseAccount(${a.id})"><div class="avatar">${esc(a.name[0])}</div><div class="itemtext"><b>${esc(a.name)}</b><div class="preview">Аккаунт #${a.id}</div></div></div>`).join('')||'<div class="empty">Аккаунтов нет</div>'}
+async function chooseAccount(id){document.querySelector('.layout').classList.remove('chat-open');aid=id;peer=null;renderAccounts();$('messages').innerHTML='<div class="empty">Загрузка диалогов…</div>';try{dialogs=await api(`/api/accounts/${id}/dialogs`);renderDialogs()}catch(e){toast(e.message)}}
+function renderDialogs(){$('listTitle').textContent='Диалоги';$('list').innerHTML=dialogs.map(d=>`<div class="item ${d.id===peer?'active':''}" data-name="${esc(d.name.toLowerCase())}" onclick="choosePeer(${d.id},'${esc(d.name).replace(/'/g,"\\'")}')"><div class="avatar">${esc(d.name[0])}</div><div class="itemtext"><b>${esc(d.name)}</b><div class="preview">${esc(d.preview)}</div></div></div>`).join('')||'<div class="empty">Нет диалогов</div>'}
+function filterList(){let q=$('search').value.toLowerCase();document.querySelectorAll('#list .item').forEach(x=>x.style.display=(x.dataset.name||'').includes(q)?'flex':'none')}
+async function choosePeer(id,name){peer=id;document.querySelector('.layout').classList.add('chat-open');$('peerName').textContent=name;$('peerAvatar').innerHTML=`<img src="/api/accounts/${aid}/avatar/${peer}" onerror="this.remove();$('peerAvatar').textContent='${esc(name[0])}'">`;$('peerAvatar').onclick=()=>showProfile(peer);$('peerInfo').textContent='Аккаунт #'+aid;renderDialogs();await loadMessages()}
+async function showProfile(userId){try{const p=await api(`/api/accounts/${aid}/profile/${userId}`);modal(`<div style="text-align:center;padding:12px"><img src="${p.avatar_url}" onerror="this.style.display='none'" style="width:92px;height:92px;object-fit:cover;border-radius:50%;background:var(--panel);margin-bottom:12px"><h2>${esc(p.name)}</h2>${p.username?`<div class="muted">@${esc(p.username)}</div>`:''}${p.is_bot?'<div class="muted">Бот</div>':''}${p.bio?`<p>${esc(p.bio)}</p>`:''}${p.phone?`<p>Телефон: ${esc(p.phone)}</p>`:''}<button onclick="closeModal()">Закрыть</button></div>`)}catch(e){toast(e.message)}}
 
+/* FIX: update DOM only for new/changed messages; preserve current scroll position.
+   The old implementation replaced all children and forced scrollTop=999999 every 5s. */
+async function loadMessages(){
+ if(aid===null||peer===null)return;
+ const chat=$('messages');
+ const nearBottom=chat.scrollHeight-chat.scrollTop-chat.clientHeight<80;
+ const previousTop=chat.scrollTop;
+ try{
+  const ms=await api(`/api/accounts/${aid}/dialogs/${peer}/messages`);
+  // Ignore stale responses if the user switched chats while the request was in flight.
+  if(aid===null||peer===null)return;
+  const expectedPeer=peer;
+  const existing=new Map([...chat.querySelectorAll('.bubble[data-message-id]')].map(el=>[el.dataset.messageId,el]));
+  for(const m of ms){
+   const id=String(m.id);
+   let el=existing.get(id);
+   let media='';
+   if(m.media_url&&m.media_kind==='image')media=`<img src="${m.media_url}" style="display:block;max-width:100%;max-height:280px;border-radius:12px;margin:6px 0" loading="lazy">`;
+   else if(m.media_url&&m.media_kind==='video')media=`<video src="${m.media_url}" controls playsinline style="display:block;max-width:100%;max-height:280px;border-radius:12px;margin:6px 0"></video>`;
+   else if(m.media_url&&m.media_kind==='sticker')media=`<video src="${m.media_url}" autoplay loop muted playsinline style="display:block;width:180px;max-width:100%;border-radius:12px;margin:6px 0"></video>`;
+   else if(m.media_url)media=`<a href="${m.media_url}" target="_blank">📎 Открыть вложение</a>`;
+   let quoted=m.reply_to?`<div style="border-left:3px solid var(--accent);padding:4px 7px;margin-bottom:6px;font-size:12px;opacity:.8">↪ ${esc(m.reply_preview||('Ответ на #'+m.reply_to))}</div>`:'';
+   const senderLine=(!m.out&&m.sender&&String(m.sender.id)!==String(peer))?`<div class="senderline" style="display:flex;align-items:center;gap:6px;cursor:pointer" onclick="showProfile(${Number(m.sender.id)})"><img src="/api/accounts/${aid}/avatar/${Number(m.sender.id)}" onerror="this.style.display='none'" style="width:24px;height:24px;object-fit:cover;border-radius:50%;flex-shrink:0"><span>${esc(m.sender.name)}</span></div>`:'';
+   const html=`${senderLine}${quoted}${esc(m.text)}${media}<div class="stamp">${m.date?new Date(m.date).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'}):''} · #${m.id} <button onclick="setReply(${m.id},'${encodeURIComponent((m.text||m.reply_preview||'Медиа').slice(0,80))}')" style="margin-left:6px;padding:2px 7px;font-size:11px">Ответить</button></div>`;
+   if(!el){
+    el=document.createElement('div');
+    el.className='bubble '+(m.out?'mine':'');
+    el.dataset.messageId=id;
+    el.innerHTML=html;
+    chat.appendChild(el);
+   }else{
+    // Update only if content actually changed (e.g. edited message).
+    if(el.innerHTML!==html)el.innerHTML=html;
+    el.className='bubble '+(m.out?'mine':'');
+   }
+   existing.delete(id);
+  }
+  // Remove messages that are no longer in the server's latest 60-message window.
+  for(const obsolete of existing.values())obsolete.remove();
+  if(nearBottom)chat.scrollTop=chat.scrollHeight;
+  else chat.scrollTop=previousTop;
+  $('scrollDown')?.classList.toggle('visible',!nearBottom&&!!chat.querySelector('.bubble'));
+ }catch(e){toast(e.message)}
+}
 
-def handle_awaiting(message, word, state):
-    uid = message.from_user.id
-    if state.get("await") == "num":
-        number = parse_amount(word)
-        if number is None or not (0 <= number <= 36):
-            bot.reply_to(message, "Введите число от 0 до 36 (или «отмена»).")
-            return
-        pending.pop(uid, None)
-        spin_roulette(uid, message.chat.id, state["bet"], "num:{}".format(number))
-        return
-    amount = parse_amount(word)  # своя ставка
-    if amount is None:
-        bot.reply_to(message, "Введите сумму числом, например: 500 или 2к (или «отмена»).")
-        return
-    pending.pop(uid, None)
-    begin_game(uid, message.chat.id, state["game"], amount)
+function scrollToLatest(){const box=$('messages');box.scrollTo({top:box.scrollHeight,behavior:'smooth'});}
+const messageBox=$('messages');
+messageBox.addEventListener('scroll',()=>{
+ const atBottom=messageBox.scrollHeight-messageBox.scrollTop-messageBox.clientHeight<90;
+ $('scrollDown')?.classList.toggle('visible',!atBottom&&!!messageBox.querySelector('.bubble'));
+});
+function resizeComposer(){
+ const field=$('msg');field.style.height='auto';
+ field.style.height=Math.min(field.scrollHeight,field.parentElement.clientHeight*0.65,window.innerHeight*0.35)+'px';
+}
+$('msg').addEventListener('input',resizeComposer);
+$('msg').addEventListener('focus',resizeComposer);
+$('toolsGrip')?.addEventListener('click',()=> $('mobileTools')?.classList.toggle('collapsed'));
+let toolsTouchStart=0;
+$('toolsGrip')?.addEventListener('touchstart',e=>{toolsTouchStart=e.touches[0].clientY},{passive:true});
+function resizeComposer(){const el=$('msg');if(!el)return;el.style.height='auto';el.style.height=Math.min(el.scrollHeight,window.innerHeight*0.35)+'px';el.style.overflowY=el.scrollHeight>window.innerHeight*0.35?'auto':'hidden'}
+$('msg')?.addEventListener('input',resizeComposer);
+$('toolsGrip')?.addEventListener('touchend',e=>{
+ const delta=e.changedTouches[0].clientY-toolsTouchStart;
+ if(Math.abs(delta)>25)$('mobileTools').classList.toggle('collapsed',delta>0);
+});
+function setReply(id,preview){preview=decodeURIComponent(preview);$('replyTo').value=id;$('replyLabel').textContent='Ответ на #'+id+' · '+preview;$('replyBanner').style.display='block';$('msg').focus()}
+function clearReply(){$('replyTo').value='';$('replyBanner').style.display='none';$('replyLabel').textContent=''}
+async function send(){let text=$('msg').value.trim();if(!text)return;if(aid===null||peer===null)return toast('Сначала выберите чат');try{
+let reply=$('replyTo').value.trim(), rand=+$('randMax').value, words=+$('wordsPart').value||1;
+let useQueue=$('autoChunk').checked||rand>0||text.split(/\\s+/).length>words;
+if(useQueue){let r=await api(`/api/accounts/${aid}/dialogs/${peer}/queue`,{method:'POST',body:JSON.stringify({text,words_per_message:words,delay:Math.max(0.05,+$('delay').value||0.3),random_max:rand,reply_to:reply?+reply:null})});toast('Добавлено в очередь: '+r.parts+' частей');$('msg').value='';resizeComposer();clearReply();refreshQueue()}
+else{await api(`/api/accounts/${aid}/dialogs/${peer}/send`,{method:'POST',body:JSON.stringify({text,reply_to:reply?+reply:null})});$('msg').value='';resizeComposer();clearReply();await loadMessages()}
+}catch(e){toast(e.message)}}
+async function queueAction(action){try{await api('/api/queue/'+action,{method:'POST'});refreshQueue()}catch(e){toast(e.message)}}
+async function refreshQueue(){try{let q=await api('/api/queue');$('queueInfo').textContent=q.active?(q.paused?'⏸ Пауза':'▶ Отправка')+' · '+q.sent+'/'+q.total+' · в пути '+(q.pending||0)+' · осталось '+q.remaining+(q.last_error?' · '+q.last_error:''):(q.last_error||'Очередь не запущена')}catch(e){}}
+async function toggleCaps(){try{let r=await api('/api/queue/caps',{method:'POST'});$('capsMode').checked=r.caps}catch(e){toast(e.message)}}
+async function getPhoto(){if(aid===null||peer===null)return toast('Сначала выберите чат');try{let r=await api(`/api/accounts/${aid}/dialogs/${peer}/photo`,{method:'POST'});toast('Фото скачано: '+r.filename);window.open(r.url,'_blank')}catch(e){toast(e.message)}}
+function pickTextFile(){$('filePicker').click()}
+function readTextFile(el){let f=el.files[0];if(!f)return;let r=new FileReader();r.onload=()=>{$('msg').value=String(r.result||'');toast('Текст загружен из '+f.name)};r.readAsText(f);el.value=''}
+function addAccount(){modal(`<h3>Добавить Telegram</h3><p class="muted">Код придёт в официальный Telegram. Не передавайте его другим людям.</p><div class="field"><label>Номер телефона</label><input id="phone" placeholder="+7…"></div><div class="actions"><button onclick="closeModal()">Отмена</button><button class="primary" onclick="requestCode()">Получить код</button></div>`)}
+async function requestCode(){try{let phone=$('phone').value.trim();let used=accounts.map(a=>a.id);loginIdx=Array.from({length:15},(_,i)=>i).find(i=>!used.includes(i));if(loginIdx===undefined)throw Error('Достигнут лимит в 15 аккаунтов');await api(`/api/accounts/${loginIdx}/request-code`,{method:'POST',body:JSON.stringify({phone})});modal(`<h3>Код подтверждения</h3><div class="field"><label>Код из Telegram</label><input id="code"></div><div class="actions"><button onclick="cancelLogin()">Отмена</button><button class="primary" onclick="signIn('${phone.replace(/'/g,"")}')">Войти</button></div>`)}catch(e){toast(e.message)}}
+async function cancelLogin(){if(loginIdx!==null){try{await api(`/api/accounts/${loginIdx}/pending`,{method:'DELETE'})}catch(e){}}close();loginIdx=null}
+async function signIn(phone){try{await api(`/api/accounts/${loginIdx}/sign-in`,{method:'POST',body:JSON.stringify({phone,code:$('code').value.trim()})});close();await refresh();toast('Аккаунт подключён')}catch(e){if(e.message.includes('пароль'))modal(`<h3>Пароль 2FA</h3><input id="pwd" type="password" placeholder="Пароль двухэтапной защиты"><div class="actions"><button onclick="closeModal()">Отмена</button><button class="primary" onclick="signPassword()">Продолжить</button></div>`);else toast(e.message)}}
+async function signPassword(){try{await api(`/api/accounts/${loginIdx}/password`,{method:'POST',body:JSON.stringify({password:$('pwd').value})});close();await refresh()}catch(e){toast(e.message)}}
+function settings(){modal(`<h3>Настройки API</h3><p class="muted">Получите собственные API ID и API Hash на my.telegram.org. Не используйте чужие ключи.</p><div class="field"><label>API ID</label><input id="apiid" type="number"></div><div class="field"><label>API Hash</label><input id="hash"></div><div class="actions"><button onclick="closeModal()">Закрыть</button><button class="primary" onclick="saveConfig()">Сохранить</button></div>`)}
+async function saveConfig(){try{await api('/api/config',{method:'POST',body:JSON.stringify({api_id:+$('apiid').value,api_hash:$('hash').value})});close();await refresh();toast('Настройки сохранены')}catch(e){toast(e.message)}}
+function accountManage(){modal(`<h3>Аккаунты</h3>${accounts.map(a=>`<div class="item"><div class="avatar">${esc(a.name[0])}</div><div style="flex:1">${esc(a.name)} <span class="muted">#${a.id}</span></div><button onclick="removeAccount(${a.id})">Отключить</button></div>`).join('')||'<p class="muted">Нет подключённых аккаунтов</p>'}<div class="field"><label>Импорт готовой Telegram-сессии (.session)</label><input id="sessionUpload" type="file" accept=".session" onchange="importSession(this)"></div><div class="actions"><button onclick="closeModal()">Закрыть</button><button onclick="closeModal();addAccount()">＋ Войти по номеру</button></div>`)}
+async function importSession(el){const f=el.files&&el.files[0];if(!f)return;try{const fd=new FormData();fd.append('file',f);const r=await fetch('/api/accounts/import-session',{method:'POST',body:fd});const d=await r.json();if(!r.ok)throw Error(d.detail||'Ошибка импорта');close();await refresh();toast('Сессия импортирована: '+d.name+' (#'+d.id+')')}catch(e){toast(e.message)}finally{el.value=''}}
+async function removeAccount(id){if(!confirm('Отключить аккаунт?'))return;try{await api('/api/accounts/'+id,{method:'DELETE'});aid=null;close();await refresh()}catch(e){toast(e.message)}}
+function backToDialogs(){document.querySelector('.layout').classList.remove('chat-open');peer=null;renderDialogs()}
+function nav(el,p){document.querySelectorAll('.nav').forEach(x=>x.classList.remove('active'));el.classList.add('active');if(p==='settings')settings();if(p==='accounts')accountManage()}
+$('capsMode').addEventListener('change',toggleCaps);
+// Persist the message controls locally so their values survive page reloads.
+(function restoreAndPersistControls(){
+ const ids=['wordsPart','delay','randMax','wpm','autoChunk','capsMode'];
+ try{
+  ids.forEach(id=>{
+   const el=$(id); if(!el)return;
+   const saved=localStorage.getItem('telegramDesk:'+id);
+   if(saved!==null){
+    if(el.type==='checkbox')el.checked=saved==='true';
+    else el.value=saved;
+   }
+   const save=()=>localStorage.setItem('telegramDesk:'+id,el.type==='checkbox'?String(el.checked):el.value);
+   el.addEventListener('change',save);
+   el.addEventListener('input',save);
+  });
+ }catch(e){console.warn('Не удалось сохранить настройки в браузере',e)}
+})();
 
-
-@bot.message_handler(content_types=["text"])
-def on_text(message):
-    if not message.from_user:
-        return
-    uid = message.from_user.id
-    touch_username(uid, message.from_user.username)
-
-    parts = message.text.strip().split()
-    if not parts:
-        return
-    word = parts[0].lower().lstrip("/").rstrip(",.!?")
-    if "@" in word:
-        word = word.split("@", 1)[0]
-    args = parts[1:]
-
-    expire_pending(uid)
-    state = pending.get(uid)
-    if state:
-        if word in CANCEL_WORDS:
-            pending.pop(uid, None)
-            if state.get("paid"):
-                add_balance(uid, state["bet"])
-                bot.reply_to(message, "Действие отменено, ставка возвращена.")
-            else:
-                bot.reply_to(message, "Действие отменено.")
-            return
-        if state.get("await") in ("bet", "num"):
-            handle_awaiting(message, word, state)
-            return
-
-    cmd = ALIASES.get(word)
-    if cmd is None:
-        return
-
-    warning = is_spam(uid)
-    if warning:
-        bot.reply_to(message, warning)
-        return
-
-    if cmd == "start":
-        cmd_start(message)
-    elif cmd == "balance":
-        cmd_balance(message)
-    elif cmd == "games":
-        cmd_games(message)
-    elif cmd == "top":
-        cmd_top(message)
-    elif cmd == "help":
-        cmd_help(message)
-    elif cmd == "daily":
-        cmd_daily(message)
-    elif cmd == "profile":
-        cmd_profile(message)
-    elif cmd == "jackpot":
-        cmd_jackpot(message)
-    elif cmd == "rescue":
-        cmd_rescue(message)
-    elif cmd == "transfer":
-        cmd_transfer(message, args)
-    elif cmd == "give":
-        cmd_give(message, args)
-    elif cmd in GAMES:
-        begin_game(uid, message.chat.id, cmd, parse_amount(args[0]) if args else None)
-
-
-# ============================ ИНЛАЙН-КНОПКИ ============================
-
-@bot.callback_query_handler(func=lambda call: True)
-def on_callback(call):
-    uid = call.from_user.id
-    chat_id = call.message.chat.id
-    try:
-        bot.answer_callback_query(call.id)
-    except Exception:
-        pass
-
-    if _blocked.get(uid, 0) > time.time():
-        return
-    get_user(uid)
-    expire_pending(uid)
-
-    parts = call.data.split("|")
-    tag = parts[0]
-
-    if tag == "menu" and parts[1] == "games":
-        cmd_games(call.message)
-
-    elif tag == "game":
-        begin_game(uid, chat_id, parts[1], None)
-
-    elif tag == "bet":
-        game, amount = parts[1], parts[2]
-        if amount == "custom":
-            if is_busy(uid) and pending.get(uid, {}).get("await") != "bet":
-                bot.send_message(chat_id, "Сначала завершите текущую игру.")
-                return
-            pending[uid] = {"game": game, "await": "bet"}
-            bot.send_message(chat_id, "Введите вашу ставку (или «отмена»):")
-        else:
-            begin_game(uid, chat_id, game, int(amount))
-
-    elif tag == "again":
-        begin_game(uid, chat_id, parts[1], int(parts[2]))
-
-    elif tag == "side":
-        if pending.get(uid, {}).get("game") == "coin":
-            settle_coin(uid, chat_id, parts[1])
-
-    elif tag == "dice":
-        if pending.get(uid, {}).get("game") == "dice":
-            state = pending.pop(uid)
-            settle_dice(uid, chat_id, state["bet"], parts[1])
-
-    elif tag == "roul":
-        state = pending.get(uid)
-        if not state or state.get("game") != "roulette":
-            return
-        if parts[1] == "num":
-            state["await"] = "num"
-            bot.send_message(chat_id, "Введите число от 0 до 36:")
-        else:
-            pending.pop(uid, None)
-            spin_roulette(uid, chat_id, state["bet"], parts[1])
-
-    elif tag == "gnum":
-        if pending.get(uid, {}).get("game") == "guess":
-            settle_guess(uid, chat_id, int(parts[1]))
-
-    elif tag == "risk":
-        state = pending.get(uid)
-        if state and state.get("game") == "risk":
-            pending.pop(uid, None)
-            play_risk(uid, chat_id, state["bet"], int(parts[1]))
-
-    elif tag == "bj":
-        if parts[1] == "hit":
-            bj_hit(uid)
-        elif parts[1] == "dbl":
-            bj_double(uid, chat_id)
-        else:
-            bj_stand(uid)
-
-    elif tag == "cashout":
-        crash_cashout(uid, chat_id)
-
-
-# ============================ ЗАПУСК ============================
-
-def setup_menu():
-    commands = [
-        types.BotCommand("start", "начать"),
-        types.BotCommand("balance", "баланс (б)"),
-        types.BotCommand("games", "список игр (иг)"),
-        types.BotCommand("top", "топ игроков"),
-        types.BotCommand("bonus", "ежедневный бонус"),
-        types.BotCommand("jackpot", "размер джекпота"),
-        types.BotCommand("profile", "профиль и уровень"),
-        types.BotCommand("rescue", "помощь при банкротстве"),
-        types.BotCommand("help", "помощь (п)"),
-    ]
-    try:
-        bot.set_my_commands(commands)
-    except Exception as exc:
-        print("Не удалось установить меню команд:", exc)
-
+refresh();setInterval(()=>{if(peer!==null)loadMessages();refreshQueue()},5000);
+</script></body></html>"""
 
 if __name__ == "__main__":
-    if TOKEN.startswith("ВСТАВЬТЕ"):
-        raise SystemExit("Задайте токен: export BOT_TOKEN=... (или впишите в TOKEN)")
-    init_db()
-    setup_menu()
-    print("Бот запущен.")
-    bot.infinity_polling(skip_pending=True, timeout=60)
+    import uvicorn
+    print("\n" + "=" * 48)
+    print(" Telegram Desk запущен!")
+    print(" Откройте на телефоне: http://127.0.0.1:8000")
+    print(" Остановка: Ctrl+C")
+    print("=" * 48 + "\n")
+    uvicorn.run(app, host="127.0.0.1", port=8000, log_level="warning")

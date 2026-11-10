@@ -20,7 +20,7 @@ jobs:
           
       - name: Install dependencies
         run: |
-          pip install groq pyTelegramBotAPI aiohttp Pillow telethon groq python-telegram-bot qrcode requests fastapi python-multipart
+          pip install groq pyTelegramBotAPI aiohttp Pillow telethon groq python-telegram-bot qrcode requests fastapi python-multipart uvicorn
           
       - name: Run bot
         env:

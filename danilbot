@@ -1,29 +1,34 @@
 import json
+import os
 from pathlib import Path
 from typing import Optional
-import asyncio, random, time
-from fastapi import UploadFile, File
-from fastapi.responses import FileResponse
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
+import asyncio
+import random
+
+from fastapi import UploadFile, File, FastAPI, HTTPException
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from pydantic import BaseModel
 from telethon import TelegramClient
-from telethon.errors import SessionPasswordNeededError
+from telethon.errors import SessionPasswordNeededError, FloodWaitError
 
 ROOT = Path(__file__).resolve().parent
 CONFIG_FILE = ROOT / "tg_config.json"
 SESSION_DIR = ROOT / "sessions"
 SESSION_DIR.mkdir(exist_ok=True)
+DOWNLOAD_DIR = ROOT / "downloads"
+DOWNLOAD_DIR.mkdir(exist_ok=True)
+
 app = FastAPI(title="Telegram Desk")
 accounts = {}
 pending = {}
 api_id = None
 api_hash = None
-queue_state = {"task": None, "paused": False, "stop": False, "remaining": 0, "pending": 0,
-               "sent": 0, "total": 0, "account": None, "peer": None,
-               "chat_name": "", "last_error": "", "caps": False, "randomized": True}
-DOWNLOAD_DIR = ROOT / "downloads"
-DOWNLOAD_DIR.mkdir(exist_ok=True)
+queue_state = {
+    "task": None, "paused": False, "stop": False, "remaining": 0,
+    "pending": 0, "sent": 0, "total": 0, "account": None, "peer": None,
+    "chat_name": "", "last_error": "", "caps": False, "randomized": True,
+}
+
 
 class QueueRequest(BaseModel):
     text: str
@@ -32,45 +37,66 @@ class QueueRequest(BaseModel):
     random_max: int = 5
     reply_to: Optional[int] = None
 
+
+class Config(BaseModel):
+    api_id: int
+    api_hash: str
+
+
+class Phone(BaseModel):
+    phone: str
+
+
+class Code(BaseModel):
+    phone: str
+    code: str
+
+
+class Password(BaseModel):
+    password: str
+
+
+class Message(BaseModel):
+    text: str
+    reply_to: Optional[int] = None
+
+
 def load_config():
     global api_id, api_hash
     if CONFIG_FILE.exists():
         try:
-            c = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-            api_id, api_hash = int(c["api_id"]), c["api_hash"]
+            config = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+            api_id, api_hash = int(config["api_id"]), config["api_hash"]
         except Exception:
             pass
 
-def save_config(i, h):
+
+def save_config(value_id, value_hash):
     global api_id, api_hash
-    api_id, api_hash = int(i), h.strip()
-    CONFIG_FILE.write_text(json.dumps({"api_id": api_id, "api_hash": api_hash}), encoding="utf-8")
+    api_id, api_hash = int(value_id), value_hash.strip()
+    CONFIG_FILE.write_text(
+        json.dumps({"api_id": api_id, "api_hash": api_hash}),
+        encoding="utf-8",
+    )
+
 
 def require_config():
     if not api_id or not api_hash:
         raise HTTPException(400, "Сначала сохраните API ID и API Hash в настройках.")
 
-def acc_or_404(i):
-    if i not in accounts:
+
+def acc_or_404(idx):
+    if idx not in accounts:
         raise HTTPException(404, "Аккаунт не найден.")
-    return accounts[i]
+    return accounts[idx]
+
 
 def name_of(me):
-    return (f"@{me.username}" if me.username else " ".join(x for x in [me.first_name, me.last_name] if x)) or "Telegram"
+    return (
+        f"@{me.username}" if me.username
+        else " ".join(x for x in [me.first_name, me.last_name] if x)
+    ) or "Telegram"
 
-class Config(BaseModel):
-    api_id: int
-    api_hash: str
-class Phone(BaseModel):
-    phone: str
-class Code(BaseModel):
-    phone: str
-    code: str
-class Password(BaseModel):
-    password: str
-class Message(BaseModel):
-    text: str
-    reply_to: Optional[int] = None
 
 @app.on_event("startup")
 async def startup():
@@ -78,33 +104,40 @@ async def startup():
     if not api_id or not api_hash:
         return
     import shutil
-    for i in range(15):
-        old = ROOT / f"console_acc_{i}.session"
-        session = SESSION_DIR / f"acc_{i}.session"
-        if old.exists() and not session.exists():
-            shutil.copy2(old, session)
+
+    for idx in range(15):
+        old_session = ROOT / f"console_acc_{idx}.session"
+        session = SESSION_DIR / f"acc_{idx}.session"
+        if old_session.exists() and not session.exists():
+            shutil.copy2(old_session, session)
         if session.exists():
             try:
-                client = TelegramClient(str(SESSION_DIR / f"acc_{i}"), api_id, api_hash)
+                client = TelegramClient(str(SESSION_DIR / f"acc_{idx}"), api_id, api_hash)
                 await client.connect()
                 if await client.is_user_authorized():
                     me = await client.get_me()
-                    accounts[i] = {"client": client, "name": name_of(me)}
+                    accounts[idx] = {"client": client, "name": name_of(me)}
                 else:
                     await client.disconnect()
-            except Exception as e:
-                print(f"Не удалось загрузить аккаунт {i}: {e}")
+            except Exception as exc:
+                print(f"Не удалось загрузить аккаунт {idx}: {exc}")
+
 
 @app.get("/", response_class=HTMLResponse)
 async def home():
     return HTML
+
 
 @app.post("/api/accounts/import-session")
 async def import_session(file: UploadFile = File(...)):
     require_config()
     if not (file.filename or "").lower().endswith(".session"):
         raise HTTPException(400, "Выберите файл Telegram .session")
-    idx = next((i for i in range(15) if i not in accounts and not (SESSION_DIR / f"acc_{i}.session").exists()), None)
+    idx = next(
+        (i for i in range(15)
+         if i not in accounts and not (SESSION_DIR / f"acc_{i}.session").exists()),
+        None,
+    )
     if idx is None:
         raise HTTPException(409, "Нет свободного слота аккаунта (максимум 15).")
     session_path = SESSION_DIR / f"acc_{idx}.session"
@@ -118,24 +151,35 @@ async def import_session(file: UploadFile = File(...)):
         if not await client.is_user_authorized():
             await client.disconnect()
             session_path.unlink(missing_ok=True)
-            raise HTTPException(401, "Сессия не авторизована или несовместима. Проверьте файл и API ID/Hash.")
+            raise HTTPException(
+                401,
+                "Сессия не авторизована или несовместима. Проверьте файл и API ID/Hash.",
+            )
         me = await client.get_me()
         accounts[idx] = {"client": client, "name": name_of(me)}
         return {"ok": True, "id": idx, "name": accounts[idx]["name"]}
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception as exc:
         try:
-            if session_path.exists(): session_path.unlink()
-        except Exception: pass
-        raise HTTPException(400, f"Не удалось импортировать сессию: {e}")
+            session_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise HTTPException(400, f"Не удалось импортировать сессию: {exc}")
     finally:
         await file.close()
 
+
 @app.get("/api/status")
 async def status():
-    return {"configured": bool(api_id and api_hash),
-            "accounts": [{"id": i, "name": a["name"]} for i, a in sorted(accounts.items())]}
+    return {
+        "configured": bool(api_id and api_hash),
+        "accounts": [
+            {"id": idx, "name": account["name"]}
+            for idx, account in sorted(accounts.items())
+        ],
+    }
+
 
 @app.post("/api/config")
 async def config(data: Config):
@@ -146,14 +190,14 @@ async def config(data: Config):
     save_config(data.api_id, data.api_hash)
     return {"ok": True}
 
+
 @app.post("/api/accounts/{idx}/request-code")
 async def request_code(idx: int, data: Phone):
     require_config()
     if not 0 <= idx < 15:
         raise HTTPException(400, "Номер аккаунта должен быть от 0 до 14.")
     if idx in accounts:
-        raise HTTPException(409, "Этот слот уже занят подключённым аккаунтом. Отключите его в разделе «Аккаунты».")
-    # Повторный запрос кода заменяет незавершённую попытку входа в этом слоте.
+        raise HTTPException(409, "Этот слот уже занят подключённым аккаунтом.")
     old_pending = pending.pop(idx, None)
     if old_pending:
         try:
@@ -164,72 +208,94 @@ async def request_code(idx: int, data: Phone):
     try:
         await client.connect()
         sent = await client.send_code_request(data.phone.strip())
-        pending[idx] = {"client": client, "phone": data.phone.strip(), "hash": sent.phone_code_hash}
+        pending[idx] = {
+            "client": client,
+            "phone": data.phone.strip(),
+            "hash": sent.phone_code_hash,
+        }
         return {"ok": True}
-    except Exception as e:
+    except Exception as exc:
         await client.disconnect()
-        raise HTTPException(400, str(e))
+        raise HTTPException(400, str(exc))
+
 
 @app.delete("/api/accounts/{idx}/pending")
 async def cancel_pending(idx: int):
-    p = pending.pop(idx, None)
-    if p:
-        await p["client"].disconnect()
+    attempt = pending.pop(idx, None)
+    if attempt:
+        await attempt["client"].disconnect()
     return {"ok": True}
+
 
 @app.post("/api/accounts/{idx}/sign-in")
 async def sign_in(idx: int, data: Code):
-    p = pending.get(idx)
-    if not p:
+    attempt = pending.get(idx)
+    if not attempt:
         raise HTTPException(400, "Сначала запросите код.")
-    if data.phone.strip() != p["phone"]:
+    if data.phone.strip() != attempt["phone"]:
         raise HTTPException(400, "Номер телефона не совпадает.")
     try:
-        await p["client"].sign_in(phone=p["phone"], code=data.code.strip(), phone_code_hash=p["hash"])
-        me = await p["client"].get_me()
-        accounts[idx] = {"client": p["client"], "name": name_of(me)}
+        await attempt["client"].sign_in(
+            phone=attempt["phone"],
+            code=data.code.strip(),
+            phone_code_hash=attempt["hash"],
+        )
+        me = await attempt["client"].get_me()
+        accounts[idx] = {"client": attempt["client"], "name": name_of(me)}
         pending.pop(idx, None)
         return {"ok": True, "name": accounts[idx]["name"]}
     except SessionPasswordNeededError:
         raise HTTPException(428, "Нужен пароль двухэтапной аутентификации.")
-    except Exception as e:
-        raise HTTPException(400, str(e))
+    except Exception as exc:
+        raise HTTPException(400, str(exc))
+
 
 @app.post("/api/accounts/{idx}/password")
 async def password(idx: int, data: Password):
-    p = pending.get(idx)
-    if not p:
+    attempt = pending.get(idx)
+    if not attempt:
         raise HTTPException(400, "Нет ожидающей авторизации.")
     try:
-        await p["client"].sign_in(password=data.password)
-        me = await p["client"].get_me()
-        accounts[idx] = {"client": p["client"], "name": name_of(me)}
+        await attempt["client"].sign_in(password=data.password)
+        me = await attempt["client"].get_me()
+        accounts[idx] = {"client": attempt["client"], "name": name_of(me)}
         pending.pop(idx, None)
         return {"ok": True, "name": accounts[idx]["name"]}
-    except Exception as e:
-        raise HTTPException(400, str(e))
+    except Exception as exc:
+        raise HTTPException(400, str(exc))
+
 
 @app.get("/api/accounts/{idx}/dialogs")
 async def get_dialogs(idx: int):
-    a = acc_or_404(idx)
+    account = acc_or_404(idx)
     try:
-        ds = await a["client"].get_dialogs(limit=200)
-        return [{"id": d.id, "name": d.name or "Без названия",
-                 "unread": d.unread_count or 0,
-                 "preview": ((d.message.message or "Медиа")[:100] if d.message else "")}
-                for d in ds if d.is_user or d.is_group or d.is_channel]
-    except Exception as e:
-        raise HTTPException(400, str(e))
+        dialogs = await account["client"].get_dialogs(limit=200)
+        return [
+            {
+                "id": dialog.id,
+                "name": dialog.name or "Без названия",
+                "unread": dialog.unread_count or 0,
+                "preview": (
+                    (dialog.message.message or "Медиа")[:100]
+                    if dialog.message else ""
+                ),
+            }
+            for dialog in dialogs
+            if dialog.is_user or dialog.is_group or dialog.is_channel
+        ]
+    except Exception as exc:
+        raise HTTPException(400, str(exc))
+
 
 @app.get("/api/accounts/{idx}/dialogs/{peer}/messages")
 async def get_messages(idx: int, peer: int):
-    a = acc_or_404(idx)
+    account = acc_or_404(idx)
     try:
-        entity = await a["client"].get_input_entity(peer)
-        ms = await a["client"].get_messages(entity, limit=60)
+        entity = await account["client"].get_input_entity(peer)
+        messages = await account["client"].get_messages(entity, limit=60)
         result = []
-        for m in reversed(ms):
-            mime = getattr(getattr(m, "file", None), "mime_type", None) or ""
+        for message in reversed(messages):
+            mime = getattr(getattr(message, "file", None), "mime_type", None) or ""
             media_kind = ""
             if mime.startswith("video/"):
                 media_kind = "video"
@@ -237,177 +303,205 @@ async def get_messages(idx: int, peer: int):
                 media_kind = "image"
             elif "tgsticker" in mime or "webm" in mime:
                 media_kind = "sticker"
-            elif m.media:
+            elif message.media:
                 media_kind = "file"
+
             reply_preview = ""
-            if m.reply_to_msg_id:
+            if message.reply_to_msg_id:
                 try:
-                    replied = await m.get_reply_message()
+                    replied = await message.get_reply_message()
                     if replied:
                         reply_preview = (replied.message or "[Медиа]")[:100]
                 except Exception:
                     pass
+
             sender = None
             try:
-                sender_obj = await m.get_sender()
+                sender_obj = await message.get_sender()
                 if sender_obj:
-                    sender_name = " ".join(x for x in [getattr(sender_obj, "first_name", ""), getattr(sender_obj, "last_name", "")] if x) or getattr(sender_obj, "title", "") or "Пользователь"
-                    sender = {"id": sender_obj.id, "name": sender_name,
-                              "username": getattr(sender_obj, "username", None),
-                              "is_bot": bool(getattr(sender_obj, "bot", False))}
+                    sender_name = " ".join(
+                        x for x in [
+                            getattr(sender_obj, "first_name", ""),
+                            getattr(sender_obj, "last_name", ""),
+                        ] if x
+                    ) or getattr(sender_obj, "title", "") or "Пользователь"
+                    sender = {
+                        "id": sender_obj.id,
+                        "name": sender_name,
+                        "username": getattr(sender_obj, "username", None),
+                        "is_bot": bool(getattr(sender_obj, "bot", False)),
+                    }
             except Exception:
                 pass
+
             result.append({
-                "id": m.id,
+                "id": message.id,
                 "sender": sender,
-                "text": m.message or ("[Стикер]" if media_kind == "sticker" else "[Медиа]" if m.media else ""),
-                "out": bool(m.out),
-                "date": m.date.isoformat() if m.date else "",
+                "text": message.message or (
+                    "[Стикер]" if media_kind == "sticker"
+                    else "[Медиа]" if message.media else ""
+                ),
+                "out": bool(message.out),
+                "date": message.date.isoformat() if message.date else "",
                 "media_kind": media_kind,
-                "media_url": f"/api/accounts/{idx}/dialogs/{peer}/messages/{m.id}/media" if m.media else "",
-                "reply_to": m.reply_to_msg_id,
-                "reply_preview": reply_preview
+                "media_url": (
+                    f"/api/accounts/{idx}/dialogs/{peer}/messages/{message.id}/media"
+                    if message.media else ""
+                ),
+                "reply_to": message.reply_to_msg_id,
+                "reply_preview": reply_preview,
             })
         return result
-    except Exception as e:
-        raise HTTPException(400, str(e))
+    except Exception as exc:
+        raise HTTPException(400, str(exc))
+
 
 @app.get("/api/accounts/{idx}/profile/{user_id}")
 async def get_peer_profile(idx: int, user_id: int):
-    a = acc_or_404(idx)
+    account = acc_or_404(idx)
     try:
-        entity = await a["client"].get_entity(user_id)
+        entity = await account["client"].get_entity(user_id)
         first = getattr(entity, "first_name", "") or ""
         last = getattr(entity, "last_name", "") or ""
         title = getattr(entity, "title", "") or ""
         name = " ".join(x for x in [first, last] if x) or title or "Профиль"
-        return {"id": entity.id, "name": name, "username": getattr(entity, "username", None),
-                "phone": getattr(entity, "phone", None), "bio": getattr(entity, "about", None),
-                "is_bot": bool(getattr(entity, "bot", False)),
-                "avatar_url": f"/api/accounts/{idx}/avatar/{entity.id}"}
-    except Exception as e:
-        raise HTTPException(400, str(e))
+        return {
+            "id": entity.id,
+            "name": name,
+            "username": getattr(entity, "username", None),
+            "phone": getattr(entity, "phone", None),
+            "bio": getattr(entity, "about", None),
+            "is_bot": bool(getattr(entity, "bot", False)),
+            "avatar_url": f"/api/accounts/{idx}/avatar/{entity.id}",
+        }
+    except Exception as exc:
+        raise HTTPException(400, str(exc))
+
 
 @app.get("/api/accounts/{idx}/avatar/{user_id}")
 async def get_avatar(idx: int, user_id: int):
-    a = acc_or_404(idx)
+    account = acc_or_404(idx)
     try:
-        entity = await a["client"].get_entity(user_id)
-        data = await a["client"].download_profile_photo(entity, file=bytes)
+        entity = await account["client"].get_entity(user_id)
+        data = await account["client"].download_profile_photo(entity, file=bytes)
         if not data:
             raise HTTPException(404, "У пользователя нет фотографии.")
-        from fastapi.responses import Response
-        return Response(content=data, media_type="image/jpeg", headers={"Cache-Control":"public, max-age=3600"})
+        return Response(
+            content=data,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "public, max-age=3600"},
+        )
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         raise HTTPException(404, "Не удалось загрузить аватар.")
+
 
 @app.get("/api/accounts/{idx}/dialogs/{peer}/messages/{message_id}/media")
 async def get_message_media(idx: int, peer: int, message_id: int):
-    a = acc_or_404(idx)
+    account = acc_or_404(idx)
     try:
-        entity = await a["client"].get_input_entity(peer)
-        msg = await a["client"].get_messages(entity, ids=message_id)
-        if not msg or not msg.media:
+        entity = await account["client"].get_input_entity(peer)
+        message = await account["client"].get_messages(entity, ids=message_id)
+        if not message or not message.media:
             raise HTTPException(404, "Медиа не найдено.")
         target = DOWNLOAD_DIR / f"acc{idx}_chat{peer}_msg{message_id}"
         existing = list(DOWNLOAD_DIR.glob(target.name + ".*"))
         if existing:
             path = existing[0]
         else:
-            downloaded = await msg.download_media(file=str(target))
+            downloaded = await message.download_media(file=str(target))
             if not downloaded:
                 raise HTTPException(404, "Не удалось загрузить медиа.")
             path = Path(downloaded)
         return FileResponse(path, filename=path.name)
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(400, str(e))
+    except Exception as exc:
+        raise HTTPException(400, str(exc))
 
 
 @app.post("/api/accounts/{idx}/dialogs/{peer}/send")
 async def send_message(idx: int, peer: int, data: Message):
-    a = acc_or_404(idx)
+    account = acc_or_404(idx)
     text = data.text.strip()
     if not text:
         raise HTTPException(400, "Пустое сообщение.")
     if len(text) > 4096:
         raise HTTPException(400, "Максимум 4096 символов.")
     try:
-        entity = await a["client"].get_input_entity(peer)
-        sent = await a["client"].send_message(entity, text, reply_to=data.reply_to)
-        return {"ok": True, "id": sent.id}
-    except Exception as e:
-        raise HTTPException(400, str(e))
+        entity = await account["client"].get_input_entity(peer)
+        sent_message = await account["client"].send_message(
+            entity, text, reply_to=data.reply_to
+        )
+        return {"ok": True, "id": sent_message.id}
+    except Exception as exc:
+        raise HTTPException(400, str(exc))
 
 
 def split_words(text: str, count: int):
     words = text.split()
     count = max(1, min(int(count), 100))
-    return [" ".join(words[i:i + count]) for i in range(0, len(words), count)]
+    return [
+        " ".join(words[i:i + count])
+        for i in range(0, len(words), count)
+    ]
+
 
 async def queue_worker(idx: int, peer: int, chunks: list, delay: float, reply_to):
-    global queue_state
-    a = accounts.get(idx)
-    if not a:
+    """Send queue items sequentially and respect Telegram FloodWait responses."""
+    account = accounts.get(idx)
+    if not account:
         queue_state["last_error"] = "Аккаунт отключён."
         queue_state["task"] = None
         return
+
     try:
-        entity = await a["client"].get_input_entity(peer)
-        # Apply the user's delay setting equally in private chats and groups.
-        # Telegram-side FloodWait limits are still handled below.
-        effective_delay = float(delay)
+        entity = await account["client"].get_input_entity(peer)
+        base_delay = max(0.05, min(float(delay), 60.0))
+
         for chunk in chunks:
             while queue_state["paused"] and not queue_state["stop"]:
                 await asyncio.sleep(0.2)
             if queue_state["stop"]:
                 break
+
             if queue_state["caps"]:
                 chunk = chunk.upper()
+
             try:
-                # Как в оригинале: запускаем отправку без ожидания ответа Telegram.
-                # Интервал между постановками отправок регулируется delay ниже.
-                async def _send_and_track(client, target, message, reply):
-                    try:
-                        await client.send_message(target, message, reply_to=reply)
-                        queue_state["sent"] += 1
-                    except Exception as send_error:
-                        queue_state["last_error"] = str(send_error)
-                    finally:
-                        queue_state["pending"] = max(0, queue_state.get("pending", 0) - 1)
-                        queue_state["remaining"] = max(0, queue_state["total"] - queue_state["sent"] - queue_state.get("pending", 0))
-                queue_state["pending"] = queue_state.get("pending", 0) + 1
-                queue_state["remaining"] = max(0, queue_state["total"] - queue_state["sent"] - queue_state["pending"])
-                asyncio.create_task(_send_and_track(a["client"], entity, chunk, reply_to))
-            except Exception as e:
-                try:
-                    from telethon.errors import FloodWaitError
-                    if isinstance(e, FloodWaitError):
-                        queue_state["last_error"] = (
-                            f"Telegram ограничил отправку (FloodWait {e.seconds} сек.). "
-                            "Очередь остановлена — дождитесь срока и запустите продолжение."
-                        )
-                    else:
-                        queue_state["last_error"] = str(e)
-                except Exception:
-                    queue_state["last_error"] = str(e)
+                await account["client"].send_message(
+                    entity, chunk, reply_to=reply_to
+                )
+                queue_state["sent"] += 1
+            except FloodWaitError as exc:
+                queue_state["last_error"] = (
+                    f"Telegram ограничил отправку на {exc.seconds} сек. "
+                    "Очередь остановлена; повторите после окончания ограничения."
+                )
                 queue_state["paused"] = True
                 break
-            base_delay = max(0.05, min(float(effective_delay), 60.0))
-            # В оригинале rand-режим слегка меняет задержку для каждой части.
-            cur_delay = random.uniform(base_delay * 0.5, base_delay * 1.5) if queue_state.get("randomized") else base_delay
-            await asyncio.sleep(cur_delay)
+            except Exception as exc:
+                queue_state["last_error"] = str(exc)
+                queue_state["paused"] = True
+                break
+
+            queue_state["remaining"] = max(
+                0, queue_state["total"] - queue_state["sent"]
+            )
+            if queue_state["sent"] < queue_state["total"]:
+                await asyncio.sleep(base_delay)
+
         if queue_state["stop"]:
             queue_state["last_error"] = "Очередь остановлена."
-        elif not queue_state["last_error"]:
+        elif not queue_state["last_error"] and queue_state["remaining"] == 0:
             queue_state["last_error"] = "Очередь завершена."
     finally:
+        queue_state["pending"] = 0
         queue_state["task"] = None
         queue_state["paused"] = False
         queue_state["stop"] = False
+
 
 @app.post("/api/accounts/{idx}/dialogs/{peer}/queue")
 async def start_queue(idx: int, peer: int, data: QueueRequest):
@@ -423,22 +517,39 @@ async def start_queue(idx: int, peer: int, data: QueueRequest):
     if data.random_max > 0:
         pos = 0
         while pos < len(words):
-            n = random.randint(1, max(1, min(data.random_max, 20)))
-            chunks.append(" ".join(words[pos:pos+n]))
-            pos += n
+            amount = random.randint(1, max(1, min(data.random_max, 20)))
+            chunks.append(" ".join(words[pos:pos + amount]))
+            pos += amount
     else:
         chunks = split_words(text, data.words_per_message)
-    if any(len(c) > 4096 for c in chunks):
+    if any(len(chunk) > 4096 for chunk in chunks):
         raise HTTPException(400, "Одна часть превышает лимит Telegram в 4096 символов.")
-    queue_state.update({"paused": False, "stop": False, "remaining": len(chunks), "pending": 0,
-                        "sent": 0, "total": len(chunks), "account": idx, "peer": peer,
-                        "chat_name": str(peer), "last_error": "", "randomized": data.random_max > 0})
-    queue_state["task"] = asyncio.create_task(queue_worker(idx, peer, chunks, data.delay, data.reply_to))
+
+    queue_state.update({
+        "paused": False,
+        "stop": False,
+        "remaining": len(chunks),
+        "pending": 0,
+        "sent": 0,
+        "total": len(chunks),
+        "account": idx,
+        "peer": peer,
+        "chat_name": str(peer),
+        "last_error": "",
+        "randomized": data.random_max > 0,
+    })
+    queue_state["task"] = asyncio.create_task(
+        queue_worker(idx, peer, chunks, data.delay, data.reply_to)
+    )
     return {"ok": True, "parts": len(chunks)}
+
 
 @app.get("/api/queue")
 async def get_queue():
-    return {k: v for k, v in queue_state.items() if k != "task"} | {"active": queue_state["task"] is not None}
+    return {
+        key: value for key, value in queue_state.items() if key != "task"
+    } | {"active": queue_state["task"] is not None}
+
 
 @app.post("/api/queue/pause")
 async def pause_queue():
@@ -446,6 +557,7 @@ async def pause_queue():
         raise HTTPException(400, "Очередь не запущена.")
     queue_state["paused"] = True
     return {"ok": True}
+
 
 @app.post("/api/queue/resume")
 async def resume_queue():
@@ -455,33 +567,41 @@ async def resume_queue():
     queue_state["paused"] = False
     return {"ok": True}
 
+
 @app.post("/api/queue/stop")
 async def stop_queue():
     queue_state["stop"] = True
     queue_state["paused"] = False
     return {"ok": True}
 
+
 @app.post("/api/queue/caps")
 async def toggle_caps():
     queue_state["caps"] = not queue_state["caps"]
     return {"caps": queue_state["caps"]}
 
+
 @app.post("/api/accounts/{idx}/dialogs/{peer}/photo")
 async def download_photo(idx: int, peer: int):
-    a = acc_or_404(idx)
+    account = acc_or_404(idx)
     try:
-        entity = await a["client"].get_input_entity(peer)
-        msgs = await a["client"].get_messages(entity, limit=50)
-        for msg in msgs:
-            if msg.photo:
-                path = await msg.download_media(file=str(DOWNLOAD_DIR) + os.sep)
+        entity = await account["client"].get_input_entity(peer)
+        messages = await account["client"].get_messages(entity, limit=50)
+        for message in messages:
+            if message.photo:
+                path = await message.download_media(file=str(DOWNLOAD_DIR) + os.sep)
                 if path:
-                    return {"ok": True, "filename": Path(path).name, "url": "/downloads/" + Path(path).name}
+                    return {
+                        "ok": True,
+                        "filename": Path(path).name,
+                        "url": "/downloads/" + Path(path).name,
+                    }
         raise HTTPException(404, "Фото в последних 50 сообщениях не найдено.")
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(400, str(e))
+    except Exception as exc:
+        raise HTTPException(400, str(exc))
+
 
 @app.get("/downloads/{filename}")
 async def download_file(filename: str):
@@ -490,15 +610,17 @@ async def download_file(filename: str):
         raise HTTPException(404, "Файл не найден.")
     return FileResponse(path, filename=path.name)
 
+
 @app.delete("/api/accounts/{idx}")
 async def remove_account(idx: int):
-    a = accounts.pop(idx, None)
-    if a:
-        await a["client"].disconnect()
-    p = pending.pop(idx, None)
-    if p:
-        await p["client"].disconnect()
+    account = accounts.pop(idx, None)
+    if account:
+        await account["client"].disconnect()
+    attempt = pending.pop(idx, None)
+    if attempt:
+        await attempt["client"].disconnect()
     return {"ok": True}
+
 
 HTML = r"""<!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Telegram Desk</title>
@@ -525,22 +647,6 @@ aside,main{min-width:0;min-height:0;background:var(--panel);display:flex;flex-di
  .dialog{border-radius:20px;padding:19px}.toast{bottom:calc(14px + env(safe-area-inset-bottom));max-width:90%;text-align:center}
 }
 @media(min-width:761px){.layout.chat-open>aside:nth-child(2){display:flex}.layout.chat-open>main{display:flex}}
-
-/* Requested chat controls */
-.chatbody{position:relative}
-#scrollDown{position:absolute;right:18px;bottom:18px;z-index:4;display:none;width:42px;height:42px;padding:0;border-radius:50%;font-size:20px;box-shadow:0 4px 14px #0005}
-#scrollDown.visible{display:block}
-.composer textarea{height:auto;min-height:46px;max-height:35vh;overflow-y:auto;resize:none;line-height:1.4}
-.tools-grip{display:none}
-@media(max-width:760px){
- .tools-grip{display:flex;justify-content:center;align-items:center;height:22px;min-height:22px;cursor:ns-resize;touch-action:pan-y;width:100%;border-radius:10px 10px 0 0}
- .tools-grip:after{content:'';width:42px;height:4px;border-radius:4px;background:var(--muted);opacity:.7}
- .mobile-tools.collapsed{max-height:22px!important;height:22px!important;overflow:hidden!important;padding:0 10px!important;gap:0!important}
- .mobile-tools.collapsed>*:not(.tools-grip){display:none!important}
- .mobile-tools:not(.collapsed){max-height:31dvh;overflow:auto}
-}
-
-/* Requested chat controls */
 .chatbody{position:relative}
 #scrollDown{position:absolute;right:18px;bottom:18px;z-index:4;display:none;width:42px;height:42px;padding:0;border-radius:50%;font-size:20px;box-shadow:0 4px 14px #0005}
 #scrollDown.visible{display:block}
@@ -556,7 +662,7 @@ aside,main{min-width:0;min-height:0;background:var(--panel);display:flex;flex-di
 </style></head><body>
 <div class="layout"><aside><div class="brand"><span class="logo">T</span>Telegram Desk</div><div class="nav active" onclick="nav(this,'chats')">▣　Сообщения</div><div class="nav" onclick="nav(this,'accounts')">♙　Аккаунты</div><div class="nav" onclick="nav(this,'settings')">⚙　Настройки</div><div class="spacer"></div><div class="muted" style="padding:14px;font-size:11px" id="server">Проверка сервера…</div></aside>
 <aside><div class="head"><h3 id="listTitle">Диалоги</h3><input id="search" placeholder="Поиск…" oninput="filterList()"></div><div class="list" id="list"><div class="empty">Загрузка…</div></div><div style="padding:12px"><button class="primary" style="width:100%" onclick="addAccount()">＋ Аккаунт</button></div></aside>
-<main><div class="chathead"><button class="backbtn" onclick="backToDialogs()" aria-label="Назад">←</button><div class="avatar" id="peerAvatar">T</div><div><b id="peerName">Выберите диалог</b><div class="muted" id="peerInfo" style="font-size:12px">Telegram Desk</div></div><div class="spacer"></div><button onclick="loadMessages()">↻</button></div><div class="chatbody" id="messages"><button id="scrollDown" title="Вниз" onclick="scrollToLatest()">↓</button><div class="empty">Добавьте аккаунт, чтобы начать.</div></div><div class="mobile-tools" id="mobileTools" style="padding:10px 13px;border-top:1px solid var(--line);display:flex;gap:8px;flex-wrap:wrap;align-items:center"><div class="tools-grip" id="toolsGrip" title="Свернуть / развернуть настройки"></div><div class="tools-grip" id="toolsGrip" title="Свернуть / развернуть настройки"></div>
+<main><div class="chathead"><button class="backbtn" onclick="backToDialogs()" aria-label="Назад">←</button><div class="avatar" id="peerAvatar">T</div><div><b id="peerName">Выберите диалог</b><div class="muted" id="peerInfo" style="font-size:12px">Telegram Desk</div></div><div class="spacer"></div><button onclick="loadMessages()">↻</button></div><div class="chatbody" id="messages"><button id="scrollDown" title="Вниз" onclick="scrollToLatest()">↓</button><div class="empty">Добавьте аккаунт, чтобы начать.</div></div><div class="mobile-tools" id="mobileTools" style="padding:10px 13px;border-top:1px solid var(--line);display:flex;gap:8px;flex-wrap:wrap;align-items:center"><div class="tools-grip" id="toolsGrip" title="Свернуть / развернуть настройки"></div>
 <label class="muted">Слов/часть <input id="wordsPart" type="number" min="1" max="100" value="1" style="width:58px;padding:7px"></label>
 <label class="muted">Задержка, сек <input id="delay" type="number" min="0.05" max="60" step="0.05" value="0.3" style="width:68px;padding:7px"></label>
 <label class="muted">Rand max <input id="randMax" type="number" min="0" max="20" value="0" style="width:58px;padding:7px"></label>
@@ -582,7 +688,7 @@ async function api(url,opt={}){let r=await fetch(url,{headers:{'Content-Type':'a
 function toast(t){const el=$('toast');if(!el)return;el.textContent=t;el.classList.add('show');setTimeout(()=>el.classList.remove('show'),2800)}
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function modal(s){$('dialog').innerHTML=s;$('modal').classList.add('open')}
-function closeModal(){ $('modal').classList.remove('open') }
+function closeModal(){$('modal').classList.remove('open')}
 $('modal').addEventListener('click',e=>{if(e.target===$('modal'))closeModal()});
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal()});
 async function refresh(){try{let s=await api('/api/status');accounts=s.accounts;$('server').textContent='● Сервер подключён';if(!s.configured){$('list').innerHTML='<div class="empty">Откройте настройки и введите API ID и Hash.</div>';return}renderAccounts();if(aid===null&&accounts.length)chooseAccount(accounts[0].id)}catch(e){$('server').textContent='Сервер недоступен';$('list').innerHTML='<div class="empty">Запустите main.py в Pydroid.</div>'}}
@@ -592,19 +698,15 @@ function renderDialogs(){$('listTitle').textContent='Диалоги';$('list').i
 function filterList(){let q=$('search').value.toLowerCase();document.querySelectorAll('#list .item').forEach(x=>x.style.display=(x.dataset.name||'').includes(q)?'flex':'none')}
 async function choosePeer(id,name){peer=id;document.querySelector('.layout').classList.add('chat-open');$('peerName').textContent=name;$('peerAvatar').innerHTML=`<img src="/api/accounts/${aid}/avatar/${peer}" onerror="this.remove();$('peerAvatar').textContent='${esc(name[0])}'">`;$('peerAvatar').onclick=()=>showProfile(peer);$('peerInfo').textContent='Аккаунт #'+aid;renderDialogs();await loadMessages()}
 async function showProfile(userId){try{const p=await api(`/api/accounts/${aid}/profile/${userId}`);modal(`<div style="text-align:center;padding:12px"><img src="${p.avatar_url}" onerror="this.style.display='none'" style="width:92px;height:92px;object-fit:cover;border-radius:50%;background:var(--panel);margin-bottom:12px"><h2>${esc(p.name)}</h2>${p.username?`<div class="muted">@${esc(p.username)}</div>`:''}${p.is_bot?'<div class="muted">Бот</div>':''}${p.bio?`<p>${esc(p.bio)}</p>`:''}${p.phone?`<p>Телефон: ${esc(p.phone)}</p>`:''}<button onclick="closeModal()">Закрыть</button></div>`)}catch(e){toast(e.message)}}
-
-/* FIX: update DOM only for new/changed messages; preserve current scroll position.
-   The old implementation replaced all children and forced scrollTop=999999 every 5s. */
 async function loadMessages(){
  if(aid===null||peer===null)return;
  const chat=$('messages');
  const nearBottom=chat.scrollHeight-chat.scrollTop-chat.clientHeight<80;
  const previousTop=chat.scrollTop;
+ const requestedAccount=aid,requestedPeer=peer;
  try{
-  const ms=await api(`/api/accounts/${aid}/dialogs/${peer}/messages`);
-  // Ignore stale responses if the user switched chats while the request was in flight.
-  if(aid===null||peer===null)return;
-  const expectedPeer=peer;
+  const ms=await api(`/api/accounts/${requestedAccount}/dialogs/${requestedPeer}/messages`);
+  if(aid!==requestedAccount||peer!==requestedPeer)return;
   const existing=new Map([...chat.querySelectorAll('.bubble[data-message-id]')].map(el=>[el.dataset.messageId,el]));
   for(const m of ms){
    const id=String(m.id);
@@ -615,112 +717,73 @@ async function loadMessages(){
    else if(m.media_url&&m.media_kind==='sticker')media=`<video src="${m.media_url}" autoplay loop muted playsinline style="display:block;width:180px;max-width:100%;border-radius:12px;margin:6px 0"></video>`;
    else if(m.media_url)media=`<a href="${m.media_url}" target="_blank">📎 Открыть вложение</a>`;
    let quoted=m.reply_to?`<div style="border-left:3px solid var(--accent);padding:4px 7px;margin-bottom:6px;font-size:12px;opacity:.8">↪ ${esc(m.reply_preview||('Ответ на #'+m.reply_to))}</div>`:'';
-   const senderLine=(!m.out&&m.sender&&String(m.sender.id)!==String(peer))?`<div class="senderline" style="display:flex;align-items:center;gap:6px;cursor:pointer" onclick="showProfile(${Number(m.sender.id)})"><img src="/api/accounts/${aid}/avatar/${Number(m.sender.id)}" onerror="this.style.display='none'" style="width:24px;height:24px;object-fit:cover;border-radius:50%;flex-shrink:0"><span>${esc(m.sender.name)}</span></div>`:'';
+   const senderLine=(!m.out&&m.sender&&String(m.sender.id)!==String(peer))?`<div class="senderline" style="display:flex;align-items:center;gap:6px;cursor:pointer" onclick="showProfile(${Number(m.sender.id)})"><img src="/api/accounts/${requestedAccount}/avatar/${Number(m.sender.id)}" onerror="this.style.display='none'" style="width:24px;height:24px;object-fit:cover;border-radius:50%;flex-shrink:0"><span>${esc(m.sender.name)}</span></div>`:'';
    const html=`${senderLine}${quoted}${esc(m.text)}${media}<div class="stamp">${m.date?new Date(m.date).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'}):''} · #${m.id} <button onclick="setReply(${m.id},'${encodeURIComponent((m.text||m.reply_preview||'Медиа').slice(0,80))}')" style="margin-left:6px;padding:2px 7px;font-size:11px">Ответить</button></div>`;
-   if(!el){
-    el=document.createElement('div');
-    el.className='bubble '+(m.out?'mine':'');
-    el.dataset.messageId=id;
-    el.innerHTML=html;
-    chat.appendChild(el);
-   }else{
-    // Update only if content actually changed (e.g. edited message).
-    if(el.innerHTML!==html)el.innerHTML=html;
-    el.className='bubble '+(m.out?'mine':'');
-   }
+   if(!el){el=document.createElement('div');el.className='bubble '+(m.out?'mine':'');el.dataset.messageId=id;el.innerHTML=html;chat.appendChild(el);}
+   else{if(el.innerHTML!==html)el.innerHTML=html;el.className='bubble '+(m.out?'mine':'');}
    existing.delete(id);
   }
-  // Remove messages that are no longer in the server's latest 60-message window.
   for(const obsolete of existing.values())obsolete.remove();
-  if(nearBottom)chat.scrollTop=chat.scrollHeight;
-  else chat.scrollTop=previousTop;
+  if(nearBottom)chat.scrollTop=chat.scrollHeight;else chat.scrollTop=previousTop;
   $('scrollDown')?.classList.toggle('visible',!nearBottom&&!!chat.querySelector('.bubble'));
  }catch(e){toast(e.message)}
 }
-
 function scrollToLatest(){const box=$('messages');box.scrollTo({top:box.scrollHeight,behavior:'smooth'});}
 const messageBox=$('messages');
-messageBox.addEventListener('scroll',()=>{
- const atBottom=messageBox.scrollHeight-messageBox.scrollTop-messageBox.clientHeight<90;
- $('scrollDown')?.classList.toggle('visible',!atBottom&&!!messageBox.querySelector('.bubble'));
-});
-function resizeComposer(){
- const field=$('msg');field.style.height='auto';
- field.style.height=Math.min(field.scrollHeight,field.parentElement.clientHeight*0.65,window.innerHeight*0.35)+'px';
-}
+messageBox.addEventListener('scroll',()=>{const atBottom=messageBox.scrollHeight-messageBox.scrollTop-messageBox.clientHeight<90;$('scrollDown')?.classList.toggle('visible',!atBottom&&!!messageBox.querySelector('.bubble'));});
+function resizeComposer(){const el=$('msg');if(!el)return;el.style.height='auto';el.style.height=Math.min(el.scrollHeight,window.innerHeight*0.35)+'px';el.style.overflowY=el.scrollHeight>window.innerHeight*0.35?'auto':'hidden';}
 $('msg').addEventListener('input',resizeComposer);
 $('msg').addEventListener('focus',resizeComposer);
 $('toolsGrip')?.addEventListener('click',()=> $('mobileTools')?.classList.toggle('collapsed'));
 let toolsTouchStart=0;
 $('toolsGrip')?.addEventListener('touchstart',e=>{toolsTouchStart=e.touches[0].clientY},{passive:true});
-function resizeComposer(){const el=$('msg');if(!el)return;el.style.height='auto';el.style.height=Math.min(el.scrollHeight,window.innerHeight*0.35)+'px';el.style.overflowY=el.scrollHeight>window.innerHeight*0.35?'auto':'hidden'}
 $('msg')?.addEventListener('input',resizeComposer);
-$('toolsGrip')?.addEventListener('touchend',e=>{
- const delta=e.changedTouches[0].clientY-toolsTouchStart;
- if(Math.abs(delta)>25)$('mobileTools').classList.toggle('collapsed',delta>0);
-});
+$('toolsGrip')?.addEventListener('touchend',e=>{const delta=e.changedTouches[0].clientY-toolsTouchStart;if(Math.abs(delta)>25)$('mobileTools').classList.toggle('collapsed',delta>0);});
 function setReply(id,preview){preview=decodeURIComponent(preview);$('replyTo').value=id;$('replyLabel').textContent='Ответ на #'+id+' · '+preview;$('replyBanner').style.display='block';$('msg').focus()}
 function clearReply(){$('replyTo').value='';$('replyBanner').style.display='none';$('replyLabel').textContent=''}
-async function send(){let text=$('msg').value.trim();if(!text)return;if(aid===null||peer===null)return toast('Сначала выберите чат');try{
-let reply=$('replyTo').value.trim(), rand=+$('randMax').value, words=+$('wordsPart').value||1;
-let useQueue=$('autoChunk').checked||rand>0||text.split(/\\s+/).length>words;
-if(useQueue){let r=await api(`/api/accounts/${aid}/dialogs/${peer}/queue`,{method:'POST',body:JSON.stringify({text,words_per_message:words,delay:Math.max(0.05,+$('delay').value||0.3),random_max:rand,reply_to:reply?+reply:null})});toast('Добавлено в очередь: '+r.parts+' частей');$('msg').value='';resizeComposer();clearReply();refreshQueue()}
-else{await api(`/api/accounts/${aid}/dialogs/${peer}/send`,{method:'POST',body:JSON.stringify({text,reply_to:reply?+reply:null})});$('msg').value='';resizeComposer();clearReply();await loadMessages()}
-}catch(e){toast(e.message)}}
+async function send(){
+ let text=$('msg').value.trim();if(!text)return;if(aid===null||peer===null)return toast('Сначала выберите чат');
+ try{
+  let reply=$('replyTo').value.trim(),rand=+$('randMax').value,words=+$('wordsPart').value||1;
+  let useQueue=$('autoChunk').checked||rand>0||text.split(/\s+/).length>words;
+  if(useQueue){let r=await api(`/api/accounts/${aid}/dialogs/${peer}/queue`,{method:'POST',body:JSON.stringify({text,words_per_message:words,delay:Math.max(0.05,+$('delay').value||0.3),random_max:rand,reply_to:reply?+reply:null})});toast('Добавлено в очередь: '+r.parts+' частей');$('msg').value='';resizeComposer();clearReply();refreshQueue();}
+  else{await api(`/api/accounts/${aid}/dialogs/${peer}/send`,{method:'POST',body:JSON.stringify({text,reply_to:reply?+reply:null})});$('msg').value='';resizeComposer();clearReply();await loadMessages();}
+ }catch(e){toast(e.message)}
+}
 async function queueAction(action){try{await api('/api/queue/'+action,{method:'POST'});refreshQueue()}catch(e){toast(e.message)}}
-async function refreshQueue(){try{let q=await api('/api/queue');$('queueInfo').textContent=q.active?(q.paused?'⏸ Пауза':'▶ Отправка')+' · '+q.sent+'/'+q.total+' · в пути '+(q.pending||0)+' · осталось '+q.remaining+(q.last_error?' · '+q.last_error:''):(q.last_error||'Очередь не запущена')}catch(e){}}
+async function refreshQueue(){try{let q=await api('/api/queue');$('queueInfo').textContent=q.active?(q.paused?'⏸ Пауза':'▶ Отправка')+' · '+q.sent+'/'+q.total+' · осталось '+q.remaining+(q.last_error?' · '+q.last_error:''):(q.last_error||'Очередь не запущена')}catch(e){}}
 async function toggleCaps(){try{let r=await api('/api/queue/caps',{method:'POST'});$('capsMode').checked=r.caps}catch(e){toast(e.message)}}
 async function getPhoto(){if(aid===null||peer===null)return toast('Сначала выберите чат');try{let r=await api(`/api/accounts/${aid}/dialogs/${peer}/photo`,{method:'POST'});toast('Фото скачано: '+r.filename);window.open(r.url,'_blank')}catch(e){toast(e.message)}}
 function pickTextFile(){$('filePicker').click()}
-function readTextFile(el){let f=el.files[0];if(!f)return;let r=new FileReader();r.onload=()=>{$('msg').value=String(r.result||'');toast('Текст загружен из '+f.name)};r.readAsText(f);el.value=''}
+function readTextFile(el){let f=el.files[0];if(!f)return;let r=new FileReader();r.onload=()=>{$('msg').value=String(r.result||'');resizeComposer();toast('Текст загружен из '+f.name)};r.readAsText(f);el.value=''}
 function addAccount(){modal(`<h3>Добавить Telegram</h3><p class="muted">Код придёт в официальный Telegram. Не передавайте его другим людям.</p><div class="field"><label>Номер телефона</label><input id="phone" placeholder="+7…"></div><div class="actions"><button onclick="closeModal()">Отмена</button><button class="primary" onclick="requestCode()">Получить код</button></div>`)}
 async function requestCode(){try{let phone=$('phone').value.trim();let used=accounts.map(a=>a.id);loginIdx=Array.from({length:15},(_,i)=>i).find(i=>!used.includes(i));if(loginIdx===undefined)throw Error('Достигнут лимит в 15 аккаунтов');await api(`/api/accounts/${loginIdx}/request-code`,{method:'POST',body:JSON.stringify({phone})});modal(`<h3>Код подтверждения</h3><div class="field"><label>Код из Telegram</label><input id="code"></div><div class="actions"><button onclick="cancelLogin()">Отмена</button><button class="primary" onclick="signIn('${phone.replace(/'/g,"")}')">Войти</button></div>`)}catch(e){toast(e.message)}}
-async function cancelLogin(){if(loginIdx!==null){try{await api(`/api/accounts/${loginIdx}/pending`,{method:'DELETE'})}catch(e){}}close();loginIdx=null}
-async function signIn(phone){try{await api(`/api/accounts/${loginIdx}/sign-in`,{method:'POST',body:JSON.stringify({phone,code:$('code').value.trim()})});close();await refresh();toast('Аккаунт подключён')}catch(e){if(e.message.includes('пароль'))modal(`<h3>Пароль 2FA</h3><input id="pwd" type="password" placeholder="Пароль двухэтапной защиты"><div class="actions"><button onclick="closeModal()">Отмена</button><button class="primary" onclick="signPassword()">Продолжить</button></div>`);else toast(e.message)}}
-async function signPassword(){try{await api(`/api/accounts/${loginIdx}/password`,{method:'POST',body:JSON.stringify({password:$('pwd').value})});close();await refresh()}catch(e){toast(e.message)}}
+async function cancelLogin(){if(loginIdx!==null){try{await api(`/api/accounts/${loginIdx}/pending`,{method:'DELETE'})}catch(e){}}closeModal();loginIdx=null}
+async function signIn(phone){try{await api(`/api/accounts/${loginIdx}/sign-in`,{method:'POST',body:JSON.stringify({phone,code:$('code').value.trim()})});closeModal();await refresh();toast('Аккаунт подключён')}catch(e){if(e.message.includes('пароль'))modal(`<h3>Пароль 2FA</h3><input id="pwd" type="password" placeholder="Пароль двухэтапной защиты"><div class="actions"><button onclick="closeModal()">Отмена</button><button class="primary" onclick="signPassword()">Продолжить</button></div>`);else toast(e.message)}}
+async function signPassword(){try{await api(`/api/accounts/${loginIdx}/password`,{method:'POST',body:JSON.stringify({password:$('pwd').value})});closeModal();loginIdx=null;await refresh()}catch(e){toast(e.message)}}
 function settings(){modal(`<h3>Настройки API</h3><p class="muted">Получите собственные API ID и API Hash на my.telegram.org. Не используйте чужие ключи.</p><div class="field"><label>API ID</label><input id="apiid" type="number"></div><div class="field"><label>API Hash</label><input id="hash"></div><div class="actions"><button onclick="closeModal()">Закрыть</button><button class="primary" onclick="saveConfig()">Сохранить</button></div>`)}
-async function saveConfig(){try{await api('/api/config',{method:'POST',body:JSON.stringify({api_id:+$('apiid').value,api_hash:$('hash').value})});close();await refresh();toast('Настройки сохранены')}catch(e){toast(e.message)}}
+async function saveConfig(){try{await api('/api/config',{method:'POST',body:JSON.stringify({api_id:+$('apiid').value,api_hash:$('hash').value})});closeModal();await refresh();toast('Настройки сохранены')}catch(e){toast(e.message)}}
 function accountManage(){modal(`<h3>Аккаунты</h3>${accounts.map(a=>`<div class="item"><div class="avatar">${esc(a.name[0])}</div><div style="flex:1">${esc(a.name)} <span class="muted">#${a.id}</span></div><button onclick="removeAccount(${a.id})">Отключить</button></div>`).join('')||'<p class="muted">Нет подключённых аккаунтов</p>'}<div class="field"><label>Импорт готовой Telegram-сессии (.session)</label><input id="sessionUpload" type="file" accept=".session" onchange="importSession(this)"></div><div class="actions"><button onclick="closeModal()">Закрыть</button><button onclick="closeModal();addAccount()">＋ Войти по номеру</button></div>`)}
-async function importSession(el){const f=el.files&&el.files[0];if(!f)return;try{const fd=new FormData();fd.append('file',f);const r=await fetch('/api/accounts/import-session',{method:'POST',body:fd});const d=await r.json();if(!r.ok)throw Error(d.detail||'Ошибка импорта');close();await refresh();toast('Сессия импортирована: '+d.name+' (#'+d.id+')')}catch(e){toast(e.message)}finally{el.value=''}}
-async function removeAccount(id){if(!confirm('Отключить аккаунт?'))return;try{await api('/api/accounts/'+id,{method:'DELETE'});aid=null;close();await refresh()}catch(e){toast(e.message)}}
+async function importSession(el){const f=el.files&&el.files[0];if(!f)return;try{const fd=new FormData();fd.append('file',f);const r=await fetch('/api/accounts/import-session',{method:'POST',body:fd});const d=await r.json();if(!r.ok)throw Error(d.detail||'Ошибка импорта');closeModal();await refresh();toast('Сессия импортирована: '+d.name+' (#'+d.id+')')}catch(e){toast(e.message)}finally{el.value=''}}
+async function removeAccount(id){if(!confirm('Отключить аккаунт?'))return;try{await api('/api/accounts/'+id,{method:'DELETE'});aid=null;closeModal();await refresh()}catch(e){toast(e.message)}}
 function backToDialogs(){document.querySelector('.layout').classList.remove('chat-open');peer=null;renderDialogs()}
 function nav(el,p){document.querySelectorAll('.nav').forEach(x=>x.classList.remove('active'));el.classList.add('active');if(p==='settings')settings();if(p==='accounts')accountManage()}
 $('capsMode').addEventListener('change',toggleCaps);
-// Persist the message controls locally so their values survive page reloads.
 (function restoreAndPersistControls(){
  const ids=['wordsPart','delay','randMax','wpm','autoChunk','capsMode'];
- try{
-  ids.forEach(id=>{
-   const el=$(id); if(!el)return;
-   const saved=localStorage.getItem('telegramDesk:'+id);
-   if(saved!==null){
-    if(el.type==='checkbox')el.checked=saved==='true';
-    else el.value=saved;
-   }
-   const save=()=>localStorage.setItem('telegramDesk:'+id,el.type==='checkbox'?String(el.checked):el.value);
-   el.addEventListener('change',save);
-   el.addEventListener('input',save);
-  });
- }catch(e){console.warn('Не удалось сохранить настройки в браузере',e)}
+ try{ids.forEach(id=>{const el=$(id);if(!el)return;const saved=localStorage.getItem('telegramDesk:'+id);if(saved!==null){if(el.type==='checkbox')el.checked=saved==='true';else el.value=saved;}const save=()=>localStorage.setItem('telegramDesk:'+id,el.type==='checkbox'?String(el.checked):el.value);el.addEventListener('change',save);el.addEventListener('input',save);});}
+ catch(e){console.warn('Не удалось сохранить настройки в браузере',e)}
 })();
-
 refresh();setInterval(()=>{if(peer!==null)loadMessages();refreshQueue()},5000);
 </script></body></html>"""
 
- if __name__ == "__main__":
+
+if __name__ == "__main__":
     import uvicorn
 
-    host = "0.0.0.0"
-    port = int(os.environ.get("PORT", 8000))
-
-    print("=" * 48)
+    print("\n" + "=" * 48)
     print(" Telegram Desk запущен!")
-    print(f" Порт: {port}")
-    print("=" * 48)
-
-    uvicorn.run(
-        app,
-        host=host,
-        port=port,
-        log_level="info"
-    )
+    print(" Откройте на телефоне: http://127.0.0.1:8000")
+    print(" Остановка: Ctrl+C")
+    print("=" * 48 + "\n")
+    uvicorn.run(app, host="127.0.0.1", port=8000, log_level="warning")
